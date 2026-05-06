@@ -77,6 +77,10 @@ set(SOURCES
     ../../src/main.cpp
     ../../src/misc/logging.cpp
     ../../include/package/yyjson/yyjson.c
+    ../../src/tushare/http.cpp
+    ../../src/tushare/spec.cpp
+    ../../src/tushare/store.cpp
+    ../../src/tushare/pipeline.cpp
 )
 
 set(HEADERS
@@ -88,6 +92,10 @@ set(HEADERS
     ../../include/misc/logging.hpp
     ../../include/misc/profiler.hpp
     ../../include/package/yyjson/yyjson.h
+    ../../include/tushare/http.hpp
+    ../../include/tushare/spec.hpp
+    ../../include/tushare/store.hpp
+    ../../include/tushare/pipeline.hpp
 )
 
 add_executable(app_main ${SOURCES} ${HEADERS})
