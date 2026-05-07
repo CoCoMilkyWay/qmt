@@ -1,3 +1,4 @@
 *.exe
-国金证券QMT交易端/
-zd_gjzq
+*.msi
+gjzq/
+gjqmt/

@@ -1,22 +1,31 @@
-wine_arch=$(wine cmd /c echo %PROCESSOR_ARCHITECTURE% 2>/dev/null | tr -d '\r')
+set -e
 
-if [[ "$wine_arch" == "AMD64" ]]; then
-    gecko_platform="x86_64"
-else
-    gecko_platform="x86"
+INSTALLER_DIR="installer"
+
+mkdir -p "$INSTALLER_DIR"
+
+echo "==> 查询最新 Gecko 版本"
+
+LATEST_GECKO=$(curl -s https://dl.winehq.org/wine/wine-gecko/ \
+    | grep -oP 'href="\K[0-9.]+(?=/")' \
+    | sort -V \
+    | tail -1)
+
+GECKO_FILE="wine-gecko-${LATEST_GECKO}-x86_64.msi"
+GECKO_URL="https://dl.winehq.org/wine/wine-gecko/${LATEST_GECKO}/${GECKO_FILE}"
+GECKO_INSTALL_DIR="$HOME/.wine/drive_c/windows/system32/gecko/$LATEST_GECKO"
+
+echo "==> 下载 Gecko Installer"
+
+if [ ! -f "$INSTALLER_DIR/$GECKO_FILE" ]; then
+    wget -O "$INSTALLER_DIR/$GECKO_FILE" "$GECKO_URL"
 fi
 
-latest_gecko=$(curl -s https://dl.winehq.org/wine/wine-gecko/ \
-| grep -oP 'href="\K[0-9.]+(?=/")' \
-| sort -V \
-| tail -1)
+echo "==> 运行 Gecko Installer（Wine）"
 
-gecko_file="wine-gecko-${latest_gecko}-${gecko_platform}.msi"
+wine msiexec /i "$INSTALLER_DIR/$GECKO_FILE"
 
-gecko_url="https://dl.winehq.org/wine/wine-gecko/${latest_gecko}/${gecko_file}"
+echo "==> 验证安装"
 
-cd /tmp || exit 1
-
-wget -O "$gecko_file" "$gecko_url"
-
-wine msiexec /i "$gecko_file"
+[ -d "$GECKO_INSTALL_DIR" ] || { echo "Gecko 未安装：$GECKO_INSTALL_DIR 不存在" >&2; exit 1; }
+echo "Gecko 已安装：$GECKO_INSTALL_DIR"
