@@ -6,6 +6,7 @@ https://download.gjzq.com.cn/gjty/organ/gjzqqmt.rar
 # 1. wine + i386
 sudo apt install -y wine wine64 winetricks cabextract fonts-noto-cjk
 sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install -y wine32:i386
+winetricks allfonts fakechinese
 
 # 2. 中文 locale
 sudo locale-gen zh_CN.UTF-8 && sudo update-locale
