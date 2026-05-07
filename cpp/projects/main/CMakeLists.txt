@@ -82,6 +82,7 @@ set(SOURCES
     ../../src/tushare/http.cpp
     ../../src/tushare/spec.cpp
     ../../src/tushare/store.cpp
+    ../../src/tushare/meta.cpp
     ../../src/tushare/pipeline.cpp
 )
 
@@ -100,6 +101,7 @@ set(HEADERS
     ../../include/tushare/http.hpp
     ../../include/tushare/spec.hpp
     ../../include/tushare/store.hpp
+    ../../include/tushare/meta.hpp
     ../../include/tushare/pipeline.hpp
 )
 

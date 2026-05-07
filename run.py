@@ -9,6 +9,7 @@ Modes:
     - ASSERT:     Optimized build with assertions
     - PRODUCTION: Maximum performance (-O3, fastest)
 """
+
 import os
 import subprocess
 import sys
@@ -29,8 +30,7 @@ ENABLE_PRODUCTION = False  # Auto-enabled if all others are False
 
 
 def _cleanup_processes():
-    subprocess.run(["pkill", "-f", f"app_{APP_NAME}"],
-                   capture_output=True, check=False)
+    subprocess.run(["pkill", "-f", f"app_{APP_NAME}"], capture_output=True, check=False)
     time.sleep(0.3)
 
 
@@ -39,9 +39,9 @@ def _build(app_name, enable_debug, enable_profile, enable_assert):
     assert os.path.exists(py_script), f"Build script not found: {py_script}"
 
     env = os.environ.copy()
-    env['DEBUG_MODE'] = 'ON' if enable_debug else 'OFF'
-    env['PROFILE_MODE'] = 'ON' if enable_profile else 'OFF'
-    env['ASSERT_MODE'] = 'ON' if enable_assert else 'OFF'
+    env["DEBUG_MODE"] = "ON" if enable_debug else "OFF"
+    env["PROFILE_MODE"] = "ON" if enable_profile else "OFF"
+    env["ASSERT_MODE"] = "ON" if enable_assert else "OFF"
 
     result = subprocess.run(["python", py_script], env=env)
     assert result.returncode == 0, f"Build failed (exit {result.returncode})"
@@ -72,8 +72,7 @@ def main():
     print("Running...")
     build_dir = os.path.abspath(f"cpp/projects/{APP_NAME}/build")
     binary_path = os.path.join(build_dir, f"bin/app_{APP_NAME}")
-    _run(binary_path, build_dir,
-         ENABLE_DEBUG, ENABLE_PROFILE, ENABLE_ASSERT)
+    _run(binary_path, build_dir, ENABLE_DEBUG, ENABLE_PROFILE, ENABLE_ASSERT)
 
 
 if __name__ == "__main__":

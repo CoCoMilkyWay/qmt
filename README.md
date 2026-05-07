@@ -22,8 +22,11 @@ qmt/
 │           ├── http.cpp             # boost.beast HTTP 客户端 (走 80 端口, 无 SSL)
 │           ├── spec.cpp             # 7 个 SPECS + RangeStrategy / PerDayStrategy
 │           ├── store.cpp            # scan_missing / write_by_visible_date (PK upsert + _empty.json)
+│           ├── meta.cpp             # refresh_stock_basic: 全局 meta 全量刷新 (L+D+P+G)
 │           └── pipeline.cpp         # scan → plan → fetch → write 主流程
 ├── data/                            # tushare 落地 (按 visible_date 切日, gitignored)
+│   ├── _meta/
+│   │   └── stock_basic.json         # 全局 meta: ts_code 全量 (L+D+P+G), 每次 update 覆盖刷新
 │   └── YYYY/
 │       └── MM/
 │           ├── _empty.json          # 反向稀疏标记 {itf: [DD,...]} = 拉过且为空

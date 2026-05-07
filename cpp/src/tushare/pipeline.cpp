@@ -1,6 +1,7 @@
 #include "tushare/pipeline.hpp"
 #include "config.hpp"
 #include "tushare/http.hpp"
+#include "tushare/meta.hpp"
 #include "tushare/store.hpp"
 
 #include <cassert>
@@ -15,6 +16,9 @@ void update(std::string_view start, std::string_view end,
   std::cout << "[update] " << start << " ~ " << end << " ("
             << specs.size() << " interfaces, lookback=" << lookback_days
             << "d)" << std::endl;
+
+  // 全局 meta：每次 update 全量刷新，与 per-day SPECS 体系独立
+  refresh_stock_basic(http);
 
   for (const auto &spec : specs) {
     std::cout << "\n[" << spec.name << "] scan ..." << std::flush;

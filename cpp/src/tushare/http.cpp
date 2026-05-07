@@ -25,7 +25,8 @@ Http::Http(std::string token) : token_(std::move(token)) {
 
 yyjson_doc *
 Http::call(std::string_view api_name,
-           const std::vector<std::pair<std::string, std::string>> &params) {
+           const std::vector<std::pair<std::string, std::string>> &params,
+           std::string_view fields) {
   // ---- Build request body ----
   yyjson_mut_doc *body_doc = yyjson_mut_doc_new(nullptr);
   yyjson_mut_val *root = yyjson_mut_obj(body_doc);
@@ -36,7 +37,8 @@ Http::call(std::string_view api_name,
                              api_str.size());
   yyjson_mut_obj_add_strncpy(body_doc, root, "token", token_.data(),
                              token_.size());
-  yyjson_mut_obj_add_strncpy(body_doc, root, "fields", "", 0);
+  yyjson_mut_obj_add_strncpy(body_doc, root, "fields", fields.data(),
+                             fields.size());
 
   yyjson_mut_val *params_obj = yyjson_mut_obj(body_doc);
   yyjson_mut_obj_add_val(body_doc, root, "params", params_obj);
