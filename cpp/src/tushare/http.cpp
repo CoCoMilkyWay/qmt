@@ -54,9 +54,11 @@ Http::call(std::string_view api_name,
   std::free(body_str);
   yyjson_mut_doc_free(body_doc);
 
-  // ---- POST via boost.beast (retry on transient network errors) ----
-  // 业务错误（code != 0）和解析错误不在此重试，仍由后续 assert 兜底
+  // ---- POST via boost.beast (retry on transient network errors + rate limit) ----
+  // 网络瞬抖 (boost system_error) 与 tushare 频率超限 (code=40203) 共用同一 retry
+  // 预算；其它业务错误 (code != 0) 与解析失败仍由 assert 兜底
   std::string res_body;
+  yyjson_doc *doc = nullptr;
   for (int attempt = 0;; ++attempt) {
     try {
       net::io_context ioc;
@@ -81,10 +83,10 @@ Http::call(std::string_view api_name,
       http::read(stream, buffer, res);
 
       beast::error_code ec;
-      stream.socket().shutdown(tcp::socket::shutdown_both, ec);
+      [[maybe_unused]] auto shutdown_ec =
+          stream.socket().shutdown(tcp::socket::shutdown_both, ec);
 
       res_body = std::move(res.body());
-      break;
     } catch (const boost::system::system_error &e) {
       std::cerr << "\n[http] transient error (attempt " << (attempt + 1) << "/"
                 << (::config::HTTP_RETRY_MAX + 1) << ") api=" << api_name
@@ -92,25 +94,39 @@ Http::call(std::string_view api_name,
       assert(attempt < ::config::HTTP_RETRY_MAX);
       std::this_thread::sleep_for(
           std::chrono::seconds(::config::HTTP_RETRY_INTERVAL_SECONDS));
+      continue;
     }
-  }
 
-  // ---- Parse response ----
-  yyjson_doc *doc = yyjson_read(res_body.data(), res_body.size(), 0);
-  if (!doc) {
-    std::cerr << "Tushare API: failed to parse response, body=\n"
-              << res_body.substr(0, 1024) << std::endl;
-    assert(false);
-  }
+    // ---- Parse response ----
+    doc = yyjson_read(res_body.data(), res_body.size(), 0);
+    if (!doc) {
+      std::cerr << "Tushare API: failed to parse response, body=\n"
+                << res_body.substr(0, 1024) << std::endl;
+      assert(false);
+    }
 
-  yyjson_val *root_val = yyjson_doc_get_root(doc);
-  yyjson_val *code_val = yyjson_obj_get(root_val, "code");
-  assert(yyjson_is_int(code_val) || yyjson_is_uint(code_val));
-  int64_t code = yyjson_get_int(code_val);
-  if (code != 0) {
+    yyjson_val *root_val = yyjson_doc_get_root(doc);
+    yyjson_val *code_val = yyjson_obj_get(root_val, "code");
+    assert(yyjson_is_int(code_val) || yyjson_is_uint(code_val));
+    int64_t code = yyjson_get_int(code_val);
+    if (code == 0) {
+      break;
+    }
     yyjson_val *msg_val = yyjson_obj_get(root_val, "msg");
     const char *msg =
         (msg_val && yyjson_is_str(msg_val)) ? yyjson_get_str(msg_val) : "";
+    // 40203 = 频率超限 (e.g. "访问接口(income_vip)频率超限(400次/分钟)")，等 1 分钟窗口刷新即可恢复
+    if (code == 40203) {
+      std::cerr << "\n[http] rate limit (attempt " << (attempt + 1) << "/"
+                << (::config::HTTP_RETRY_MAX + 1) << ") api=" << api_name
+                << ": " << msg << std::endl;
+      yyjson_doc_free(doc);
+      doc = nullptr;
+      assert(attempt < ::config::HTTP_RETRY_MAX);
+      std::this_thread::sleep_for(
+          std::chrono::seconds(::config::HTTP_RETRY_INTERVAL_SECONDS));
+      continue;
+    }
     std::cerr << "Tushare API error: code=" << code << " msg=" << msg
               << " api=" << api_name << std::endl;
     assert(false);

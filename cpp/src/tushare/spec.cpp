@@ -181,6 +181,24 @@ const std::vector<InterfaceSpec> SPECS = {
      {"ann_date"},
      {"ts_code", "end_date"},
      std::make_shared<PerDayStrategy>(std::vector<std::string>{"ann_date"})},
+    // 利润表 (vip)：与 fina_indicator 同套打法 (ann_date 单日拉)
+    // - 普通 income 接口必传 ts_code 不能扫全市场, 只能用 income_vip
+    // - PK 含 report_type：同 (ts_code, end_date) 可能并存合并/单季/调整等多版本
+    //   (1合并/2单季/3调整单季/4调整合并/5调整前/6母公司/7母单季/...)
+    // - fields=""：默认列已覆盖 revenue / n_income_attr_p (rev_raw / ni_raw 用)
+    {"income",
+     "income_vip",
+     {"ann_date"},
+     {"ts_code", "end_date", "report_type"},
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"ann_date"})},
+    // 现金流量表 (vip)：同上
+    // - PK 含 report_type 同理
+    // - 默认列已覆盖 n_cashflow_act (pcf_raw 用)
+    {"cashflow",
+     "cashflow_vip",
+     {"ann_date"},
+     {"ts_code", "end_date", "report_type"},
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"ann_date"})},
 };
 
 } // namespace tushare

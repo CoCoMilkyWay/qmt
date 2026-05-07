@@ -54,7 +54,7 @@ private:
 //   - disclosure:                          PerDayStrategy({"actual_date"})
 //   - st:                                  PerDayStrategy({"pub_date"})
 //   - daily_basic/adj_factor/stk_limit:    PerDayStrategy({"trade_date"})
-//   - fina_indicator:                      PerDayStrategy({"ann_date"})
+//   - fina_indicator/income/cashflow:      PerDayStrategy({"ann_date"})
 //   - dividend:                            PerDayStrategy({"ann_date","imp_ann_date"})
 //                                          双查询：当天预案/决议 + 当天实施
 // task.params = [(day_params[i], day)]
