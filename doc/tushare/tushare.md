@@ -1,5 +1,5 @@
 ## 股票数据
- - 基础数据 data/tushare/doc/basic
+ - 基础数据 doc/tushare/basic
    - 基础信息: stock_basic.md
    - 股本情况(盘前): stk_premarket.md
    - 交易日历: trade_cal.md
@@ -13,8 +13,14 @@
    - 北交所新旧代码对照表: bse_mapping.md
    - IPO新股列表: new_share.md
    - 股票历史列表(历史每天股票列表): bak_basic.md
- - 行情数据
- - 财务数据 data/tushare/doc/financial
+ - 行情数据 doc/tushare/quote
+   - A股日线行情: daily.md
+   - 每日指标: daily_basic.md
+   - 复权因子: adj_factor.md
+   - 每日涨跌停价格: stk_limit.md
+   - 每日停复牌信息: suspend_d.md
+   - 股票历史分钟行情: stk_mins.md
+ - 财务数据 doc/tushare/financial
    - 利润表: income.md
    - 资产负债表: balancesheet.md
    - 现金流量表: cashflow.md
