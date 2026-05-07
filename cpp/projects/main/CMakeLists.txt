@@ -76,6 +76,8 @@ include_directories(
 set(SOURCES
     ../../src/main.cpp
     ../../src/misc/logging.cpp
+    ../../src/misc/date.cpp
+    ../../src/misc/fs.cpp
     ../../include/package/yyjson/yyjson.c
     ../../src/tushare/http.cpp
     ../../src/tushare/spec.cpp
@@ -91,6 +93,9 @@ set(HEADERS
     ../../include/misc/affinity.hpp
     ../../include/misc/logging.hpp
     ../../include/misc/profiler.hpp
+    ../../include/misc/date.hpp
+    ../../include/misc/fs.hpp
+    ../../include/config.hpp
     ../../include/package/yyjson/yyjson.h
     ../../include/tushare/http.hpp
     ../../include/tushare/spec.hpp

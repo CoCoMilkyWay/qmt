@@ -24,6 +24,4 @@ private:
   std::string token_;
 };
 
-std::string load_token();
-
 } // namespace tushare

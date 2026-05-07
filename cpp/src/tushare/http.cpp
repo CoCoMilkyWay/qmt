@@ -1,4 +1,5 @@
 #include "tushare/http.hpp"
+#include "config.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
@@ -7,11 +8,7 @@
 
 #include <cassert>
 #include <chrono>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <sstream>
 #include <string>
 
 namespace tushare {
@@ -20,10 +17,6 @@ namespace beast = boost::beast;
 namespace http = boost::beast::http;
 namespace net = boost::asio;
 using tcp = boost::asio::ip::tcp;
-
-static constexpr const char *HOST = "api.tushare.pro";
-static constexpr const char *PORT = "80";
-static constexpr int TIMEOUT_SECONDS = 60;
 
 Http::Http(std::string token) : token_(std::move(token)) {
   assert(!token_.empty());
@@ -62,13 +55,13 @@ Http::call(std::string_view api_name,
   net::io_context ioc;
   tcp::resolver resolver(ioc);
   beast::tcp_stream stream(ioc);
-  stream.expires_after(std::chrono::seconds(TIMEOUT_SECONDS));
+  stream.expires_after(std::chrono::seconds(::config::HTTP_TIMEOUT_SECONDS));
 
-  auto results = resolver.resolve(HOST, PORT);
+  auto results = resolver.resolve(::config::API_HOST, ::config::API_PORT);
   stream.connect(results);
 
   http::request<http::string_body> req{http::verb::post, "/", 11};
-  req.set(http::field::host, HOST);
+  req.set(http::field::host, ::config::API_HOST);
   req.set(http::field::user_agent, "qmt-tushare/1.0");
   req.set(http::field::content_type, "application/json");
   req.body() = body;
@@ -106,27 +99,6 @@ Http::call(std::string_view api_name,
   }
 
   return doc;
-}
-
-std::string load_token() {
-  const char *home = std::getenv("HOME");
-  assert(home);
-  std::filesystem::path path = std::filesystem::path(home) / ".tushare_token";
-  if (!std::filesystem::exists(path)) {
-    std::cerr << "tushare token not found at " << path
-              << "\n  hint: echo \"<your token>\" > " << path.string()
-              << std::endl;
-    assert(false);
-  }
-  std::ifstream f(path);
-  std::string token;
-  std::getline(f, token);
-  while (!token.empty() &&
-         std::isspace(static_cast<unsigned char>(token.back()))) {
-    token.pop_back();
-  }
-  assert(!token.empty());
-  return token;
 }
 
 } // namespace tushare

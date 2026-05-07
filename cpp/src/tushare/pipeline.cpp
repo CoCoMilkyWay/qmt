@@ -1,4 +1,5 @@
 #include "tushare/pipeline.hpp"
+#include "config.hpp"
 #include "tushare/http.hpp"
 #include "tushare/store.hpp"
 
@@ -8,16 +9,17 @@
 namespace tushare {
 
 void update(std::string_view start, std::string_view end,
-            const std::vector<InterfaceSpec> &specs) {
-  Http http(load_token());
+            const std::vector<InterfaceSpec> &specs, int lookback_days) {
+  Http http(::config::TUSHARE_TOKEN);
 
   std::cout << "[update] " << start << " ~ " << end << " ("
-            << specs.size() << " interfaces)" << std::endl;
+            << specs.size() << " interfaces, lookback=" << lookback_days
+            << "d)" << std::endl;
 
   for (const auto &spec : specs) {
     std::cout << "\n[" << spec.name << "] scan ..." << std::flush;
-    auto missing = store::scan_missing(spec, start, end);
-    std::cout << " " << missing.size() << " missing day(s)" << std::endl;
+    auto missing = store::scan_missing(spec, start, end, lookback_days);
+    std::cout << " " << missing.size() << " day(s) to fetch" << std::endl;
 
     if (missing.empty()) continue;
 
