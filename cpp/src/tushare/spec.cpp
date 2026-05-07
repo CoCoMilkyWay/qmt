@@ -123,12 +123,6 @@ const std::vector<InterfaceSpec> SPECS = {
      {"pub_date"},
      {"ts_code", "pub_date", "imp_date", "st_tpye"},
      std::make_shared<PerDayStrategy>(std::vector<std::string>{"pub_date"})},
-    // 历史每日股票基础列表 (一天 ~5000 行，限额 7000 内)
-    {"basic",
-     "bak_basic",
-     {"trade_date"},
-     {"ts_code", "trade_date"},
-     std::make_shared<PerDayStrategy>(std::vector<std::string>{"trade_date"})},
     // 交易日历：每天每交易所仅 1 行，按 10 年/段切；变体笛卡尔积 SSE/SZSE
     // 北交所不在 trade_cal 输出枚举内 (文档仅 SSE/SZSE/CFFEX/SHFE/CZCE/DCE/INE)，
     // 实测 BSE/BJSE/BJEX/BJ/NEEQ 全部返回 items=[]；A 股节假日由证监会统一安排，
@@ -150,6 +144,43 @@ const std::vector<InterfaceSpec> SPECS = {
      {"ts_code", "end_date", "div_proc"},
      std::make_shared<PerDayStrategy>(
          std::vector<std::string>{"ann_date", "imp_ann_date"})},
+    // 每日指标：换手率/量比/PE_TTM/PS_TTM/自由流通市值等核心因子
+    // 一天全市场 ~5000 行，限额 6000；盘后 15-17 点入库
+    {"daily_basic",
+     "daily_basic",
+     {"trade_date"},
+     {"ts_code", "trade_date"},
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"trade_date"})},
+    // 复权因子：分红/送股事件后才变化，但每个交易日每只股都有一条
+    // 一天全市场 ~5000 行；盘前 9:15-9:20 入库
+    {"adj_factor",
+     "adj_factor",
+     {"trade_date"},
+     {"ts_code", "trade_date"},
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"trade_date"})},
+    // 每日涨跌停价：盘前 8:40 入库；一天全市场 ~5000 行，限额 5800
+    {"stk_limit",
+     "stk_limit",
+     {"trade_date"},
+     {"ts_code", "trade_date"},
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"trade_date"})},
+    // 每日停复牌：稀疏数据 (一天数十条)，按月切段批量拉
+    // PK 含 suspend_type：同一只股一天内可能同时有 S(停)+R(复) 两条
+    {"suspend_d",
+     "suspend_d",
+     {"trade_date"},
+     {"ts_code", "trade_date", "suspend_type"},
+     std::make_shared<RangeStrategy>(::config::FETCH_MAX_DAYS_PER_CALL)},
+    // 财务指标 (vip)：按 ann_date 单日拉，不指定 period
+    // - 单日返回当天所有公告记录 (跨多个 end_date 自动覆盖)
+    // - visible_date=ann_date：财报对外可见即落库
+    // - PK=(ts_code, end_date)：同期修正版本以最后一条为准 (响应顺序内)
+    // - 跨天修正 (>lookback) 留旧版本在历史 day file，行为与 forecast/express 一致
+    {"fina_indicator",
+     "fina_indicator_vip",
+     {"ann_date"},
+     {"ts_code", "end_date"},
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"ann_date"})},
 };
 
 } // namespace tushare

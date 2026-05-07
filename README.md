@@ -29,7 +29,8 @@ qmt/
 │           ├── _empty.json          # 反向稀疏标记 {itf: [DD,...]} = 拉过且为空
 │           └── DD/<itf>.json        # 仅在该天有数据时存在 (PK 唯一, 路径 = visible_date)
 │                                    # 三态: file 存在 / 在 _empty / 都不在 = 有数据 / 拉过空 / 未拉
-│                                    # itf ∈ {forecast, express, disclosure, st, basic, calendar, dividend}
+│                                    # itf ∈ {forecast, express, disclosure, st, calendar, dividend,
+│                                    #        daily_basic, adj_factor, stk_limit, suspend_d, fina_indicator}
 ├── py/                              # 构建/运行模式 (run.py 调用)
 │   ├── main.py                      # CMake 配置 + 编译
 │   └── mode_{debug,profile,assert,production}.py

@@ -32,8 +32,8 @@ public:
 };
 
 // 切连续段 + 可选 (key, [values]) 单键变体笛卡尔积
-//   - forecast/express:  RangeStrategy(31)
-//   - trade_cal:         RangeStrategy(3650, "exchange", {"SSE","SZSE"})
+//   - forecast/express/suspend_d:  RangeStrategy(31)
+//   - trade_cal:                   RangeStrategy(3650, "exchange", {"SSE","SZSE"})
 // task.params = [(start_date, S), (end_date, E)] (+ (variant_key, v) 若有)
 class RangeStrategy : public FetchStrategy {
 public:
@@ -51,11 +51,12 @@ private:
 };
 
 // 每天 N 个 task，每个 task 以 (day_params[i], day) 为唯一 query
-//   - disclosure:  PerDayStrategy({"actual_date"})
-//   - st:          PerDayStrategy({"pub_date"})
-//   - basic:       PerDayStrategy({"trade_date"})
-//   - dividend:    PerDayStrategy({"ann_date","imp_ann_date"})
-//                  双查询：当天预案/决议 (ann_date=D) + 当天实施 (imp_ann_date=D)
+//   - disclosure:                          PerDayStrategy({"actual_date"})
+//   - st:                                  PerDayStrategy({"pub_date"})
+//   - daily_basic/adj_factor/stk_limit:    PerDayStrategy({"trade_date"})
+//   - fina_indicator:                      PerDayStrategy({"ann_date"})
+//   - dividend:                            PerDayStrategy({"ann_date","imp_ann_date"})
+//                                          双查询：当天预案/决议 + 当天实施
 // task.params = [(day_params[i], day)]
 class PerDayStrategy : public FetchStrategy {
 public:

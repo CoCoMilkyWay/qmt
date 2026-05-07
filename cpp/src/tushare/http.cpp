@@ -10,6 +10,7 @@
 #include <chrono>
 #include <iostream>
 #include <string>
+#include <thread>
 
 namespace tushare {
 
@@ -51,33 +52,48 @@ Http::call(std::string_view api_name,
   std::free(body_str);
   yyjson_mut_doc_free(body_doc);
 
-  // ---- POST via boost.beast ----
-  net::io_context ioc;
-  tcp::resolver resolver(ioc);
-  beast::tcp_stream stream(ioc);
-  stream.expires_after(std::chrono::seconds(::config::HTTP_TIMEOUT_SECONDS));
+  // ---- POST via boost.beast (retry on transient network errors) ----
+  // 业务错误（code != 0）和解析错误不在此重试，仍由后续 assert 兜底
+  std::string res_body;
+  for (int attempt = 0;; ++attempt) {
+    try {
+      net::io_context ioc;
+      tcp::resolver resolver(ioc);
+      beast::tcp_stream stream(ioc);
+      stream.expires_after(std::chrono::seconds(::config::HTTP_TIMEOUT_SECONDS));
 
-  auto results = resolver.resolve(::config::API_HOST, ::config::API_PORT);
-  stream.connect(results);
+      auto results = resolver.resolve(::config::API_HOST, ::config::API_PORT);
+      stream.connect(results);
 
-  http::request<http::string_body> req{http::verb::post, "/", 11};
-  req.set(http::field::host, ::config::API_HOST);
-  req.set(http::field::user_agent, "qmt-tushare/1.0");
-  req.set(http::field::content_type, "application/json");
-  req.body() = body;
-  req.prepare_payload();
+      http::request<http::string_body> req{http::verb::post, "/", 11};
+      req.set(http::field::host, ::config::API_HOST);
+      req.set(http::field::user_agent, "qmt-tushare/1.0");
+      req.set(http::field::content_type, "application/json");
+      req.body() = body;
+      req.prepare_payload();
 
-  http::write(stream, req);
+      http::write(stream, req);
 
-  beast::flat_buffer buffer;
-  http::response<http::string_body> res;
-  http::read(stream, buffer, res);
+      beast::flat_buffer buffer;
+      http::response<http::string_body> res;
+      http::read(stream, buffer, res);
 
-  beast::error_code ec;
-  stream.socket().shutdown(tcp::socket::shutdown_both, ec);
+      beast::error_code ec;
+      stream.socket().shutdown(tcp::socket::shutdown_both, ec);
+
+      res_body = std::move(res.body());
+      break;
+    } catch (const boost::system::system_error &e) {
+      std::cerr << "\n[http] transient error (attempt " << (attempt + 1) << "/"
+                << (::config::HTTP_RETRY_MAX + 1) << ") api=" << api_name
+                << ": " << e.what() << std::endl;
+      assert(attempt < ::config::HTTP_RETRY_MAX);
+      std::this_thread::sleep_for(
+          std::chrono::seconds(::config::HTTP_RETRY_INTERVAL_SECONDS));
+    }
+  }
 
   // ---- Parse response ----
-  const std::string &res_body = res.body();
   yyjson_doc *doc = yyjson_read(res_body.data(), res_body.size(), 0);
   if (!doc) {
     std::cerr << "Tushare API: failed to parse response, body=\n"
