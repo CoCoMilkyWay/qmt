@@ -123,16 +123,19 @@ const std::vector<InterfaceSpec> SPECS = {
      {"pub_date"},
      {"ts_code", "pub_date", "imp_date", "st_tpye"},
      std::make_shared<PerDayStrategy>(std::vector<std::string>{"pub_date"})},
-    // 交易日历：每天每交易所仅 1 行，按 10 年/段切；变体笛卡尔积 SSE/SZSE
-    // 北交所不在 trade_cal 输出枚举内 (文档仅 SSE/SZSE/CFFEX/SHFE/CZCE/DCE/INE)，
-    // 实测 BSE/BJSE/BJEX/BJ/NEEQ 全部返回 items=[]；A 股节假日由证监会统一安排，
-    // 北交所与 SSE/SZSE 一致，无需单拉。保留 SSE+SZSE 作为冗余交叉验证。
+    // 交易日历：每天每交易所仅 1 行，按 10 年/段切；变体笛卡尔积全部 7 个交易所
+    // 文档支持枚举: SSE 上交所 / SZSE 深交所 / CFFEX 中金所 / SHFE 上期所 /
+    //              CZCE 郑商所 / DCE 大商所 / INE 上能源
+    // 北交所不在 trade_cal 输出枚举内, 实测 BSE/BJSE/BJEX/BJ/NEEQ 全部返回 items=[];
+    // A 股节假日由证监会统一安排, 北交所与 SSE/SZSE 一致, 无需单拉.
     {"calendar",
      "trade_cal",
      {"cal_date"},
      {"exchange", "cal_date"},
      std::make_shared<RangeStrategy>(
-         3650, "exchange", std::vector<std::string>{"SSE", "SZSE"})},
+         3650, "exchange",
+         std::vector<std::string>{"SSE", "SZSE", "CFFEX", "SHFE", "CZCE",
+                                  "DCE", "INE"})},
     // 分红送股：每个 day=Y 双查询 (ann_date=Y) + (imp_ann_date=Y)
     // - ann_date=Y 抓当天预案/决议公告 (visible_date=ann_date=Y)
     // - imp_ann_date=Y 抓当天实施公告 (visible_date=imp_ann_date=Y)
