@@ -7,8 +7,8 @@ qmt/
 ├── app/
 │   ├── gjzqqmt/                     # 国金证券 QMT 客户端 (Linux Wine 跑 Windows 程序)
 │   │   ├── run.md                   # Wine 安装 + 启动指南 (XtItClient=主端, XtMiniQmt=API端)
-│   │   ├── 国金证券QMT交易端/         # 客户端本体 (bin.x64 是 64 位主程序)
-│   │   └── QMT操作说明文档/           # 官方 PDF (操作/Python API/网格/VBA/算法交易)
+│   │   ├── 国金证券QMT交易端/       # 客户端本体 (bin.x64 是 64 位主程序)
+│   │   └── QMT操作说明文档/         # 官方 PDF (操作/Python API/网格/VBA/算法交易)
 │   └── api/tushare/                 # tushare Python SDK 副本 (历史保留, 不再用)
 ├── cpp/                             # C++23 实现 (Clang/Linux, header-only boost + yyjson)
 │   ├── projects/main/               # CMake 构建 (DEBUG / PROFILE / ASSERT / PRODUCTION)
