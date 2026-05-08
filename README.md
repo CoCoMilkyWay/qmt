@@ -70,22 +70,24 @@ qmt/
 
 入库时机来源: `doc/tushare/help/数据更新说明.md` + 各 API 自身 doc; tushare 用语 "实时更新" = 随公告/财报到达即入库, 无固定时点; "定期更新" = 周期性批发, 非事件驱动.
 
-| 类    | itf               | api                  | 入库时机 (tushare)             | visible_date              |
-| ----- | ----------------- | -------------------- | ------------------------------ | ------------------------- |
-| axis  | calendar          | `trade_cal`          | 定期 (新年度排程)              | `cal_date`                |
-| asset | _meta/stock_basic | `stock_basic`        | 每次 update 覆盖刷新 (L+D+P+G) | —                         |
-| 网格  | daily_basic       | `daily_basic`        | **盘后** 交易日 15:00–17:00    | `trade_date`              |
-| 网格  | stk_limit         | `stk_limit`          | **盘前** 交易日 08:40 左右     | `trade_date`              |
-| 网格  | adj_factor        | `adj_factor`         | **盘前** 交易日 09:15–09:20    | `trade_date`              |
-| 网格  | suspend_d         | `suspend_d`          | 不定期 (停牌通常盘前发)        | `trade_date`              |
-| 事件  | forecast          | `forecast_vip`       | 公告实时                       | `ann_date`                |
-| 事件  | express           | `express_vip`        | 公告实时                       | `ann_date`                |
-| 事件  | disclosure        | `disclosure_date`    | 定期 (季前发布披露计划)        | `actual_date`             |
-| 事件  | dividend          | `dividend`           | 公告实时 (预案/通过/实施)      | `imp_ann_date / ann_date` |
-| 事件  | st                | `st`                 | 公告实时 (含 ST/*ST 上下线)    | `pub_date`                |
-| 事件  | fina_indicator    | `fina_indicator_vip` | 公告实时 (随财报)              | `ann_date`                |
-| 事件  | income            | `income_vip`         | 公告实时 (随财报)              | `ann_date`                |
-| 事件  | cashflow          | `cashflow_vip`       | 公告实时 (随财报)              | `ann_date`                |
+`偏移` 列假设: (a) 信号计算前 1 分钟刷一次库, (b) 信号在交易日 T 盘中算. 含义 = D=T 行用 visible_date = T + offset 的数据 (网格直接索引, 事件 PIT 截断 ≤ T + offset). 事件类统一 −1: 多数公告盘后发, 实盘 T 日盘中拿不到 T 当日公告, 截至 T−1 保守.
+
+| 类    | itf               | api                  | 入库时机 (tushare)             | visible_date              | 偏移 |
+| ----- | ----------------- | -------------------- | ------------------------------ | ------------------------- | ---- |
+| axis  | calendar          | `trade_cal`          | 定期 (新年度排程)              | `cal_date`                | —    |
+| asset | _meta/stock_basic | `stock_basic`        | 每次 update 覆盖刷新 (L+D+P+G) | —                         | —    |
+| 网格  | daily_basic       | `daily_basic`        | **盘后** 交易日 15:00–17:00    | `trade_date`              | −1   |
+| 网格  | stk_limit         | `stk_limit`          | **盘前** 交易日 08:40 左右     | `trade_date`              | 0    |
+| 网格  | adj_factor        | `adj_factor`         | **盘前** 交易日 09:15–09:20    | `trade_date`              | 0    |
+| 网格  | suspend_d         | `suspend_d`          | 不定期 (停牌通常盘前发)        | `trade_date`              | 0    |
+| 事件  | forecast          | `forecast_vip`       | 公告实时                       | `ann_date`                | −1   |
+| 事件  | express           | `express_vip`        | 公告实时                       | `ann_date`                | −1   |
+| 事件  | disclosure        | `disclosure_date`    | 定期 (季前发布披露计划)        | `actual_date`             | −1   |
+| 事件  | dividend          | `dividend`           | 公告实时 (预案/通过/实施)      | `imp_ann_date / ann_date` | −1   |
+| 事件  | st                | `st`                 | 公告实时 (含 ST/*ST 上下线)    | `pub_date`                | −1   |
+| 事件  | fina_indicator    | `fina_indicator_vip` | 公告实时 (随财报)              | `ann_date`                | −1   |
+| 事件  | income            | `income_vip`         | 公告实时 (随财报)              | `ann_date`                | −1   |
+| 事件  | cashflow          | `cashflow_vip`       | 公告实时 (随财报)              | `ann_date`                | −1   |
 
 ## 字段表
 
