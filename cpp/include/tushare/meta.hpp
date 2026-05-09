@@ -18,16 +18,18 @@ void refresh_stock_basic(Http &http);
 void refresh_index_member_all(Http &http);
 
 // ============================================================================
-// 单 API 去重 (data/_meta/<api>.lastupdate, 内容 = unix epoch seconds)
+// 单 itf 去重 (data/_meta/<name>.lastupdate, 内容 = unix epoch seconds)
 // 调用方语义: should_skip_api 命中 → 跳过整段; 否则跑完后 mark_api_updated。
-// "API" 粒度 = pipeline 入口的逻辑刷新单元: SPECS 用 spec.api;
-// meta 刷新用 "stock_basic" / "index_member_all"。
+// 粒度 = 数据文件名 spec.name (≡ data/.../<name>.json);
+// 不能用 spec.api: disclosure 与 report 共用 api=disclosure_date,
+// 但是两个独立 itf, 共享 key 会让先跑的把后跑的也吃掉。
+// meta 刷新走同一通道, 用 "stock_basic" / "index_member_all"。
 // ============================================================================
 
 // 上次成功更新距今 < window_seconds 返回 true；文件不存在返回 false。
-bool should_skip_api(std::string_view api, int window_seconds);
+bool should_skip_api(std::string_view name, int window_seconds);
 
-// 写当前时间到 data/_meta/<api>.lastupdate (atomic_write)。
-void mark_api_updated(std::string_view api);
+// 写当前时间到 data/_meta/<name>.lastupdate (atomic_write)。
+void mark_api_updated(std::string_view name);
 
 } // namespace tushare

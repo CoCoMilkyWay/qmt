@@ -14,22 +14,32 @@ qmt/
 │   ├── projects/main/               # CMake 构建 (DEBUG / PROFILE / ASSERT / PRODUCTION)
 │   ├── include/
 │   │   ├── config.hpp               # 全局常量 (token, API host, lookback, 拉取窗口, 去重窗口)
-│   │   ├── misc/                    # 通用工具 (date / fs / logging / progress / timer)
+│   │   ├── misc/                    # 通用工具 (date / fs / logging / progress / timer / affinity)
 │   │   ├── package/yyjson/          # JSON 库
-│   │   └── tushare/                 # tushare 子系统头文件
+│   │   ├── tushare/                 # tushare 子系统头文件 (数据入)
+│   │   └── factor/                  # factor 子系统头文件 (张量出)
 │   └── src/
-│       ├── main.cpp                 # tushare::update(start, today, SPECS, lookback)
-│       └── tushare/
-│           ├── http.cpp             # boost.beast HTTP 客户端 (走 80 端口, 无 SSL)
-│           ├── spec.cpp             # 14 个 SPECS + RangeStrategy / PerDayStrategy
-│           ├── store.cpp            # scan_missing / write_by_visible_date (PK upsert + _empty.json)
-│           ├── meta.cpp             # refresh_stock_basic + refresh_index_member_all + 单 API 去重 (lastupdate 时间戳)
-│           └── pipeline.cpp         # scan → plan → fetch → write 主流程 (入口逐 API 走 lastupdate 去重)
+│       ├── main.cpp                 # tushare::update → factor::build → Tensor T[F][A][D]
+│       ├── tushare/
+│       │   ├── http.cpp             # boost.beast HTTP 客户端 (走 80 端口, 无 SSL)
+│       │   ├── spec.cpp             # 14 个 SPECS + RangeStrategy / PerDayStrategy
+│       │   ├── store.cpp            # scan_missing / write_by_visible_date (PK upsert + _empty.json)
+│       │   ├── meta.cpp             # refresh_stock_basic + refresh_index_member_all + 单 itf 去重 (lastupdate 时间戳, 粒度=spec.name)
+│       │   └── pipeline.cpp         # scan → plan → fetch → write 主流程 (入口逐 itf 走 lastupdate 去重)
+│       └── factor/                  # 4-phase 因子张量构建 (in-memory only, 全过程式 + 轻量抽象)
+│           ├── axis.cpp             # Phase 0: load_axes (D=SSE∪SZSE 交易日) + load_stock_meta (per-A 静态)
+│           ├── feature.cpp          # F 枚举 ↔ FeatureMeta 静态表 (kind=Filter/Factor/Inter, axis=TS/CS)
+│           ├── tensor.cpp           # Tensor 容器 (统一 [F][A][D] layout, ts_row 连续, gather/scatter cs_row)
+│           ├── pit.cpp              # 各 itf parse_*_day helper (网格 dense / 事件 per-A 链)
+│           ├── load.cpp             # Phase 1: per-(day, itf) 并行解析, 网格无锁 / 事件 per-A mutex
+│           ├── ts.cpp               # Phase 2: per-A 并行, stage 1..6 (extract_grid → ttm4 → static → derived → state machines → pool_b)
+│           ├── cs.cpp               # Phase 3: per-D 并行, 10 个 raw→factor pipeline (winsor_mad ∘ z ∘ pct_rank) + compute_pool
+│           └── build.cpp            # 编排入口: 串 4 phase + misc::Timer 报段时
 ├── data/                            # tushare 落地 (按 visible_date 切日, gitignored)
 │   ├── _meta/
 │   │   ├── stock_basic.json         # 全局 meta: ts_code 全量 (L+D+P+G), 每次 update 覆盖刷新
 │   │   ├── index_member_all.json    # 申万 SW2021 行业成分 (is_new=Y), 按 L1 分批合并 (PK=ts_code)
-│   │   └── <api>.lastupdate         # 单 API 去重时间戳 (unix epoch s); 上次成功距今 < config::API_DEDUP_WINDOW_SECONDS 跳过
+│   │   └── <name>.lastupdate        # 单 itf 去重时间戳 (unix epoch s, name=数据文件名); 上次成功距今 < config::API_DEDUP_WINDOW_SECONDS 跳过
 │   └── YYYY/
 │       └── MM/
 │           ├── _empty.json          # 反向稀疏标记 {itf: [DD,...]} = 拉过且为空

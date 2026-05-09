@@ -36,9 +36,9 @@ void update(std::string_view start, std::string_view end,
   }
 
   for (const auto &spec : specs) {
-    if (should_skip_api(spec.api, ::config::API_DEDUP_WINDOW_SECONDS)) {
-      std::cout << "\n[" << spec.name << "] skip (api " << spec.api
-                << " recently updated)" << std::endl;
+    if (should_skip_api(spec.name, ::config::API_DEDUP_WINDOW_SECONDS)) {
+      std::cout << "\n[" << spec.name << "] skip (recently updated)"
+                << std::endl;
       continue;
     }
 
@@ -75,7 +75,7 @@ void update(std::string_view start, std::string_view end,
     }
 
     // 整段 (scan + plan + fetch + write) 走完无 assert → 标记成功
-    mark_api_updated(spec.api);
+    mark_api_updated(spec.name);
   }
 
   std::cout << "\n[update] done" << std::endl;

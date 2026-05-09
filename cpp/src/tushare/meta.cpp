@@ -32,9 +32,9 @@ fs::path index_member_all_path() {
   return misc::git_root() / "data" / "_meta" / "index_member_all.json";
 }
 
-fs::path lastupdate_path(std::string_view api) {
+fs::path lastupdate_path(std::string_view name) {
   return misc::git_root() / "data" / "_meta" /
-         (std::string(api) + ".lastupdate");
+         (std::string(name) + ".lastupdate");
 }
 
 } // namespace
@@ -277,12 +277,12 @@ void refresh_index_member_all(Http &http) {
 }
 
 // ============================================================================
-// 单 API 去重 (data/_meta/<api>.lastupdate, 内容 = unix epoch seconds 文本)
+// 单 itf 去重 (data/_meta/<name>.lastupdate, 内容 = unix epoch seconds 文本)
 // ============================================================================
 
-bool should_skip_api(std::string_view api, int window_seconds) {
+bool should_skip_api(std::string_view name, int window_seconds) {
   assert(window_seconds >= 0);
-  fs::path p = lastupdate_path(api);
+  fs::path p = lastupdate_path(name);
   if (!fs::exists(p)) return false;
   std::string buf = misc::read_file_all(p);
   while (!buf.empty() &&
@@ -295,10 +295,10 @@ bool should_skip_api(std::string_view api, int window_seconds) {
   return (now - last) < window_seconds;
 }
 
-void mark_api_updated(std::string_view api) {
+void mark_api_updated(std::string_view name) {
   int64_t now = static_cast<int64_t>(std::time(nullptr));
   std::string content = std::to_string(now) + "\n";
-  misc::atomic_write(lastupdate_path(api), content.data(), content.size());
+  misc::atomic_write(lastupdate_path(name), content.data(), content.size());
 }
 
 } // namespace tushare
