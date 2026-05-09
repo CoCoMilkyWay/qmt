@@ -21,6 +21,6 @@ inline constexpr int API_DEDUP_WINDOW_SECONDS = 60 * 60; // 单 itf 去重窗口
 inline constexpr int UNIVERSE_SIZE = 80; // pool 截面: pool_b ∧ rank(mcap_raw asc) ≤ N 取最终 strategy universe
 
 // describe (phase 4): 关闭则只输出 "all" 一行/feature; 开启则额外按自然年(axes.dates 前 4 位)展开
-inline constexpr bool DESCRIBE_BY_YEAR = true;
+inline constexpr bool DESCRIBE_BY_YEAR = false;
 
 } // namespace config

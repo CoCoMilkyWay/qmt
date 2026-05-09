@@ -6,7 +6,6 @@
 #include <cstring>
 #include <span>
 #include <string_view>
-#include <vector>
 
 namespace feature {
 
@@ -48,6 +47,7 @@ enum class F : int {
   // ---- TS asset 静态广播 ----
   mb,
   list_age,
+  delist_age,
 
   // ---- TS 衍生 bool (依赖 raw + mb) ----
   low_p,

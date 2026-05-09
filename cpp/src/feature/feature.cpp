@@ -52,13 +52,23 @@ inline int get_list_d(int a, const Axes &axes, const StockMeta &meta) {
   return static_cast<int>(std::distance(axes.dates.begin(), it));
 }
 
-// 把 d < list_d 的值填 0 (上市前无数据)
-inline void fill_before_list(std::span<float> out, int a, const Axes &axes,
-                             const StockMeta &meta) {
-  int list_d = get_list_d(a, axes, meta);
-  for (int d = 0; d < list_d && d < static_cast<int>(out.size()); ++d) {
-    out[d] = 0.0f;
-  }
+// 不再填 0，保留 NaN 让后续 stage 判断数据可用性
+inline void fill_before_list(std::span<float>, int, const Axes &,
+                             const StockMeta &) {
+}
+
+// 计算股票 a 的退市日索引 (在 axes.dates 中的 lower_bound)
+// 返回 n_d 表示无有效 delist_date (视为永不退市)
+inline int get_delist_d(int a, const Axes &axes, const StockMeta &meta) {
+  const std::string &dd = meta.delist_date[a];
+  if (dd.size() != 8) return axes.n_d(); // 无 delist_date → 永不退市
+  auto it = std::lower_bound(axes.dates.begin(), axes.dates.end(), dd);
+  return static_cast<int>(std::distance(axes.dates.begin(), it));
+}
+
+// 不再填 0，保留 NaN 让后续 stage 判断数据可用性
+inline void fill_after_delist(std::span<float>, int, const Axes &,
+                              const StockMeta &) {
 }
 
 // 通过 visible_date_idx 从 PitPool 网格抽 row D[d] 的 raw 值;
@@ -120,6 +130,7 @@ void ts_close_raw(int a, const Axes &axes, const PitPool &pool,
     out[d] = grid_at(pool.daily_basic.close, base, d, -1);
   }
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 void ts_up_lim(int a, const Axes &axes, const PitPool &pool,
@@ -128,10 +139,10 @@ void ts_up_lim(int a, const Axes &axes, const PitPool &pool,
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(F::up_lim, a);
   for (int d = 0; d < n_d; ++d) {
-    float v = grid_at(pool.stk_limit.up_limit, base, d, -1);
-    out[d] = (v >= 100000.0f || !is_finite(v)) ? 0.0f : v;
+    out[d] = grid_at(pool.stk_limit.up_limit, base, d, -1);
   }
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 void ts_dn_lim(int a, const Axes &axes, const PitPool &pool,
@@ -140,10 +151,10 @@ void ts_dn_lim(int a, const Axes &axes, const PitPool &pool,
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(F::dn_lim, a);
   for (int d = 0; d < n_d; ++d) {
-    float v = grid_at(pool.stk_limit.down_limit, base, d, -1);
-    out[d] = (v <= 0.01f || !is_finite(v)) ? 0.0f : v;
+    out[d] = grid_at(pool.stk_limit.down_limit, base, d, -1);
   }
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 void ts_susp(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
@@ -166,6 +177,7 @@ void ts_mcap_raw(int a, const Axes &axes, const PitPool &pool,
     out[d] = is_finite(v) ? v * 1e4f : v; // 保留 NaN 暴露数据问题
   }
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 void ts_fmcap_raw(int a, const Axes &axes, const PitPool &pool,
@@ -178,6 +190,7 @@ void ts_fmcap_raw(int a, const Axes &axes, const PitPool &pool,
     out[d] = is_finite(v) ? v * 1e4f : v;
   }
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 void ts_share_raw(int a, const Axes &axes, const PitPool &pool,
@@ -190,17 +203,31 @@ void ts_share_raw(int a, const Axes &axes, const PitPool &pool,
     out[d] = is_finite(v) ? v * 1e4f : v;
   }
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
+// pe_raw: 自己算 mcap_raw / ttm4(n_income_attr_p)，支持负 PE（亏损）
 void ts_pe_raw(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
-  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
-  auto out = T.ts_row(F::pe_raw, a);
+  // 先算 ttm4 归母净利润
+  std::vector<float> ni_ttm(n_d, std::nanf(""));
+  ttm4_ytd_compute(
+      pool.income[a], n_d,
+      [](const IncomeEv &e) -> const std::string & { return e.report_type; },
+      [](const IncomeEv &e) { return e.n_income_attr_p; },
+      std::span<float>(ni_ttm.data(), ni_ttm.size()));
+
+  auto mcap = T.ts_row(F::mcap_raw, a);
+  auto out  = T.ts_row(F::pe_raw, a);
   for (int d = 0; d < n_d; ++d) {
-    out[d] = grid_at(pool.daily_basic.pe_ttm, base, d, -1);
+    float m = mcap[d];
+    float n = ni_ttm[d];
+    // ni=0 → NaN (无意义); 否则正常算 (含负 PE)
+    out[d] = (is_finite(m) && is_finite(n) && n != 0.0f) ? m / n : std::nanf("");
   }
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
@@ -212,6 +239,7 @@ void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
     out[d] = grid_at(pool.daily_basic.pb, base, d, -1);
   }
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 void ts_ps_raw(int a, const Axes &axes, const PitPool &pool,
@@ -223,6 +251,7 @@ void ts_ps_raw(int a, const Axes &axes, const PitPool &pool,
     out[d] = grid_at(pool.daily_basic.ps_ttm, base, d, -1);
   }
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
@@ -234,6 +263,7 @@ void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
     out[d] = grid_at(pool.daily_basic.dv_ttm, base, d, -1);
   }
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 // ============================================================================
@@ -249,6 +279,7 @@ void ts_rev_raw(int a, const Axes &axes, const PitPool &pool,
       [](const IncomeEv &e) { return e.revenue; },
       out);
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool,
@@ -272,6 +303,7 @@ void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool,
                  : std::nanf("");
   }
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 void ts_roe_raw(int a, const Axes &axes, const PitPool &pool,
@@ -284,6 +316,7 @@ void ts_roe_raw(int a, const Axes &axes, const PitPool &pool,
       [](const FinaIndEv &e) { return e.roe; },
       out);
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 void ts_roa_raw(int a, const Axes &axes, const PitPool &pool,
@@ -296,10 +329,11 @@ void ts_roa_raw(int a, const Axes &axes, const PitPool &pool,
       [](const FinaIndEv &e) { return e.roa; },
       out);
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 // ni_raw: 仅 income.end_date.M==12 ∧ report_type=='1'; 同 end_date 后到覆盖前;
-//   取 last_v 最大的 2 条年报均值. (与 forecast/express 不混)
+//   降级: 有 2+ 条年报取最新 2 条均值; 只有 1 条则用 1 条; 0 条才 NaN.
 void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
@@ -329,9 +363,9 @@ void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
       else
         annuals[idx].second = Cell{e.n_income_attr_p, e.v};
     }
-    if (annuals.size() < 2) continue;
+    if (annuals.empty()) continue;
 
-    // 找 last_v 最大 2 条
+    // 找 last_v 最大 2 条 (或 1 条)
     int i0 = -1, i1 = -1;
     int v0 = -1, v1 = -1;
     for (std::size_t i = 0; i < annuals.size(); ++i) {
@@ -343,10 +377,15 @@ void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
         v1 = v;  i1 = static_cast<int>(i);
       }
     }
-    if (i0 < 0 || i1 < 0) continue;
-    out[d] = (annuals[i0].second.val + annuals[i1].second.val) * 0.5f;
+    // 降级: 有 2 条取均值, 只有 1 条用 1 条
+    if (i0 >= 0 && i1 >= 0) {
+      out[d] = (annuals[i0].second.val + annuals[i1].second.val) * 0.5f;
+    } else if (i0 >= 0) {
+      out[d] = annuals[i0].second.val;
+    }
   }
   fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 // ============================================================================
@@ -373,6 +412,22 @@ void ts_list_age(int a, const Axes &axes, const PitPool &, const StockMeta &meta
   } else {
     // 无 list_date → 视为永远未上市 (list_age = 极负值)
     std::fill(out.begin(), out.end(), -1e9f);
+  }
+}
+
+// delist_age: D - delist_date (正数=已退市天数, 负数=距退市天数)
+void ts_delist_age(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
+                   Tensor &T) {
+  int n_d = axes.n_d();
+  auto out = T.ts_row(F::delist_age, a);
+  if (meta.delist_date[a].size() == 8) {
+    auto dd = misc::parse_yyyymmdd(meta.delist_date[a]);
+    for (int d = 0; d < n_d; ++d) {
+      out[d] = static_cast<float>((axes.date_days[d] - dd).count());
+    }
+  } else {
+    // 无 delist_date → 视为永不退市 (delist_age = 0, 任何 "delist_age > 0" 判定都不命中)
+    std::fill(out.begin(), out.end(), 0.0f);
   }
 }
 
@@ -409,7 +464,9 @@ void ts_limit_up(int a, const Axes &axes, const PitPool &, const StockMeta &,
   auto up  = T.ts_row(F::up_lim, a);
   auto out = T.ts_row(F::limit_up, a);
   for (int d = 0; d < n_d; ++d) {
-    out[d] = (is_finite(cl[d]) && is_finite(up[d]) && cl[d] >= up[d] - 1e-4f)
+    // up >= 100000 是无涨停限制哨兵，排除
+    out[d] = (is_finite(cl[d]) && is_finite(up[d]) &&
+              up[d] < 100000.0f && cl[d] >= up[d] - 1e-4f)
                  ? 1.0f
                  : 0.0f;
   }
@@ -422,7 +479,9 @@ void ts_limit_dn(int a, const Axes &axes, const PitPool &, const StockMeta &,
   auto dn  = T.ts_row(F::dn_lim, a);
   auto out = T.ts_row(F::limit_dn, a);
   for (int d = 0; d < n_d; ++d) {
-    out[d] = (is_finite(cl[d]) && is_finite(dn[d]) && cl[d] <= dn[d] + 1e-4f)
+    // dn <= 0.01 是无跌停限制哨兵，排除
+    out[d] = (is_finite(cl[d]) && is_finite(dn[d]) &&
+              dn[d] > 0.01f && cl[d] <= dn[d] + 1e-4f)
                  ? 1.0f
                  : 0.0f;
   }
@@ -482,8 +541,13 @@ void ts_revenue_st(int a, const Axes &axes, const PitPool &pool,
 // dividend_st: 阶梯 forward fill — 每 dividend event 重算 3y_sum,
 //   3y_sum = Σ over 历史 events with end_date.Y in [ann_y-3, ann_y-1]
 //            的 cash_div_tax × share_raw[event.v+1]; 区间 [e.v+1, next.v+1) 填.
+//
+// 暖机期 (warmup_d 之前) 一律不命中, 避免 3y 回望不完整时偏严:
+//   1) 数据轴边界: axes 起点前事件不可见 → 起点后 3 年内 3y 窗口必然不完整
+//   2) 股票自身: 上市后 3 年内分红记录天然少, 不视为 ST
+//   warmup_d = max(axes_warmup_d, stock_warmup_d), 取较晚者.
 void ts_dividend_st(int a, const Axes &axes, const PitPool &pool,
-                    const StockMeta &, Tensor &T) {
+                    const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   auto out       = T.ts_row(F::dividend_st, a);
   auto share_raw = T.ts_row(F::share_raw, a);
@@ -491,9 +555,24 @@ void ts_dividend_st(int a, const Axes &axes, const PitPool &pool,
   auto mb_       = T.ts_row(F::mb, a);
   std::fill(out.begin(), out.end(), 0.0f);
 
+  int axes_start_y  = (n_d > 0) ? year_of(axes.dates[0]) : 0;
+  int axes_warmup_d = n_d;
+  for (int d = 0; d < n_d; ++d) {
+    if (year_of(axes.dates[d]) >= axes_start_y + 3) { axes_warmup_d = d; break; }
+  }
+  int stock_warmup_d = n_d;
+  if (meta.list_date[a].size() == 8) {
+    int list_y = year_of(meta.list_date[a]);
+    for (int d = 0; d < n_d; ++d) {
+      if (year_of(axes.dates[d]) >= list_y + 3) { stock_warmup_d = d; break; }
+    }
+  }
+  int warmup_d = std::max(axes_warmup_d, stock_warmup_d);
+
   const auto &divs = pool.dividend[a];
 
   auto apply_segment = [&](int seg_start, int seg_end, float val_3ysum) {
+    if (seg_start < warmup_d) seg_start = warmup_d;
     if (seg_start < 0) seg_start = 0;
     if (seg_end > n_d) seg_end = n_d;
     for (int d = seg_start; d < seg_end; ++d) {
@@ -585,7 +664,7 @@ void ts_new_list(int a, const Axes &axes, const PitPool &, const StockMeta &,
   auto la  = T.ts_row(F::list_age, a);
   auto out = T.ts_row(F::new_list, a);
   for (int d = 0; d < n_d; ++d) {
-    out[d] = (is_finite(la[d]) && la[d] < 60.0f) ? 1.0f : 0.0f;
+    out[d] = (is_finite(la[d]) && la[d] >= 0.0f && la[d] < 60.0f) ? 1.0f : 0.0f;
   }
 }
 
@@ -692,6 +771,7 @@ const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES = {{
     // ---- TS asset 静态 ----
     {"mb",          Kind::Inter,  Axis::TimeSeries,   &impl::ts_mb,          nullptr},
     {"list_age",    Kind::Inter,  Axis::TimeSeries,   &impl::ts_list_age,    nullptr},
+    {"delist_age",  Kind::Inter,  Axis::TimeSeries,   &impl::ts_delist_age,  nullptr},
     // ---- TS 衍生 bool ----
     {"low_p",       Kind::Inter,  Axis::TimeSeries,   &impl::ts_low_p,       nullptr},
     {"low_mc",      Kind::Inter,  Axis::TimeSeries,   &impl::ts_low_mc,      nullptr},

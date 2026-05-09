@@ -22,12 +22,24 @@ namespace feature {
 
 namespace {
 
-// ---- yyjson helpers (NaN / 缺席统一返回 NaN) ----
+// ---- yyjson helpers ----
+// NaN = 数据缺失 (JSON 字段不存在或 null)
+// +inf = 数据不合理 (存在但值违反业务约束)
 inline float as_float_or_nan(yyjson_val *v) {
   if (!v) return std::nanf("");
   if (yyjson_is_real(v)) return static_cast<float>(yyjson_get_real(v));
   if (yyjson_is_int(v)) return static_cast<float>(yyjson_get_int(v));
   return std::nanf("");
+}
+
+// 校验: 值必须 > 0，否则返回 +inf
+inline float positive_or_inf(float v) {
+  return (std::isfinite(v) && v > 0.0f) ? v : std::numeric_limits<float>::infinity();
+}
+
+// 校验: 值必须 >= 0，否则返回 +inf
+inline float non_negative_or_inf(float v) {
+  return (std::isfinite(v) && v >= 0.0f) ? v : std::numeric_limits<float>::infinity();
 }
 
 inline std::string as_str(yyjson_val *v) {
@@ -67,8 +79,10 @@ inline void event_post_sort(EventStore<Ev> &store) {
   }
 }
 
-// 网格字段 per-A forward fill: 遇到有效值记住，后续 NaN 用该值填充
-// 注：上市前的 NaN 在 ts 阶段根据 StockMeta.list_date 处理
+// 网格字段 per-A forward fill:
+//   - finite 值记为 last，可用作 fill 源
+//   - NaN (数据缺失) 用 last 填充
+//   - +inf (数据不合理) 不填充，保留标记
 inline void grid_ffill(std::vector<float> &grid, int n_a, int n_d) {
   for (int a = 0; a < n_a; ++a) {
     std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
@@ -77,7 +91,8 @@ inline void grid_ffill(std::vector<float> &grid, int n_a, int n_d) {
       float v = grid[base + static_cast<std::size_t>(d)];
       if (std::isfinite(v)) {
         last = v;
-      } else if (std::isfinite(last)) {
+      } else if (std::isnan(v) && std::isfinite(last)) {
+        // 只填充 NaN，不填充 +inf
         grid[base + static_cast<std::size_t>(d)] = last;
       }
     }
@@ -120,14 +135,25 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
     std::size_t off = static_cast<std::size_t>(a) *
                           static_cast<std::size_t>(n_d) +
                       base_off;
-    pool.daily_basic.close[off]       = as_float_or_nan(yyjson_obj_get(item, "close"));
-    pool.daily_basic.total_mv[off]    = as_float_or_nan(yyjson_obj_get(item, "total_mv"));
-    pool.daily_basic.circ_mv[off]     = as_float_or_nan(yyjson_obj_get(item, "circ_mv"));
-    pool.daily_basic.total_share[off] = as_float_or_nan(yyjson_obj_get(item, "total_share"));
+    // 校验: close/total_mv/circ_mv/total_share 必须 > 0
+    pool.daily_basic.close[off]       = positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "close")));
+    pool.daily_basic.total_mv[off]    = positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "total_mv")));
+    pool.daily_basic.circ_mv[off]     = positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "circ_mv")));
+    pool.daily_basic.total_share[off] = positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "total_share")));
+    // pe_ttm 不再使用 (自己算), 但保留读取
     pool.daily_basic.pe_ttm[off]      = as_float_or_nan(yyjson_obj_get(item, "pe_ttm"));
+    // pb 可正可负 (净资产正负), 保持原值
     pool.daily_basic.pb[off]          = as_float_or_nan(yyjson_obj_get(item, "pb"));
-    pool.daily_basic.ps_ttm[off]      = as_float_or_nan(yyjson_obj_get(item, "ps_ttm"));
-    pool.daily_basic.dv_ttm[off]      = as_float_or_nan(yyjson_obj_get(item, "dv_ttm"));
+    // ps_ttm: NaN 保持（无营收数据正常），仅 <=0 不合理
+    {
+      float ps = as_float_or_nan(yyjson_obj_get(item, "ps_ttm"));
+      pool.daily_basic.ps_ttm[off] = std::isnan(ps) ? ps : positive_or_inf(ps);
+    }
+    // dv_ttm: NaN 保持（无分红数据正常），仅负数不合理
+    {
+      float dv = as_float_or_nan(yyjson_obj_get(item, "dv_ttm"));
+      pool.daily_basic.dv_ttm[off] = std::isnan(dv) ? dv : non_negative_or_inf(dv);
+    }
   }
 }
 
@@ -169,8 +195,17 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
     std::size_t off = static_cast<std::size_t>(a) *
                           static_cast<std::size_t>(n_d) +
                       base_off;
-    pool.stk_limit.up_limit[off]   = as_float_or_nan(yyjson_obj_get(item, "up_limit"));
-    pool.stk_limit.down_limit[off] = as_float_or_nan(yyjson_obj_get(item, "down_limit"));
+    // 涨跌停价校验 (哨兵: up>=1e6 无涨停, dn<=0.01 无跌停):
+    //   - 数据问题: up=0 (极少量) → 1e6
+    //   - 数据问题: dn=0 (北交所开市首日 20211115, 248条) → 0.01
+    {
+      float up = as_float_or_nan(yyjson_obj_get(item, "up_limit"));
+      pool.stk_limit.up_limit[off] = (up == 0.0f) ? 1e6f : positive_or_inf(up);
+    }
+    {
+      float dn = as_float_or_nan(yyjson_obj_get(item, "down_limit"));
+      pool.stk_limit.down_limit[off] = (dn == 0.0f) ? 0.01f : positive_or_inf(dn);
+    }
   }
 }
 

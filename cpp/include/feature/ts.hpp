@@ -29,8 +29,8 @@ void compute_ts(const Axes &, const PitPool &, const StockMeta &, Tensor &);
 //      按 v 升序回放 events, 维护 map<end_date, value> (latest version per end_date,
 //      可选 report_type=='1' 过滤; fina_indicator 不带 type → get_rt 返回空串接受全部);
 //      d_target = v + 1 (offset = -1, 财报 itf 全部 visible_date=ann_date).
-//      每 d 计算: t = max(end_date in map); ttm4 = X(t) + X(Y-1, 12) - X(Y-1, t.M).
-//      M==12 退化为 X(t); 任一缺位 → NaN.
+//      自动降级: 完整 X(t)+X(Y-1,12)-X(Y-1,M) → 缺同期 X(t)+X(Y-1,12)*(12-M)/12 → 缺年报 X(t)*12/M.
+//      M==12 退化为 X(t).
 //
 // 2) state_machine_intervals<TEv>:
 //      按 v 升序遍历 trigger_events, 每 trigger 用 find_off(trigger) 求终止 d,
@@ -64,19 +64,26 @@ void ttm4_ytd_compute(const std::vector<Ev> &events, int n_d,
     int M = month_of(t);
     if (Y == 0 || M == 0) continue;
 
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%04d1231", Y - 1);
-    auto it_y_dec = latest.find(buf);
-    if (it_y_dec == latest.end()) continue;
-
+    // M==12 (年报): 直接是 TTM
     if (M == 12) { out[d] = x_t; continue; }
 
-    char buf2[16];
-    std::snprintf(buf2, sizeof(buf2), "%04d%s", Y - 1, t.substr(4).c_str());
-    auto it_y_m = latest.find(buf2);
-    if (it_y_m == latest.end()) continue;
+    char buf_y_dec[16], buf_y_m[16];
+    std::snprintf(buf_y_dec, sizeof(buf_y_dec), "%04d1231", Y - 1);
+    std::snprintf(buf_y_m, sizeof(buf_y_m), "%04d%s", Y - 1, t.substr(4).c_str());
+    auto it_y_dec = latest.find(buf_y_dec);
+    auto it_y_m = latest.find(buf_y_m);
 
-    out[d] = x_t + it_y_dec->second - it_y_m->second;
+    if (it_y_dec != latest.end() && it_y_m != latest.end()) {
+      // 完整 TTM4: X(t) + X(Y-1, 12) - X(Y-1, M)
+      out[d] = x_t + it_y_dec->second - it_y_m->second;
+    } else if (it_y_dec != latest.end()) {
+      // 降级: 缺去年同期，用 X(t) + X(Y-1,12) * (12-M)/12 近似
+      float f = static_cast<float>(12 - M) / 12.0f;
+      out[d] = x_t + it_y_dec->second * f;
+    } else {
+      // 降级: 缺去年年报，用 X(t) * 12/M 年化
+      out[d] = x_t * 12.0f / static_cast<float>(M);
+    }
   }
 }
 
