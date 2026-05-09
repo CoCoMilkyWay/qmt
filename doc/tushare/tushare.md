@@ -31,9 +31,26 @@
    - 财务审计意见: fina_audit.md
    - 主营业务构成: fina_mainbz.md
    - 财报披露日期表: disclosure_date.md
+ - 指数数据 doc/tushare/index
+   - 指数基本信息: index_basic.md
+   - 申万行业分类: index_classify.md
+   - 申万行业成分构成(分级): index_member_all.md
+   - 申万行业日线行情: sw_daily.md
+   - 沪深市场交易统计: daily_info.md
+   - 深圳市场每日交易概况: sz_daily_info.md
  - 参考数据
  - 特色数据
  - 两融及转融通
  - 资金流向数据
  - 打板专题数据
+ - 帮助文档 doc/tushare/help
+   - 调取数据: 调取数据.md
+   - 本地化数据: 本地化数据.md
+   - http获取: http获取.md
+   - python获取: python获取.md
+   - 数据库mysql: 数据库mysql.md
+   - 数据库mongo: 数据库mongo.md
+   - 数据更新说明: 数据更新说明.md
+   - 积分频次对应表: 积分频次对应表.md
+   - 积分到期查询: 积分到期查询.md
 

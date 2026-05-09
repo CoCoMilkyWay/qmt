@@ -30,7 +30,8 @@ namespace {
 std::vector<std::pair<std::string, std::string>>
 split_segments(const std::vector<std::string> &missing, int max_days) {
   std::vector<std::pair<std::string, std::string>> segments;
-  if (missing.empty()) return segments;
+  if (missing.empty())
+    return segments;
 
   sys_days seg_start = misc::parse_yyyymmdd(missing[0]);
   sys_days seg_prev = seg_start;
@@ -111,18 +112,37 @@ const std::vector<InterfaceSpec> SPECS = {
      {"ann_date"},
      {"ts_code", "end_date"},
      std::make_shared<RangeStrategy>(::config::FETCH_MAX_DAYS_PER_CALL)},
+    // 财报披露 (api=disclosure_date) 拆成两个 itf, 各自时序自洽 (无未来信息):
+    //
+    //   disclosure: 披露计划公告 (visible=ann_date)
+    //     - query=ann_date=Y, 抓当天发布或修订的披露计划
+    //     - drop actual_date/modify_date (后续回填 = 未来信息)
+    //     - 留 pre_date (ann_date 当天声明的计划日, 非回填)
+    //     - 用途: 提前感知"哪些股票计划在某日披露" (不用于状态机终止)
+    //     - 历史 null ann_date 记录 (~1.2%, 2015-2020) 自动落入 report
+    //
+    //   report: 实际披露事件 (visible=actual_date)
+    //     - query=actual_date=Y, 仅返回 actual_date 已填的记录 (= 实际已披露)
+    //     - 所有字段 (ann_date/pre_date) 都是 actual_date 当下及之前的历史信息
+    //     - 用途: 状态机终止信号 (forecast 系列 ST 终止于 report.actual_date)
     {"disclosure",
+     "disclosure_date",
+     {"ann_date"},
+     {"ts_code", "end_date"},
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"ann_date"}),
+     {"actual_date", "modify_date"}},
+    {"report",
      "disclosure_date",
      {"actual_date"},
      {"ts_code", "end_date"},
-     std::make_shared<PerDayStrategy>(
-         std::vector<std::string>{"actual_date"})},
-    // ST 风险警示：同一天一只股可能有多种 ST 类型变更，PK 含 st_tpye (tushare 字段名)
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"actual_date"})},
+    // ST 风险警示：visible_date=imp_date (状态生效日, 盘前已知)
+    // PK=(ts_code, pub_date, imp_date, st_tpye): 同 imp_date 可能多种类型 or 多次修正
     {"st",
      "st",
-     {"pub_date"},
+     {"imp_date"},
      {"ts_code", "pub_date", "imp_date", "st_tpye"},
-     std::make_shared<PerDayStrategy>(std::vector<std::string>{"pub_date"})},
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"imp_date"})},
     // 交易日历：每天每交易所仅 1 行，按 10 年/段切；变体笛卡尔积全部 7 个交易所
     // 文档支持枚举: SSE 上交所 / SZSE 深交所 / CFFEX 中金所 / SHFE 上期所 /
     //              CZCE 郑商所 / DCE 大商所 / INE 上能源
@@ -132,10 +152,7 @@ const std::vector<InterfaceSpec> SPECS = {
      "trade_cal",
      {"cal_date"},
      {"exchange", "cal_date"},
-     std::make_shared<RangeStrategy>(
-         3650, "exchange",
-         std::vector<std::string>{"SSE", "SZSE", "CFFEX", "SHFE", "CZCE",
-                                  "DCE", "INE"})},
+     std::make_shared<RangeStrategy>(3650, "exchange", std::vector<std::string>{"SSE", "SZSE", "CFFEX", "SHFE", "CZCE", "DCE", "INE"})},
     // 分红送股：每个 day=Y 双查询 (ann_date=Y) + (imp_ann_date=Y)
     // - ann_date=Y 抓当天预案/决议公告 (visible_date=ann_date=Y)
     // - imp_ann_date=Y 抓当天实施公告 (visible_date=imp_ann_date=Y)
@@ -145,8 +162,7 @@ const std::vector<InterfaceSpec> SPECS = {
      "dividend",
      {"imp_ann_date", "ann_date"},
      {"ts_code", "end_date", "div_proc"},
-     std::make_shared<PerDayStrategy>(
-         std::vector<std::string>{"ann_date", "imp_ann_date"})},
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"ann_date", "imp_ann_date"})},
     // 每日指标：换手率/量比/PE_TTM/PS_TTM/自由流通市值等核心因子
     // 一天全市场 ~5000 行，限额 6000；盘后 15-17 点入库
     {"daily_basic",

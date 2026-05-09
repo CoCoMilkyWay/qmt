@@ -25,7 +25,7 @@ namespace {
 //   day file 不存在 + 不在 set → 未拉
 // ============================================================================
 
-using EmptySet = std::unordered_set<std::string>;        // {DD}
+using EmptySet = std::unordered_set<std::string>;             // {DD}
 using EmptyMonth = std::unordered_map<std::string, EmptySet>; // {itf: {DD}}
 
 fs::path empty_path(std::string_view yyyy, std::string_view mm) {
@@ -36,9 +36,11 @@ fs::path empty_path(std::string_view yyyy, std::string_view mm) {
 EmptyMonth read_empty_month(std::string_view yyyy, std::string_view mm) {
   EmptyMonth out;
   fs::path path = empty_path(yyyy, mm);
-  if (!fs::exists(path)) return out;
+  if (!fs::exists(path))
+    return out;
   std::string buf = misc::read_file_all(path);
-  if (buf.empty()) return out;
+  if (buf.empty())
+    return out;
   yyjson_doc *doc = yyjson_read(buf.data(), buf.size(), 0);
   assert(doc);
   yyjson_val *root = yyjson_doc_get_root(doc);
@@ -65,7 +67,8 @@ void write_empty_month(std::string_view yyyy, std::string_view mm,
   std::vector<std::string> itf_names;
   itf_names.reserve(data.size());
   for (auto &[k, v] : data) {
-    if (!v.empty()) itf_names.push_back(k);
+    if (!v.empty())
+      itf_names.push_back(k);
   }
   std::sort(itf_names.begin(), itf_names.end());
 
@@ -102,7 +105,8 @@ std::string make_pk_key_from_obj(yyjson_val *obj,
   std::string key;
   for (auto &f : pk_fields) {
     yyjson_val *v = yyjson_obj_get(obj, f.c_str());
-    if (v && yyjson_is_str(v)) key += yyjson_get_str(v);
+    if (v && yyjson_is_str(v))
+      key += yyjson_get_str(v);
     key += '|';
   }
   return key;
@@ -113,7 +117,8 @@ std::string make_pk_key_from_arr(yyjson_val *item,
   std::string key;
   for (int idx : pk_idxs) {
     yyjson_val *v = yyjson_arr_get(item, static_cast<size_t>(idx));
-    if (v && yyjson_is_str(v)) key += yyjson_get_str(v);
+    if (v && yyjson_is_str(v))
+      key += yyjson_get_str(v);
     key += '|';
   }
   return key;
@@ -122,6 +127,7 @@ std::string make_pk_key_from_arr(yyjson_val *item,
 void write_day(const InterfaceSpec &spec, const std::string &day,
                const std::vector<std::string> &field_names,
                const std::vector<int> &pk_idxs,
+               const std::unordered_set<int> &drop_idxs,
                const std::vector<yyjson_val *> &items_today) {
   assert(!items_today.empty());
   fs::path path = data_path(day, spec.name);
@@ -142,6 +148,8 @@ void write_day(const InterfaceSpec &spec, const std::string &day,
   };
 
   // ---- Existing file ----
+  // 老记录加载后按 spec.drop_fields 剥离 (lookback 内重抓的 PK 会被新记录覆盖,
+  // 此剥离是 lookback 窗口外旧 PK 的兜底, 防止历史持久化的"未来字段"残留)
   yyjson_doc *old_doc = nullptr;
   std::string old_buf;
   if (fs::exists(path)) {
@@ -155,14 +163,20 @@ void write_day(const InterfaceSpec &spec, const std::string &day,
     yyjson_arr_foreach(old_root, i, n, obj) {
       yyjson_mut_val *mut_obj = yyjson_val_mut_copy(mut_doc, obj);
       assert(mut_obj);
+      for (auto &f : spec.drop_fields) {
+        yyjson_mut_obj_remove_str(mut_obj, f.c_str());
+      }
       upsert(make_pk_key_from_obj(obj, spec.pk), mut_obj);
     }
   }
 
   // ---- New records (array → object by field_names) ----
+  // drop_idxs 内的字段不写盘 (例: disclosure.actual_date 是 ann_date 之后回填的未来信息)
   for (yyjson_val *item : items_today) {
     yyjson_mut_val *obj = yyjson_mut_obj(mut_doc);
     for (size_t k = 0; k < field_names.size(); k++) {
+      if (drop_idxs.count(static_cast<int>(k)))
+        continue;
       yyjson_val *v = yyjson_arr_get(item, k);
       yyjson_mut_val *mv = yyjson_val_mut_copy(mut_doc, v);
       // field_names[k].c_str() 在本函数生命周期内稳定，覆盖 mut_doc 序列化
@@ -187,7 +201,8 @@ void write_day(const InterfaceSpec &spec, const std::string &day,
   std::free(json_str);
 
   yyjson_mut_doc_free(mut_doc);
-  if (old_doc) yyjson_doc_free(old_doc);
+  if (old_doc)
+    yyjson_doc_free(old_doc);
 }
 
 } // namespace
@@ -231,8 +246,10 @@ std::vector<std::string> scan_missing(const InterfaceSpec &spec,
       missing.push_back(d);
       continue;
     }
-    if (fs::exists(data_path(d, spec.name))) continue;
-    if (get_empty_set(d).count(d.substr(6, 2))) continue;
+    if (fs::exists(data_path(d, spec.name)))
+      continue;
+    if (get_empty_set(d).count(d.substr(6, 2)))
+      continue;
     missing.push_back(d);
   }
   return missing;
@@ -252,7 +269,8 @@ void write_by_visible_date(yyjson_val *fields_arr, yyjson_val *items_arr,
 
   auto find_idx = [&](const std::string &f) -> int {
     for (size_t i = 0; i < field_names.size(); i++) {
-      if (field_names[i] == f) return static_cast<int>(i);
+      if (field_names[i] == f)
+        return static_cast<int>(i);
     }
     return -1;
   };
@@ -274,6 +292,14 @@ void write_by_visible_date(yyjson_val *fields_arr, yyjson_val *items_arr,
     pk_idxs.push_back(idx);
   }
 
+  // drop_fields → 字段下标集合 (响应中可能不含这些字段, 缺席静默跳过)
+  std::unordered_set<int> drop_idxs;
+  for (auto &f : spec.drop_fields) {
+    int idx = find_idx(f);
+    if (idx >= 0)
+      drop_idxs.insert(idx);
+  }
+
   // ---- Bucket items by visible_date (drop null vd / out-of-range) ----
   // visible_date：按 visible_date_fields 顺序找第一个 "非 null 非空字符串" 字段值
   std::unordered_map<std::string, std::vector<yyjson_val *>> by_day;
@@ -283,14 +309,18 @@ void write_by_visible_date(yyjson_val *fields_arr, yyjson_val *items_arr,
     std::string vd;
     for (int vd_idx : vd_idxs) {
       yyjson_val *v = yyjson_arr_get(item, static_cast<size_t>(vd_idx));
-      if (!v || !yyjson_is_str(v)) continue;
+      if (!v || !yyjson_is_str(v))
+        continue;
       const char *s = yyjson_get_str(v);
-      if (!s || s[0] == '\0') continue;
+      if (!s || s[0] == '\0')
+        continue;
       vd = s;
       break;
     }
-    if (vd.empty()) continue;
-    if (vd < task.start || vd > task.end) continue;
+    if (vd.empty())
+      continue;
+    if (vd < task.start || vd > task.end)
+      continue;
     by_day[vd].push_back(item);
   }
 
@@ -306,7 +336,7 @@ void write_by_visible_date(yyjson_val *fields_arr, yyjson_val *items_arr,
     auto it = by_day.find(d);
     bool has_data = (it != by_day.end()) && !it->second.empty();
     if (has_data) {
-      write_day(spec, d, field_names, pk_idxs, it->second);
+      write_day(spec, d, field_names, pk_idxs, drop_idxs, it->second);
     }
     // 二次确认 day file 状态 (上一行 write_day 之后必然 exists)
     bool day_exists = has_data || fs::exists(data_path(d, spec.name));
@@ -319,8 +349,10 @@ void write_by_visible_date(yyjson_val *fields_arr, yyjson_val *items_arr,
       mit = dirty_months.emplace(ym, read_empty_month(yyyy, mm)).first;
     }
     EmptySet &set = mit->second[spec.name];
-    if (day_exists) set.erase(dd);
-    else set.insert(dd);
+    if (day_exists)
+      set.erase(dd);
+    else
+      set.insert(dd);
   }
 
   for (auto &[ym, month] : dirty_months) {

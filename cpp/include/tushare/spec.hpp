@@ -51,8 +51,9 @@ private:
 };
 
 // 每天 N 个 task，每个 task 以 (day_params[i], day) 为唯一 query
-//   - disclosure:                          PerDayStrategy({"actual_date"})
-//   - st:                                  PerDayStrategy({"pub_date"})
+//   - disclosure:                          PerDayStrategy({"ann_date"})
+//   - report:                              PerDayStrategy({"actual_date"})
+//   - st:                                  PerDayStrategy({"imp_date"})
 //   - daily_basic/adj_factor/stk_limit:    PerDayStrategy({"trade_date"})
 //   - fina_indicator/income/cashflow:      PerDayStrategy({"ann_date"})
 //   - dividend:                            PerDayStrategy({"ann_date","imp_ann_date"})
@@ -78,6 +79,11 @@ struct InterfaceSpec {
   std::vector<std::string> visible_date_fields;
   std::vector<std::string> pk;
   std::shared_ptr<FetchStrategy> strategy;
+  // 不持久化的字段 (防未来信息泄漏): API 响应中存在但视作 visible_date 之后才填入
+  // 的字段, 写盘前剥离. 例: disclosure (visible=ann_date) 剥离 actual_date/modify_date
+  // (这两字段由 tushare 在 ann_date 之后回填, 持久化会污染 PIT 回放).
+  // 默认 {} 表示无字段需剥离.
+  std::vector<std::string> drop_fields;
 };
 
 extern const std::vector<InterfaceSpec> SPECS;

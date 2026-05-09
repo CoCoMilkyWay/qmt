@@ -5,7 +5,7 @@ from collections import defaultdict
 from update_bulk import DATA_DIR  # pyright: ignore[reportMissingImports]
 
 DATA_TYPES = {
-    'disclosure': 'actual_date',
+    'report': 'actual_date',
     'forecast': 'ann_date',
     'express': 'ann_date',
 }
@@ -124,7 +124,7 @@ def print_table(agg: dict):
         year, quarter = period
         period_str = f'{year} {quarter}'
 
-        for i, data_type in enumerate(['disclosure', 'forecast', 'express']):
+        for i, data_type in enumerate(['report', 'forecast', 'express']):
             type_char = data_type[0].upper()
             counts = agg[period][data_type]
 
@@ -151,7 +151,7 @@ def main():
     agg = aggregate_coverage(data)
     print(f'  {len(agg)} periods\n')
 
-    print('Coverage Table (D=disclosure, F=forecast, E=express)')
+    print('Coverage Table (R=report, F=forecast, E=express)')
     print('Columns: offset months from period end (e.g., +1 = 1 month after quarter end)\n')
     print_table(agg)
 
