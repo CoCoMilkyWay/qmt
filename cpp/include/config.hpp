@@ -17,4 +17,7 @@ inline constexpr int FETCH_MAX_DAYS_PER_CALL = 31;             // 单次 API 调
 
 inline constexpr int API_DEDUP_WINDOW_SECONDS = 600; // 单 itf 去重窗口：上次成功更新距今 < 该值则跳过；时间戳落 data/_meta/<name>.lastupdate (粒度=数据文件名 spec.name)
 
+// feature 子系统
+inline constexpr int UNIVERSE_SIZE = 80; // pool 截面: pool_b ∧ rank(mcap_raw asc) ≤ N 取最终 strategy universe
+
 } // namespace config

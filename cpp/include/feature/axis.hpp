@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -10,9 +11,11 @@ namespace feature {
 // D 轴 + A 轴 + 反向索引. 由 load_axes() 一次性构造, 此后只读.
 //   dates: SSE ∪ SZSE 且 is_open=1 的交易日 YYYYMMDD, 升序去重
 //   codes: _meta/stock_basic.json 全量 ts_code, 升序 (含已退市)
+//   date_days: dates[i] 的 sys_days 缓存 (list_age / rolling 等场合避免重复 parse)
 struct Axes {
   std::vector<std::string> dates;
   std::vector<std::string> codes;
+  std::vector<std::chrono::sys_days> date_days;
   std::unordered_map<std::string, int> date_idx;
   std::unordered_map<std::string, int> code_idx;
 

@@ -26,14 +26,16 @@ qmt/
 │       │   ├── store.cpp            # scan_missing / write_by_visible_date (PK upsert + _empty.json)
 │       │   ├── meta.cpp             # refresh_stock_basic + refresh_index_member_all + 单 itf 去重 (lastupdate 时间戳, 粒度=spec.name)
 │       │   └── pipeline.cpp         # scan → plan → fetch → write 主流程 (入口逐 itf 走 lastupdate 去重)
-│       └── feature/                 # 4-phase feature 系统: 构建特征张量 (in-memory only, 全过程式 + 轻量抽象)
+│       └── feature/                 # 4-phase 特征系统; 业务密集化 + 外层 flow 完全 agnostic
+│                                    # 单点真理: pit.cpp (itf 维) + feature.cpp (feature 维)
 │           ├── axis.cpp             # Phase 0: load_axes (D=SSE∪SZSE 交易日) + load_stock_meta (per-A 静态)
-│           ├── feature.cpp          # F 枚举 ↔ FeatureMeta (kind 与 axis/TS|CS 正交, 逐项 meta)
+│           ├── feature.cpp          # 【单点真理 feature】每 feature 一个 ts_xxx/cs_xxx compute fn + 末尾 FEATURES[] 表挂载
+│           │                        # F 枚举顺序 = FEATURES[] 索引 = 计算顺序 (后段读已写就的 T.ts_row(prior_f, a))
 │           ├── tensor.cpp           # Tensor 容器 (统一 [F][A][D] layout, ts_row 连续, gather/scatter cs_row)
-│           ├── pit.cpp              # 各 itf parse_*_day helper (网格 dense / 事件 per-A 链)
-│           ├── load.cpp             # Phase 1: per-(day, itf) 并行解析, 网格无锁 / 事件 per-A mutex
-│           ├── ts.cpp               # Phase 2: per-A 并行, stage 1..6 (extract_grid → ttm4 → static → derived → state machines → pool_b)
-│           ├── cs.cpp               # Phase 3: per-D 并行, TS raw→CS 归一化 (当前写入全部 Factor 槽位; winsor_mad∘z∘pct_rank) + compute_pool
+│           ├── pit.cpp              # 【单点真理 itf】每 itf 一个 namespace block (prealloc + parse + post_sort) + 末尾 ITFS[] 表挂载
+│           ├── load.cpp             # Phase 1 通用 flow: 仅迭代 ITFS[] (prealloc → enumerate → 并行 parse → post_sort), 不出现 itf 名
+│           ├── ts.cpp               # Phase 2 通用 flow: per-A 并行, 迭代 FEATURES[] 中 axis==TS 的 compute_ts 调; kernel 在 ts.hpp (ttm4_ytd_compute / state_machine_intervals 模板)
+│           ├── cs.cpp               # Phase 3 通用 flow: per-D 并行, 迭代 FEATURES[] 中 axis==CS 的 compute_cs 调; kernel (winsor_mad / z / pct_rank / factor_pipeline) 在 cs.hpp/cpp
 │           └── build.cpp            # 编排入口: 串 4 phase + misc::Timer 报段时
 ├── data/                            # tushare 落地 (按 visible_date 切日, gitignored)
 │   ├── _meta/
@@ -123,7 +125,9 @@ qmt/
 
 ## 字段表
 
-排序: filter → factor → inter; inter 内部按 causal (raw → derived); 相关字段就近. `assumption` 列 `—` = 定义自洽; 形如 `[元]` `[%]` `[ratio]` `[股]` 的方括号前缀标注 inter 输出单位.
+本节是 feature 的「契约 / 数学定义」(描述"做什么"); 实现镜像在 `cpp/src/feature/feature.cpp` 的 `FEATURES[]` 表 + `impl::ts_*` / `impl::cs_*` (描述"怎么做"). 增减/修改 feature 须同步两处.
+
+排序 (本表, 阅读用): filter → factor → inter; inter 内部按 causal (raw → derived); 相关字段就近. (注: `cpp/include/feature/feature.hpp` 的 `F` 枚举顺序 = 计算顺序, 与本表排序独立.) `assumption` 列 `—` = 定义自洽; 形如 `[元]` `[%]` `[ratio]` `[股]` 的方括号前缀标注 inter 输出单位.
 
 `deps` 列约定: `itf:<name>` ≡ 该 itf 经 §入张量统一规则 切到 (D, A); 其它为 inter / filter feature 名.
 
@@ -179,3 +183,119 @@ qmt/
 | inter  | limit_dn    | 时序 | close_raw, dn_lim                     | `close_raw ≤ dn_lim + 1e-4`                                                                                               | [bool]; 策略跌停判定                                                                                                                                                                  |
 | inter  | pool_b      | 时序 | mb, susp, _meta/stock_basic           | `_meta/stock_basic.exchange ∈ {SSE, SZSE} ∧ mb ∧ ¬susp`                                                                   | [bool]; basic pool, 当前 strategy 仅主板                                                                                                                                              |
 | inter  | pool        | 截面 | pool_b, mcap_raw                      | `pool_b ∧ rank(mcap_raw asc) ≤ UNIVERSE_SIZE` (per D, within `pool_b`; 默认 UNIVERSE_SIZE = 80)                           | [bool]; 最终 strategy universe                                                                                                                                                        |
+
+## 构建流水线 (data → Tensor)
+
+`feature::build()` 串 4 phase 全过程式; 入口 `cpp/src/feature/build.cpp`.
+
+**架构**: 业务密集化到 2 个单点真理文件 — `pit.cpp` (itf 维) + `feature.cpp` (feature 维); 外层 flow (`load.cpp` / `ts.cpp` / `cs.cpp` / `build.cpp`) 完全 agnostic, 仅通过函数指针表 (`ITFS[]` / `FEATURES[]`) 迭代调度. 改字段表/计算图 不动外层.
+
+```text
+Phase 0 axes  (主线程; axis.cpp + tensor.cpp)
+  axes ← load_axes()
+    D ← scan data/**/calendar.json, 取 (exchange ∈ {SSE,SZSE} ∧ is_open=1) 的 cal_date 升序去重
+    A ← read data/_meta/stock_basic.json, 取全量 ts_code (含已退市) 升序
+    + 反向索引 date_idx / code_idx, sys_days 缓存 date_days
+    floor_date(d) = max{i : dates[i] ≤ d}    # 周末/节假日 visible_date 自动落到上一交易日
+  meta ← load_stock_meta(axes)               # per-A 静态: list_date / delist_date / market / exchange
+  T    ← Tensor(axes)                        # F 段独立 A*D float, NaN 初始化, a-major / d-minor
+                                             #   ts_row(f,a) = 连续 D span (Phase 2 主路径)
+                                             #   gather/scatter_cs_row(f,d) = stride D copy (Phase 3 入口)
+
+Phase 1 PIT load  (per-(day, itf) 并行; load.cpp 通用 flow + pit.cpp 单点 itf 表)
+  for itf in pit.cpp::ITFS[]:                # 仅迭代 ITFS[] 表, 不出现具体 itf 名
+    itf.prealloc(axes, pool)                 # 网格: 字段 vector A*D NaN/0; 事件: EventStore[A] 空链
+
+  tasks ← enumerate data/YYYY/MM/DD/<itf.file_name>.json over ITFS[]:
+    v_idx ← axes.floor_date(file's day = visible_date)
+    skip if v_idx < 0                        # visible_date 早于 dates[0], 无 row D 可写
+    skip if 网格 itf ∧ file's day ∉ axes.date_idx   # 网格 file's day 须为交易日 (data 自身保证)
+
+  parallel for task in tasks (n_threads = misc::Affinity::core_count()):
+    arr ← yyjson_read(task.path)             # 单 day 单 itf 的 record 数组
+    task.itf.parse(arr, v_idx, axes, pool, mu_or_null)
+                                             # 网格 itf: mu=nullptr, dense slot 写入无锁
+                                             #   per record (a = code_idx[ts_code], v_idx 唯一)
+                                             #     → pool.<itf>.<field>[a*n_d + v_idx]
+                                             # 事件 itf: mu=vector<mutex>(n_a), 取 mu[a] 后
+                                             #   pool.<itf>[a].emplace_back(Ev{v=v_idx,…})
+
+  for itf in ITFS[] where itf.post_sort:     # 事件 itf 末段 sort by v 升序 (Phase 2 走单调指针扫)
+    itf.post_sort(pool)
+
+Phase 2 时序  (per-A 并行; ts.cpp 通用 flow + feature.cpp 单点 feature 表)
+  parallel for a in [0, n_a) (n_threads = core_count):
+    for f in FEATURES[] where axis == TimeSeries:
+      f.compute_ts(a, axes, pool, meta, T)   # 写自己的 T.ts_row(F::self, a)
+                                             # 可读 PitPool / StockMeta / 已写就的 T.ts_row(prior_f, a)
+
+  # FEATURES[] 索引 = F 枚举值 = 计算顺序; 业务一览 (具体实现见 feature.cpp::impl::ts_*):
+  #   raw          (PitPool 网格抽取, 应用 offset):
+  #     close_raw / mcap_raw(×1e4) / fmcap_raw(×1e4) / share_raw(×1e4) / pe_raw / pb_raw / ps_raw / dy_raw
+  #         ← daily_basic[a, d-1]    # offset = -1
+  #     up_lim / dn_lim ← stk_limit[a,d]; susp ← suspend_d[a,d]   # offset = 0
+  #   ttm4         (财报 ytd 拼接; ts.hpp::ttm4_ytd_compute 模板, d_target = v+1, M==12 退化 X(t)):
+  #     rev_raw ← ttm4(income.revenue, type=='1')
+  #     pcf_raw ← mcap_raw / ttm4(cashflow.n_cashflow_act, type=='1')
+  #     roe_raw ← ttm4(fina_indicator.roe);  roa_raw ← ttm4(fina_indicator.roa)
+  #     ni_raw  ← mean(latest 2 distinct income.end_date.M==12 ∧ type=='1' 的 n_income_attr_p)
+  #   静态广播     (StockMeta):
+  #     mb ← (meta.market[a] == "主板") 广播 D;   list_age ← date_days[d] − parse(meta.list_date[a])
+  #   衍生 bool    (T 内依赖):
+  #     low_p / low_mc / limit_up / limit_dn
+  #   state machine (filter; ts.hpp::state_machine_intervals 模板):
+  #     profit_st   ← OR over { forecast 触发 → off=min(report 同 end_date, ceil(Y+1,4,30)) }
+  #                   on_d=trigger.v+1, 区间 [on_d, off_d) 写 1
+  #     revenue_st  ← profit_st 同区间, 区间内再叠 (mb ∧ rev_raw < threshold(end_date.Y))
+  #     dividend_st ← 阶梯 forward fill: 每 dividend event 重算 3y_sum (累加历史 events with
+  #                     end_date.Y ∈ [ann_y-3, ann_y-1] 的 cash_div_tax × share_raw[event.v+1]),
+  #                     区间 [e.v+1, next.v+1) 内按 (mb ∧ ni_raw>0 ∧ 3y_sum 双阈) 写 1
+  #     risk_warn   ← v 升序回放 st events: state ← (st_name 含 "ST"), forward fill;
+  #                   offset=0, d_target = v (st.imp_date 必为交易日)
+  #     trading_st  ← rolling 20D over (low_p ∨ low_mc).all()     # 单调计数
+  #   杂项 filter / pool:
+  #     new_list ← list_age < 60
+  #     pool_b   ← (meta.exchange ∈ {SSE,SZSE}) ∧ mb ∧ ¬susp
+
+Phase 3 截面  (per-D 并行; cs.cpp 通用 flow + feature.cpp 单点 feature 表)
+  parallel for d in [0, n_d) (n_threads = core_count):
+    bufs ← thread-local {a, b, c}: 3 × vector<float>(n_a), 复用避免反复分配
+    for f in FEATURES[] where axis == CrossSection:
+      f.compute_cs(d, axes, T, bufs)         # 写自己的 T.scatter_cs_row(F::self, d, …)
+
+  # CS 业务一览 (实现见 feature.cpp::impl::cs_*):
+  #   factor 流水: cs.hpp::factor_pipeline(d, src, dst, invert, T, buf):
+  #     buf[A] ← T.gather_cs_row(src, d)
+  #     if invert: buf[a] ← 1/buf[a]         # NaN 或 0 → NaN; 价/估值类 invert=true (越小越优), 收益类 invert=false
+  #     buf ← winsor_mad(buf, k=3)           # 截断到 [med ± k·MAD]; 全等/<2 finite → 跳过
+  #     buf ← z(buf)                         # (x − mean)/std, 跳 NaN; var≤0 → 跳过
+  #     buf ← pct_rank(buf)                  # 升序百分位 ∈ [0,1], 同值平均秩, 跳 NaN
+  #     T.scatter_cs_row(dst, d) ← buf
+  #   close (← close_raw, invert), mcap, fmcap, pe_ttm4, pb_ttm1, ps_ttm4, pcf_ttm4 (全 invert)
+  #   roe_ttm4, roa_ttm4, dy_ttm4 (无 invert)
+  #   pool: cands ← {a : pool_b[a,d]=1 ∧ is_finite(mcap_raw[a,d])}
+  #         pool[a,d] ← 1.0 if a ∈ nth_smallest(cands by mcap_raw, UNIVERSE_SIZE) else 0.0
+```
+
+并发模型一览
+- Phase 0: 主线程; 全量 in-memory.
+- Phase 1: 任务粒度 = (day, itf) (≈ 3650 day × |ITFS|). 网格 itf 因 (a, v_idx) slot 唯一 → 无锁 (`mu=nullptr`); 事件 itf → `vector<mutex>(n_a)` 仅锁 `pool[a].emplace_back`. 末段 `post_sort` 单线程 per-A `sort by v` 串行.
+- Phase 2: 任务粒度 = a (≈ 5500). 每 worker 独占 `T.ts_row(*, a)` 段写入, 无写冲突. FEATURES[] 顺序 = F 枚举顺序 = 计算顺序, 后段读前段输出 (例如 `low_p` 读 `close_raw`, `revenue_st` 读 `rev_raw`/`mb`).
+- Phase 3: 任务粒度 = d (≈ 2750). 每 worker 独占 cs_row 段; thread-local 3 buffer (length=n_a) 复用. CS 项之间互不依赖, 串行调用仅为简洁.
+- 同步点: 仅 phase 间硬屏障 (`build.cpp` 顺序 `join` + `misc::Timer` 报段时), phase 内无屏障.
+
+## 增减用法 (改计算图 / 字段表)
+
+新增/修改/删除一个 itf:
+1. `cpp/include/feature/pit.hpp`: 加/改 typed `Grid<…>` / `<…>Ev` struct, 在 `PitPool` 加成员
+2. `cpp/src/feature/pit.cpp`: 加 `namespace itf_<name> { prealloc, parse, [post_sort] }` 一组 dense block
+3. `cpp/src/feature/pit.cpp`: `ITFS[]` 末尾追加一行
+   外层 `load.cpp` / `build.cpp` 不动.
+
+新增/修改/删除一个 feature:
+1. `cpp/include/feature/feature.hpp`: 在 `F` 枚举对应位置加一行 (位置 = 计算顺序; 后于其依赖)
+2. `cpp/src/feature/feature.cpp`: 在 `namespace impl` 加 `ts_<name>` (签名 `TsComputeFn`) 或 `cs_<name>` (签名 `CsComputeFn`)
+3. `cpp/src/feature/feature.cpp`: `FEATURES[]` 对应位置加一行 `{name, kind, axis, &impl::ts_xxx | nullptr, &impl::cs_xxx | nullptr}`
+   外层 `ts.cpp` / `cs.cpp` / `build.cpp` 不动. 依赖通过 enum 顺序保证 (无需 topo sort).
+
+通用 kernel (跨 feature 共用): `feature/ts.hpp` 暴露 `ttm4_ytd_compute<Ev>` / `state_machine_intervals<TEv>` 模板; `feature/cs.hpp` 暴露 `winsor_mad / z / pct_rank / factor_pipeline`. 大多数新 factor 一行 `factor_pipeline(d, F::xxx_raw, F::xxx, invert, T, b.a)` 即可.

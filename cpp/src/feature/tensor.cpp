@@ -25,12 +25,29 @@ std::span<const float> Tensor::ts_row(F f, int a) const {
                                 static_cast<std::size_t>(axes.n_d()));
 }
 
-void Tensor::gather_cs_row(F, int, std::span<float>) const {
-  assert(false && "feature::Tensor::gather_cs_row not implemented");
+void Tensor::gather_cs_row(F f, int d, std::span<float> out) const {
+  assert(d >= 0 && d < axes.n_d());
+  int na = axes.n_a();
+  int nd = axes.n_d();
+  assert(static_cast<int>(out.size()) == na);
+  const float *base = mats[static_cast<std::size_t>(f)].data();
+  for (int a = 0; a < na; ++a) {
+    out[static_cast<std::size_t>(a)] =
+        base[static_cast<std::size_t>(a) * static_cast<std::size_t>(nd) +
+             static_cast<std::size_t>(d)];
+  }
 }
 
-void Tensor::scatter_cs_row(F, int, std::span<const float>) {
-  assert(false && "feature::Tensor::scatter_cs_row not implemented");
+void Tensor::scatter_cs_row(F f, int d, std::span<const float> in) {
+  assert(d >= 0 && d < axes.n_d());
+  int na = axes.n_a();
+  int nd = axes.n_d();
+  assert(static_cast<int>(in.size()) == na);
+  float *base = mats[static_cast<std::size_t>(f)].data();
+  for (int a = 0; a < na; ++a) {
+    base[static_cast<std::size_t>(a) * static_cast<std::size_t>(nd) +
+         static_cast<std::size_t>(d)] = in[static_cast<std::size_t>(a)];
+  }
 }
 
 float Tensor::at(F f, int a, int d) const {

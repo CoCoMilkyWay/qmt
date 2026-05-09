@@ -1,54 +1,682 @@
 #include "feature/feature.hpp"
 
+#include "feature/axis.hpp"
+#include "feature/cs.hpp"
+#include "feature/pit.hpp"
+#include "feature/tensor.hpp"
+#include "feature/ts.hpp"
+
+#include "config.hpp"
+#include "misc/date.hpp"
+
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstdio>
+#include <span>
+#include <string>
+#include <utility>
+#include <vector>
+
+// ============================================================================
+// feature.cpp 是「特征字段表单点」: 每个 feature 一个 compute fn (TsComputeFn /
+//   CsComputeFn 签名), 末尾 FEATURES[] 表挂载. ts.cpp / cs.cpp / build.cpp
+//   仅看 FEATURES[] 迭代调度, 不出现具体 feature 名.
+//
+//   增减 feature:
+//     1) feature.hpp 在 F 枚举对应位置加一行 (位置即计算顺序)
+//     2) feature.cpp 新增 ts_<name> / cs_<name> compute fn
+//     3) FEATURES[] 末尾对应位置加一行挂载
+//
+//   compute fn 内部:
+//     - TS 全部签名 (int a, axes, pool, meta, T); 不需要的子集忽略.
+//     - CS 全部签名 (int d, axes, T, bufs); bufs.a/b/c 是 thread-local n_a-长 buffer.
+//     - 写自己的 ts_row(F::self, a) 或 scatter_cs_row(F::self, d, ...);
+//     - 可读 PitPool / StockMeta / 已写就的 T.ts_row(prior_f, a) (顺序由 enum 保证).
+// ============================================================================
+
 namespace feature {
 
+// ============================================================================
+// 局部 helper (跨多个 state machine 共用)
+// ============================================================================
+
+namespace {
+
+// 通过 visible_date_idx 从 PitPool 网格抽 row D[d] 的 raw 值;
+//   offset=-1 (财报/盘后) → src=base+(d-1); offset=0 (盘前) → src=base+d.
+//   d 越界返回 NaN.
+inline float grid_at(const std::vector<float> &grid, std::size_t base, int d,
+                     int offset) {
+  int src = d + offset;
+  if (src < 0) return std::nanf("");
+  return grid[base + static_cast<std::size_t>(src)];
+}
+
+// forecast 触发 → 终止 d:
+//   off = min(report.actual_date 同 end_date 的最早 v+1, 下一年 4 月 30 日 ceil)
+int find_forecast_off_d(const ForecastEv &fe,
+                        const std::vector<ReportEv> &reports,
+                        const Axes &axes) {
+  int n_d = axes.n_d();
+  // 1) 同 end_date 最早 report (按 v 升序)
+  int report_d = -1;
+  for (const auto &r : reports) {
+    if (r.end_date == fe.end_date) {
+      report_d = r.v + 1; // offset=-1
+      break;
+    }
+  }
+  // 2) (Y+1, 4, 30) 在 axes.dates 上的 ceil
+  int Y = year_of(fe.end_date);
+  int deadline_d = -1;
+  if (Y > 0) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%04d0430", Y + 1);
+    auto it = std::lower_bound(axes.dates.begin(), axes.dates.end(),
+                               std::string(buf));
+    deadline_d = (it == axes.dates.end())
+                     ? n_d
+                     : static_cast<int>(std::distance(axes.dates.begin(), it));
+  }
+  int off = n_d;
+  if (report_d > 0) off = std::min(off, report_d);
+  if (deadline_d >= 0) off = std::min(off, deadline_d);
+  return off;
+}
+
+} // namespace
+
+// ============================================================================
+// TS: raw (从 PitPool 网格抽取, 应用 offset)
+// ============================================================================
+
+namespace impl {
+
+void ts_close_raw(int a, const Axes &axes, const PitPool &pool,
+                  const StockMeta &, Tensor &T) {
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto out = T.ts_row(F::close_raw, a);
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = grid_at(pool.daily_basic.close, base, d, -1);
+  }
+}
+
+void ts_up_lim(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+               Tensor &T) {
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto out = T.ts_row(F::up_lim, a);
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = grid_at(pool.stk_limit.up_limit, base, d, 0);
+  }
+}
+
+void ts_dn_lim(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+               Tensor &T) {
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto out = T.ts_row(F::dn_lim, a);
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = grid_at(pool.stk_limit.down_limit, base, d, 0);
+  }
+}
+
+void ts_susp(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+             Tensor &T) {
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto out = T.ts_row(F::susp, a);
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = pool.suspend_d.susp[base + static_cast<std::size_t>(d)] ? 1.0f : 0.0f;
+  }
+}
+
+void ts_mcap_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+                 Tensor &T) {
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto out = T.ts_row(F::mcap_raw, a);
+  for (int d = 0; d < n_d; ++d) {
+    float v = grid_at(pool.daily_basic.total_mv, base, d, -1);
+    out[d] = is_finite(v) ? v * 1e4f : std::nanf("");
+  }
+}
+
+void ts_fmcap_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+                  Tensor &T) {
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto out = T.ts_row(F::fmcap_raw, a);
+  for (int d = 0; d < n_d; ++d) {
+    float v = grid_at(pool.daily_basic.circ_mv, base, d, -1);
+    out[d] = is_finite(v) ? v * 1e4f : std::nanf("");
+  }
+}
+
+void ts_share_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+                  Tensor &T) {
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto out = T.ts_row(F::share_raw, a);
+  for (int d = 0; d < n_d; ++d) {
+    float v = grid_at(pool.daily_basic.total_share, base, d, -1);
+    out[d] = is_finite(v) ? v * 1e4f : std::nanf("");
+  }
+}
+
+void ts_pe_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+               Tensor &T) {
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto out = T.ts_row(F::pe_raw, a);
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = grid_at(pool.daily_basic.pe_ttm, base, d, -1);
+  }
+}
+
+void ts_pb_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+               Tensor &T) {
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto out = T.ts_row(F::pb_raw, a);
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = grid_at(pool.daily_basic.pb, base, d, -1);
+  }
+}
+
+void ts_ps_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+               Tensor &T) {
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto out = T.ts_row(F::ps_raw, a);
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = grid_at(pool.daily_basic.ps_ttm, base, d, -1);
+  }
+}
+
+void ts_dy_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+               Tensor &T) {
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto out = T.ts_row(F::dy_raw, a);
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = grid_at(pool.daily_basic.dv_ttm, base, d, -1);
+  }
+}
+
+// ============================================================================
+// TS: ttm4 财报拼接 (依赖 mcap_raw 已就绪 → enum 顺序保证)
+// ============================================================================
+
+void ts_rev_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+                Tensor &T) {
+  ttm4_ytd_compute(
+      pool.income[a], axes.n_d(),
+      [](const IncomeEv &e) -> const std::string & { return e.report_type; },
+      [](const IncomeEv &e) { return e.revenue; },
+      T.ts_row(F::rev_raw, a));
+}
+
+void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+                Tensor &T) {
+  int n_d = axes.n_d();
+  std::vector<float> denom(n_d, std::nanf(""));
+  ttm4_ytd_compute(
+      pool.cashflow[a], n_d,
+      [](const CashflowEv &e) -> const std::string & { return e.report_type; },
+      [](const CashflowEv &e) { return e.n_cashflow_act; },
+      std::span<float>(denom.data(), denom.size()));
+
+  auto mcap = T.ts_row(F::mcap_raw, a);
+  auto out  = T.ts_row(F::pcf_raw, a);
+  for (int d = 0; d < n_d; ++d) {
+    float m = mcap[d];
+    float c = denom[d];
+    out[d] = (is_finite(m) && is_finite(c) && c != 0.0f) ? m / c : std::nanf("");
+  }
+}
+
+void ts_roe_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+                Tensor &T) {
+  static const std::string kEmpty;
+  ttm4_ytd_compute(
+      pool.fina_indicator[a], axes.n_d(),
+      [&](const FinaIndEv &) -> const std::string & { return kEmpty; },
+      [](const FinaIndEv &e) { return e.roe; },
+      T.ts_row(F::roe_raw, a));
+}
+
+void ts_roa_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+                Tensor &T) {
+  static const std::string kEmpty;
+  ttm4_ytd_compute(
+      pool.fina_indicator[a], axes.n_d(),
+      [&](const FinaIndEv &) -> const std::string & { return kEmpty; },
+      [](const FinaIndEv &e) { return e.roa; },
+      T.ts_row(F::roa_raw, a));
+}
+
+// ni_raw: 仅 income.end_date.M==12 ∧ report_type=='1'; 同 end_date 后到覆盖前;
+//   取 last_v 最大的 2 条年报均值. (与 forecast/express 不混)
+void ts_ni_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
+               Tensor &T) {
+  int n_d = axes.n_d();
+  auto out = T.ts_row(F::ni_raw, a);
+  std::fill(out.begin(), out.end(), std::nanf(""));
+
+  struct Cell { float val; int last_v; };
+  std::vector<std::pair<std::string, Cell>> annuals; // 用 vector 维护 (small N, linear scan 即可)
+  std::size_t ev_ptr = 0;
+  const auto &events = pool.income[a];
+
+  auto annuals_find = [&](const std::string &k) -> int {
+    for (std::size_t i = 0; i < annuals.size(); ++i)
+      if (annuals[i].first == k) return static_cast<int>(i);
+    return -1;
+  };
+
+  for (int d = 0; d < n_d; ++d) {
+    while (ev_ptr < events.size() && (events[ev_ptr].v + 1) <= d) {
+      const IncomeEv &e = events[ev_ptr++];
+      if (e.report_type != "1") continue;
+      if (e.end_date.size() < 6 || month_of(e.end_date) != 12) continue;
+      if (!is_finite(e.n_income_attr_p)) continue;
+      int idx = annuals_find(e.end_date);
+      if (idx < 0)
+        annuals.emplace_back(e.end_date, Cell{e.n_income_attr_p, e.v});
+      else
+        annuals[idx].second = Cell{e.n_income_attr_p, e.v};
+    }
+    if (annuals.size() < 2) continue;
+
+    // 找 last_v 最大 2 条
+    int i0 = -1, i1 = -1;
+    int v0 = -1, v1 = -1;
+    for (std::size_t i = 0; i < annuals.size(); ++i) {
+      int v = annuals[i].second.last_v;
+      if (v > v0) {
+        v1 = v0; i1 = i0;
+        v0 = v;  i0 = static_cast<int>(i);
+      } else if (v > v1) {
+        v1 = v;  i1 = static_cast<int>(i);
+      }
+    }
+    if (i0 < 0 || i1 < 0) continue;
+    out[d] = (annuals[i0].second.val + annuals[i1].second.val) * 0.5f;
+  }
+}
+
+// ============================================================================
+// TS: asset 静态 (StockMeta 广播全 D)
+// ============================================================================
+
+void ts_mb(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
+           Tensor &T) {
+  auto out = T.ts_row(F::mb, a);
+  float v = (meta.market[a] == "主板") ? 1.0f : 0.0f;
+  std::fill(out.begin(), out.end(), v);
+  (void)axes;
+}
+
+void ts_list_age(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
+                 Tensor &T) {
+  int n_d = axes.n_d();
+  auto out = T.ts_row(F::list_age, a);
+  if (meta.list_date[a].size() == 8) {
+    auto ld = misc::parse_yyyymmdd(meta.list_date[a]);
+    for (int d = 0; d < n_d; ++d) {
+      out[d] = static_cast<float>((axes.date_days[d] - ld).count());
+    }
+  } else {
+    std::fill(out.begin(), out.end(), std::nanf(""));
+  }
+}
+
+// ============================================================================
+// TS: 衍生 bool
+// ============================================================================
+
+void ts_low_p(int a, const Axes &axes, const PitPool &, const StockMeta &,
+              Tensor &T) {
+  int n_d = axes.n_d();
+  auto cl  = T.ts_row(F::close_raw, a);
+  auto out = T.ts_row(F::low_p, a);
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = (is_finite(cl[d]) && cl[d] < 1.0f) ? 1.0f : 0.0f;
+  }
+}
+
+void ts_low_mc(int a, const Axes &axes, const PitPool &, const StockMeta &,
+               Tensor &T) {
+  int n_d = axes.n_d();
+  auto mc  = T.ts_row(F::mcap_raw, a);
+  auto mb_ = T.ts_row(F::mb, a);
+  auto out = T.ts_row(F::low_mc, a);
+  for (int d = 0; d < n_d; ++d) {
+    float thr = (mb_[d] > 0.5f) ? 5e8f : 3e8f;
+    out[d] = (is_finite(mc[d]) && mc[d] < thr) ? 1.0f : 0.0f;
+  }
+}
+
+void ts_limit_up(int a, const Axes &axes, const PitPool &, const StockMeta &,
+                 Tensor &T) {
+  int n_d = axes.n_d();
+  auto cl  = T.ts_row(F::close_raw, a);
+  auto up  = T.ts_row(F::up_lim, a);
+  auto out = T.ts_row(F::limit_up, a);
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = (is_finite(cl[d]) && is_finite(up[d]) && cl[d] >= up[d] - 1e-4f)
+                 ? 1.0f
+                 : 0.0f;
+  }
+}
+
+void ts_limit_dn(int a, const Axes &axes, const PitPool &, const StockMeta &,
+                 Tensor &T) {
+  int n_d = axes.n_d();
+  auto cl  = T.ts_row(F::close_raw, a);
+  auto dn  = T.ts_row(F::dn_lim, a);
+  auto out = T.ts_row(F::limit_dn, a);
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = (is_finite(cl[d]) && is_finite(dn[d]) && cl[d] <= dn[d] + 1e-4f)
+                 ? 1.0f
+                 : 0.0f;
+  }
+}
+
+// ============================================================================
+// TS: state machines
+// ============================================================================
+
+void ts_profit_st(int a, const Axes &axes, const PitPool &pool,
+                  const StockMeta &, Tensor &T) {
+  std::vector<ForecastEv> trig;
+  trig.reserve(pool.forecast[a].size());
+  for (const auto &e : pool.forecast[a]) {
+    if (month_of(e.end_date) != 12) continue;
+    if (e.type != "首亏" && e.type != "续亏") continue;
+    if (!is_finite(e.last_parent_net) || e.last_parent_net >= 0.0f) continue;
+    trig.push_back(e);
+  }
+  state_machine_intervals(
+      trig, axes.n_d(),
+      [&](const ForecastEv &fe) {
+        return find_forecast_off_d(fe, pool.report[a], axes);
+      },
+      T.ts_row(F::profit_st, a));
+}
+
+void ts_revenue_st(int a, const Axes &axes, const PitPool &pool,
+                   const StockMeta &, Tensor &T) {
+  int n_d = axes.n_d();
+  auto out     = T.ts_row(F::revenue_st, a);
+  auto rev_raw = T.ts_row(F::rev_raw, a);
+  auto mb_     = T.ts_row(F::mb, a);
+  std::fill(out.begin(), out.end(), 0.0f);
+
+  for (const auto &e : pool.forecast[a]) {
+    if (month_of(e.end_date) != 12) continue;
+    if (e.type != "首亏" && e.type != "续亏") continue;
+    int end_y = year_of(e.end_date);
+    if (end_y < 2021) continue;
+    if (e.v < 0 || e.v >= n_d) continue;
+    if (axes.dates[e.v] < "20210101") continue;
+
+    int on_d  = e.v + 1;
+    int off_d = find_forecast_off_d(e, pool.report[a], axes);
+    if (on_d < 0) on_d = 0;
+    if (off_d > n_d) off_d = n_d;
+    float thr = (end_y >= 2024) ? 3e8f : 1e8f;
+    for (int d = on_d; d < off_d; ++d) {
+      if (mb_[d] > 0.5f && is_finite(rev_raw[d]) && rev_raw[d] < thr) {
+        out[d] = 1.0f;
+      }
+    }
+  }
+}
+
+// dividend_st: 阶梯 forward fill — 每 dividend event 重算 3y_sum,
+//   3y_sum = Σ over 历史 events with end_date.Y in [ann_y-3, ann_y-1]
+//            的 cash_div_tax × share_raw[event.v+1]; 区间 [e.v+1, next.v+1) 填.
+void ts_dividend_st(int a, const Axes &axes, const PitPool &pool,
+                    const StockMeta &, Tensor &T) {
+  int n_d = axes.n_d();
+  auto out       = T.ts_row(F::dividend_st, a);
+  auto share_raw = T.ts_row(F::share_raw, a);
+  auto ni_raw    = T.ts_row(F::ni_raw, a);
+  auto mb_       = T.ts_row(F::mb, a);
+  std::fill(out.begin(), out.end(), 0.0f);
+
+  const auto &divs = pool.dividend[a];
+
+  auto apply_segment = [&](int seg_start, int seg_end, float val_3ysum) {
+    if (seg_start < 0) seg_start = 0;
+    if (seg_end > n_d) seg_end = n_d;
+    for (int d = seg_start; d < seg_end; ++d) {
+      if (mb_[d] <= 0.5f) continue;
+      if (!is_finite(ni_raw[d]) || ni_raw[d] <= 0.0f) continue;
+      if (val_3ysum < 0.30f * ni_raw[d] && val_3ysum < 5e7f) {
+        out[d] = 1.0f;
+      }
+    }
+  };
+
+  float current_3ysum = 0.0f;
+  int next_apply_d = 0;
+
+  for (std::size_t ev_idx = 0; ev_idx < divs.size(); ++ev_idx) {
+    const auto &e = divs[ev_idx];
+    int e_d = e.v + 1;
+    apply_segment(next_apply_d, e_d, current_3ysum);
+    next_apply_d = e_d;
+
+    int ann_y = (e.v >= 0 && e.v < n_d) ? year_of(axes.dates[e.v]) : 0;
+    if (ann_y == 0) continue;
+    int lo = ann_y - 3, hi = ann_y - 1;
+
+    float sum = 0.0f;
+    for (std::size_t j = 0; j <= ev_idx; ++j) {
+      const auto &p = divs[j];
+      int py = year_of(p.end_date);
+      if (py < lo || py > hi) continue;
+      if (!is_finite(p.cash_div_tax)) continue;
+      int p_d = p.v + 1;
+      float sh = (p_d >= 0 && p_d < n_d) ? share_raw[p_d] : std::nanf("");
+      if (!is_finite(sh)) continue;
+      sum += p.cash_div_tax * sh;
+    }
+    current_3ysum = sum;
+  }
+  apply_segment(next_apply_d, n_d, current_3ysum);
+}
+
+// risk_warn: st events 升序回放, st.name 含 "ST" 上线, 否则下线; forward fill;
+//   st itf offset=0, d_target = v (= idx_of(imp_date)) — imp_date 必为交易日.
+void ts_risk_warn(int a, const Axes &axes, const PitPool &pool,
+                  const StockMeta &, Tensor &T) {
+  int n_d = axes.n_d();
+  auto out = T.ts_row(F::risk_warn, a);
+  std::fill(out.begin(), out.end(), 0.0f);
+
+  const auto &sts = pool.st[a];
+  if (sts.empty()) return;
+
+  float state = 0.0f;
+  int next_d = 0;
+  for (const auto &e : sts) {
+    int e_d = e.v;
+    if (e_d < 0) e_d = 0;
+    if (e_d > n_d) e_d = n_d;
+    for (int d = next_d; d < e_d; ++d) out[d] = state;
+    state = (e.st_name.find("ST") != std::string::npos) ? 1.0f : 0.0f;
+    next_d = e_d;
+  }
+  for (int d = next_d; d < n_d; ++d) out[d] = state;
+}
+
+// trading_st: rolling 20D (low_p ∨ low_mc).all(). 单调连续计数即可.
+void ts_trading_st(int a, const Axes &axes, const PitPool &, const StockMeta &,
+                   Tensor &T) {
+  int n_d = axes.n_d();
+  auto out    = T.ts_row(F::trading_st, a);
+  auto low_p  = T.ts_row(F::low_p, a);
+  auto low_mc = T.ts_row(F::low_mc, a);
+  constexpr int W = 20;
+  std::fill(out.begin(), out.end(), 0.0f);
+  int run = 0;
+  for (int d = 0; d < n_d; ++d) {
+    bool ok = (low_p[d] > 0.5f) || (low_mc[d] > 0.5f);
+    run = ok ? run + 1 : 0;
+    out[d] = (run >= W) ? 1.0f : 0.0f;
+  }
+}
+
+// ============================================================================
+// TS: 杂项 filter / pool
+// ============================================================================
+
+void ts_new_list(int a, const Axes &axes, const PitPool &, const StockMeta &,
+                 Tensor &T) {
+  int n_d = axes.n_d();
+  auto la  = T.ts_row(F::list_age, a);
+  auto out = T.ts_row(F::new_list, a);
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = (is_finite(la[d]) && la[d] < 60.0f) ? 1.0f : 0.0f;
+  }
+}
+
+void ts_pool_b(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
+               Tensor &T) {
+  int n_d = axes.n_d();
+  auto mb_   = T.ts_row(F::mb, a);
+  auto susp_ = T.ts_row(F::susp, a);
+  auto out   = T.ts_row(F::pool_b, a);
+  bool ex_ok = (meta.exchange[a] == "SSE" || meta.exchange[a] == "SZSE");
+  for (int d = 0; d < n_d; ++d) {
+    bool b = ex_ok && (mb_[d] > 0.5f) && !(susp_[d] > 0.5f);
+    out[d] = b ? 1.0f : 0.0f;
+  }
+}
+
+// ============================================================================
+// CS: factor pipelines (gather → [1/x] → winsor_mad → z → pct_rank → scatter)
+//   每个 feature 一行 factor_pipeline 调用; src/dst/invert 按字段表.
+// ============================================================================
+
+void cs_close(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::close_raw, F::close, /*invert=*/true, T, b.a);
+}
+void cs_mcap(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::mcap_raw, F::mcap, true, T, b.a);
+}
+void cs_fmcap(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::fmcap_raw, F::fmcap, true, T, b.a);
+}
+void cs_pe_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::pe_raw, F::pe_ttm4, true, T, b.a);
+}
+void cs_pb_ttm1(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::pb_raw, F::pb_ttm1, true, T, b.a);
+}
+void cs_ps_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::ps_raw, F::ps_ttm4, true, T, b.a);
+}
+void cs_pcf_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::pcf_raw, F::pcf_ttm4, true, T, b.a);
+}
+void cs_roe_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::roe_raw, F::roe_ttm4, /*invert=*/false, T, b.a);
+}
+void cs_roa_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::roa_raw, F::roa_ttm4, false, T, b.a);
+}
+void cs_dy_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::dy_raw, F::dy_ttm4, false, T, b.a);
+}
+
+// pool: pool_b ∧ rank(mcap_raw asc within pool_b) ≤ UNIVERSE_SIZE
+void cs_pool(int d, const Axes &, Tensor &T, CsBufs &b) {
+  T.gather_cs_row(F::pool_b, d, b.a);
+  T.gather_cs_row(F::mcap_raw, d, b.b);
+
+  std::vector<std::pair<float, int>> cands; // (mcap, a)
+  cands.reserve(b.a.size());
+  for (std::size_t a = 0; a < b.a.size(); ++a) {
+    if (!(b.a[a] > 0.5f)) continue;
+    float mc = b.b[a];
+    if (!is_finite(mc)) continue;
+    cands.emplace_back(mc, static_cast<int>(a));
+  }
+
+  int n = static_cast<int>(cands.size());
+  int k = std::min(::config::UNIVERSE_SIZE, n);
+  if (k > 0) {
+    std::nth_element(cands.begin(), cands.begin() + k, cands.end(),
+                     [](const auto &x, const auto &y) { return x.first < y.first; });
+  }
+
+  std::fill(b.c.begin(), b.c.end(), 0.0f);
+  for (int i = 0; i < k; ++i) b.c[static_cast<std::size_t>(cands[i].second)] = 1.0f;
+  T.scatter_cs_row(F::pool, d, std::span<const float>(b.c.data(), b.c.size()));
+}
+
+} // namespace impl
+
+// ============================================================================
+// FEATURES[] — 单点真理 (索引 = F 枚举值 = 计算顺序)
+// ============================================================================
+
 const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES = {{
-    // ---- filter ----
-    {"profit_st",   Kind::Filter, Axis::TimeSeries},
-    {"revenue_st",  Kind::Filter, Axis::TimeSeries},
-    {"dividend_st", Kind::Filter, Axis::TimeSeries},
-    {"trading_st",  Kind::Filter, Axis::TimeSeries},
-    {"risk_warn",   Kind::Filter, Axis::TimeSeries},
-    {"new_list",    Kind::Filter, Axis::TimeSeries},
-    // ---- factor ----
-    {"close",       Kind::Factor, Axis::CrossSection},
-    {"mcap",        Kind::Factor, Axis::CrossSection},
-    {"fmcap",       Kind::Factor, Axis::CrossSection},
-    {"pe_ttm4",     Kind::Factor, Axis::CrossSection},
-    {"pb_ttm1",     Kind::Factor, Axis::CrossSection},
-    {"ps_ttm4",     Kind::Factor, Axis::CrossSection},
-    {"pcf_ttm4",    Kind::Factor, Axis::CrossSection},
-    {"roe_ttm4",    Kind::Factor, Axis::CrossSection},
-    {"roa_ttm4",    Kind::Factor, Axis::CrossSection},
-    {"dy_ttm4",     Kind::Factor, Axis::CrossSection},
-    // ---- inter: raw 时序 ----
-    {"close_raw",   Kind::Inter,  Axis::TimeSeries},
-    {"up_lim",      Kind::Inter,  Axis::TimeSeries},
-    {"dn_lim",      Kind::Inter,  Axis::TimeSeries},
-    {"susp",        Kind::Inter,  Axis::TimeSeries},
-    {"mcap_raw",    Kind::Inter,  Axis::TimeSeries},
-    {"fmcap_raw",   Kind::Inter,  Axis::TimeSeries},
-    {"share_raw",   Kind::Inter,  Axis::TimeSeries},
-    {"pe_raw",      Kind::Inter,  Axis::TimeSeries},
-    {"pb_raw",      Kind::Inter,  Axis::TimeSeries},
-    {"ps_raw",      Kind::Inter,  Axis::TimeSeries},
-    {"dy_raw",      Kind::Inter,  Axis::TimeSeries},
-    {"pcf_raw",     Kind::Inter,  Axis::TimeSeries},
-    {"roe_raw",     Kind::Inter,  Axis::TimeSeries},
-    {"roa_raw",     Kind::Inter,  Axis::TimeSeries},
-    {"rev_raw",     Kind::Inter,  Axis::TimeSeries},
-    {"ni_raw",      Kind::Inter,  Axis::TimeSeries},
-    // ---- inter: asset 静态 ----
-    {"mb",          Kind::Inter,  Axis::TimeSeries},
-    {"list_age",    Kind::Inter,  Axis::TimeSeries},
-    // ---- inter: 时序 衍生 ----
-    {"low_p",       Kind::Inter,  Axis::TimeSeries},
-    {"low_mc",      Kind::Inter,  Axis::TimeSeries},
-    {"limit_up",    Kind::Inter,  Axis::TimeSeries},
-    {"limit_dn",    Kind::Inter,  Axis::TimeSeries},
-    // ---- inter: pool ----
-    {"pool_b",      Kind::Inter,  Axis::TimeSeries},
-    {"pool",        Kind::Inter,  Axis::CrossSection},
+    // ---- TS raw ----
+    {"close_raw",   Kind::Inter,  Axis::TimeSeries,   &impl::ts_close_raw,   nullptr},
+    {"up_lim",      Kind::Inter,  Axis::TimeSeries,   &impl::ts_up_lim,      nullptr},
+    {"dn_lim",      Kind::Inter,  Axis::TimeSeries,   &impl::ts_dn_lim,      nullptr},
+    {"susp",        Kind::Inter,  Axis::TimeSeries,   &impl::ts_susp,        nullptr},
+    {"mcap_raw",    Kind::Inter,  Axis::TimeSeries,   &impl::ts_mcap_raw,    nullptr},
+    {"fmcap_raw",   Kind::Inter,  Axis::TimeSeries,   &impl::ts_fmcap_raw,   nullptr},
+    {"share_raw",   Kind::Inter,  Axis::TimeSeries,   &impl::ts_share_raw,   nullptr},
+    {"pe_raw",      Kind::Inter,  Axis::TimeSeries,   &impl::ts_pe_raw,      nullptr},
+    {"pb_raw",      Kind::Inter,  Axis::TimeSeries,   &impl::ts_pb_raw,      nullptr},
+    {"ps_raw",      Kind::Inter,  Axis::TimeSeries,   &impl::ts_ps_raw,      nullptr},
+    {"dy_raw",      Kind::Inter,  Axis::TimeSeries,   &impl::ts_dy_raw,      nullptr},
+    // ---- TS ttm4 ----
+    {"rev_raw",     Kind::Inter,  Axis::TimeSeries,   &impl::ts_rev_raw,     nullptr},
+    {"pcf_raw",     Kind::Inter,  Axis::TimeSeries,   &impl::ts_pcf_raw,     nullptr},
+    {"roe_raw",     Kind::Inter,  Axis::TimeSeries,   &impl::ts_roe_raw,     nullptr},
+    {"roa_raw",     Kind::Inter,  Axis::TimeSeries,   &impl::ts_roa_raw,     nullptr},
+    {"ni_raw",      Kind::Inter,  Axis::TimeSeries,   &impl::ts_ni_raw,      nullptr},
+    // ---- TS asset 静态 ----
+    {"mb",          Kind::Inter,  Axis::TimeSeries,   &impl::ts_mb,          nullptr},
+    {"list_age",    Kind::Inter,  Axis::TimeSeries,   &impl::ts_list_age,    nullptr},
+    // ---- TS 衍生 bool ----
+    {"low_p",       Kind::Inter,  Axis::TimeSeries,   &impl::ts_low_p,       nullptr},
+    {"low_mc",      Kind::Inter,  Axis::TimeSeries,   &impl::ts_low_mc,      nullptr},
+    {"limit_up",    Kind::Inter,  Axis::TimeSeries,   &impl::ts_limit_up,    nullptr},
+    {"limit_dn",    Kind::Inter,  Axis::TimeSeries,   &impl::ts_limit_dn,    nullptr},
+    // ---- TS state machines (filter) ----
+    {"profit_st",   Kind::Filter, Axis::TimeSeries,   &impl::ts_profit_st,   nullptr},
+    {"revenue_st",  Kind::Filter, Axis::TimeSeries,   &impl::ts_revenue_st,  nullptr},
+    {"dividend_st", Kind::Filter, Axis::TimeSeries,   &impl::ts_dividend_st, nullptr},
+    {"risk_warn",   Kind::Filter, Axis::TimeSeries,   &impl::ts_risk_warn,   nullptr},
+    {"trading_st",  Kind::Filter, Axis::TimeSeries,   &impl::ts_trading_st,  nullptr},
+    // ---- TS 杂项 filter / pool ----
+    {"new_list",    Kind::Filter, Axis::TimeSeries,   &impl::ts_new_list,    nullptr},
+    {"pool_b",      Kind::Inter,  Axis::TimeSeries,   &impl::ts_pool_b,      nullptr},
+    // ---- CS factor ----
+    {"close",       Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_close},
+    {"mcap",        Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_mcap},
+    {"fmcap",       Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_fmcap},
+    {"pe_ttm4",     Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pe_ttm4},
+    {"pb_ttm1",     Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pb_ttm1},
+    {"ps_ttm4",     Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_ps_ttm4},
+    {"pcf_ttm4",    Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pcf_ttm4},
+    {"roe_ttm4",    Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_roe_ttm4},
+    {"roa_ttm4",    Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_roa_ttm4},
+    {"dy_ttm4",     Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_dy_ttm4},
+    // ---- CS pool ----
+    {"pool",        Kind::Inter,  Axis::CrossSection, nullptr, &impl::cs_pool},
 }};
 
 } // namespace feature
