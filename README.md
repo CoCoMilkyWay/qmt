@@ -13,7 +13,7 @@ qmt/
 ├── cpp/                             # C++23 实现 (Clang/Linux, header-only boost + yyjson)
 │   ├── projects/main/               # CMake 构建 (DEBUG / PROFILE / ASSERT / PRODUCTION)
 │   ├── include/
-│   │   ├── config.hpp               # 全局常量 (token, API host, lookback, 拉取窗口)
+│   │   ├── config.hpp               # 全局常量 (token, API host, lookback, 拉取窗口, 去重窗口)
 │   │   ├── misc/                    # 通用工具 (date / fs / logging / progress / timer)
 │   │   ├── package/yyjson/          # JSON 库
 │   │   └── tushare/                 # tushare 子系统头文件
@@ -23,11 +23,13 @@ qmt/
 │           ├── http.cpp             # boost.beast HTTP 客户端 (走 80 端口, 无 SSL)
 │           ├── spec.cpp             # 13 个 SPECS + RangeStrategy / PerDayStrategy
 │           ├── store.cpp            # scan_missing / write_by_visible_date (PK upsert + _empty.json)
-│           ├── meta.cpp             # refresh_stock_basic: 全局 meta 全量刷新 (L+D+P+G)
-│           └── pipeline.cpp         # scan → plan → fetch → write 主流程
+│           ├── meta.cpp             # refresh_stock_basic + refresh_index_member_all + 单 API 去重 (lastupdate 时间戳)
+│           └── pipeline.cpp         # scan → plan → fetch → write 主流程 (入口逐 API 走 lastupdate 去重)
 ├── data/                            # tushare 落地 (按 visible_date 切日, gitignored)
 │   ├── _meta/
-│   │   └── stock_basic.json         # 全局 meta: ts_code 全量 (L+D+P+G), 每次 update 覆盖刷新
+│   │   ├── stock_basic.json         # 全局 meta: ts_code 全量 (L+D+P+G), 每次 update 覆盖刷新
+│   │   ├── index_member_all.json    # 申万 SW2021 行业成分 (is_new=Y), 按 L1 分批合并 (PK=ts_code)
+│   │   └── <api>.lastupdate         # 单 API 去重时间戳 (unix epoch s); 上次成功距今 < config::API_DEDUP_WINDOW_SECONDS 跳过
 │   └── YYYY/
 │       └── MM/
 │           ├── _empty.json          # 反向稀疏标记 {itf: [DD,...]} = 拉过且为空
@@ -55,19 +57,17 @@ qmt/
 - `D` = 交易日 (`calendar.json`, exchange=SSE or SZSE)
 - `A` = ts_code (`_meta/stock_basic.json`, 含已退市)
 - `F` = 下表 feature
-- dtype: 统一 **float8** (8 比特 float, 极限省空间; bool 用 0.0/1.0)
-- 单位 (inter 层规范化后): 金额=元, 股数=股, 价格=元/股, 百分比=%, 比率=ratio (无量纲), 布尔=0.0/1.0
-- 字段引用约定: tushare 字段以 `<itf>.<field>` 形式引用 (e.g. `daily_basic.pe_ttm`); meta 字段以 `_meta/stock_basic.<field>`; inter / filter / factor 之间互相引用直接用 feature 名
+- dtype: 统一 **float** (32 比特 float; bool 用 0.0/1.0)
 - kind:
   - `filter` (1=排除该 D-A)
-  - `factor` (∈[0,1] 截面 pct rank, NaN=不参与)
+  - `factor` (∈[0,1] NaN=不参与)
   - `inter` (中间量)
 
 ## 数据源 (非张量, 仅作为输入)
 
-按 `visible_date` 落到 `data/YYYY/MM/DD/<itf>.json` (日历日, 周末/节假日同样写盘; visible_date 来源字段见表). 入库时机源: `doc/tushare/help/数据更新说明.md` + 各 API 自身 doc; tushare 用语 "实时更新" = 随公告到达即落库无固定时点, "定期更新" = 周期性批发非事件驱动. 公告披露时段背景见 `doc/exchange/公告类别和发布时间.md` (SSE/SZSE 各时段 + 非交易日 13-17 / 12-16 直通).
-
-### 入张量统一规则 `T[D, A, F]`
+- 按 `visible_date` 落到 `data/YYYY/MM/DD/<itf>.json` (日历日, 周末/节假日同样写盘; visible_date 来源字段见表)
+- 入库时机源: `doc/tushare/help/数据更新说明.md` + 各 API 自身 doc; tushare 用语 "实时更新" = 随公告到达即落库无固定时点, "定期更新" = 周期性批发非事件驱动. 
+- 公告披露时段背景见 `doc/exchange/公告类别和发布时间.md` (SSE/SZSE 各时段 + 非交易日 13-17 / 12-16 直通).
 
 实盘环路: 交易日 T 盘中, 信号计算前 1 分钟刷一次库, 然后算 signal. row D=T 的可见集 ≜ `{ records | visible_date ≤ T + offset(itf) }`, **offset 单位 = 日历日**, 含周末/节假日.
 
