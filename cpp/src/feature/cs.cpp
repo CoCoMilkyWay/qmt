@@ -1,16 +1,16 @@
-#include "factor/cs.hpp"
+#include "feature/cs.hpp"
 
-#include "factor/feature.hpp"
+#include "feature/feature.hpp"
 
 #include <cassert>
 #include <span>
 
-namespace factor {
+namespace feature {
 
 namespace {
 
 // ============================================================================
-// per-D pipeline: src (raw) → dst (factor)
+// per-D pipeline: src (TS inter) → dst (当前为 Kind::Factor 且 Axis::CrossSection 的槽位)
 //   1. gather_cs_row(src, d, buf)            — buf[A] = T.at(src, a, d)
 //   2. (invert ? buf[a] = 1/buf[a] : 留)     — NaN / 0 → NaN
 //   3. winsor_mad(buf, k=3.0)                — 3*MAD 截断, 跳 NaN
@@ -36,31 +36,31 @@ void compute_pool(int d, int universe_size, Tensor &T);
 } // namespace
 
 void compute_cs(const Axes &, Tensor &) {
-  assert(false && "factor::compute_cs not implemented");
+  assert(false && "feature::compute_cs not implemented");
 }
 
 namespace {
 
 void pipeline(int, F, F, bool, Tensor &) {
-  assert(false && "factor::pipeline not implemented");
+  assert(false && "feature::pipeline not implemented");
 }
 
 void winsor_mad(std::span<float>, float) {
-  assert(false && "factor::winsor_mad not implemented");
+  assert(false && "feature::winsor_mad not implemented");
 }
 
 void z(std::span<float>) {
-  assert(false && "factor::z not implemented");
+  assert(false && "feature::z not implemented");
 }
 
 void pct_rank(std::span<float>) {
-  assert(false && "factor::pct_rank not implemented");
+  assert(false && "feature::pct_rank not implemented");
 }
 
 void compute_pool(int, int, Tensor &) {
-  assert(false && "factor::compute_pool not implemented");
+  assert(false && "feature::compute_pool not implemented");
 }
 
 } // namespace
 
-} // namespace factor
+} // namespace feature

@@ -1,12 +1,12 @@
 #pragma once
 
-#include "factor/axis.hpp"
-#include "factor/feature.hpp"
+#include "feature/axis.hpp"
+#include "feature/feature.hpp"
 
 #include <span>
 #include <vector>
 
-namespace factor {
+namespace feature {
 
 // 统一 [F][A][D] layout: 每 feature 一段连续 length = A*D 的 float (a-major, d-minor).
 //   ts_row(f, a) → 长度 D 的连续 span (Phase 2 主路径)
@@ -29,4 +29,4 @@ struct Tensor {
   float &at(F f, int a, int d);
 };
 
-} // namespace factor
+} // namespace feature

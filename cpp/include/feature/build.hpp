@@ -1,9 +1,9 @@
 #pragma once
 
-#include "factor/axis.hpp"
-#include "factor/tensor.hpp"
+#include "feature/axis.hpp"
+#include "feature/tensor.hpp"
 
-namespace factor {
+namespace feature {
 
 // 编排入口: 串 Phase 0..3, 内部用 misc::Timer 报每段耗时.
 //   Phase 0 axes:  load_axes() + load_stock_meta() + Tensor T(axes)
@@ -15,4 +15,4 @@ namespace factor {
 // out_axes / out_meta 在调用前由 caller 默认构造, 调用后填充.
 Tensor build(Axes &out_axes, StockMeta &out_meta);
 
-} // namespace factor
+} // namespace feature

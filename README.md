@@ -17,23 +17,23 @@ qmt/
 │   │   ├── misc/                    # 通用工具 (date / fs / logging / progress / timer / affinity)
 │   │   ├── package/yyjson/          # JSON 库
 │   │   ├── tushare/                 # tushare 子系统头文件 (数据入)
-│   │   └── factor/                  # factor 子系统头文件 (张量出)
+│   │   └── feature/                 # feature 子系统头文件 (张量出)
 │   └── src/
-│       ├── main.cpp                 # tushare::update → factor::build → Tensor T[F][A][D]
+│       ├── main.cpp                 # tushare::update → feature::build → Tensor T[F][A][D]
 │       ├── tushare/
 │       │   ├── http.cpp             # boost.beast HTTP 客户端 (走 80 端口, 无 SSL)
 │       │   ├── spec.cpp             # 14 个 SPECS + RangeStrategy / PerDayStrategy
 │       │   ├── store.cpp            # scan_missing / write_by_visible_date (PK upsert + _empty.json)
 │       │   ├── meta.cpp             # refresh_stock_basic + refresh_index_member_all + 单 itf 去重 (lastupdate 时间戳, 粒度=spec.name)
 │       │   └── pipeline.cpp         # scan → plan → fetch → write 主流程 (入口逐 itf 走 lastupdate 去重)
-│       └── factor/                  # 4-phase 因子张量构建 (in-memory only, 全过程式 + 轻量抽象)
+│       └── feature/                 # 4-phase feature 系统: 构建特征张量 (in-memory only, 全过程式 + 轻量抽象)
 │           ├── axis.cpp             # Phase 0: load_axes (D=SSE∪SZSE 交易日) + load_stock_meta (per-A 静态)
-│           ├── feature.cpp          # F 枚举 ↔ FeatureMeta 静态表 (kind=Filter/Factor/Inter, axis=TS/CS)
+│           ├── feature.cpp          # F 枚举 ↔ FeatureMeta (kind 与 axis/TS|CS 正交, 逐项 meta)
 │           ├── tensor.cpp           # Tensor 容器 (统一 [F][A][D] layout, ts_row 连续, gather/scatter cs_row)
 │           ├── pit.cpp              # 各 itf parse_*_day helper (网格 dense / 事件 per-A 链)
 │           ├── load.cpp             # Phase 1: per-(day, itf) 并行解析, 网格无锁 / 事件 per-A mutex
 │           ├── ts.cpp               # Phase 2: per-A 并行, stage 1..6 (extract_grid → ttm4 → static → derived → state machines → pool_b)
-│           ├── cs.cpp               # Phase 3: per-D 并行, 10 个 raw→factor pipeline (winsor_mad ∘ z ∘ pct_rank) + compute_pool
+│           ├── cs.cpp               # Phase 3: per-D 并行, TS raw→CS 归一化 (当前写入全部 Factor 槽位; winsor_mad∘z∘pct_rank) + compute_pool
 │           └── build.cpp            # 编排入口: 串 4 phase + misc::Timer 报段时
 ├── data/                            # tushare 落地 (按 visible_date 切日, gitignored)
 │   ├── _meta/
@@ -68,10 +68,10 @@ qmt/
 - `A` = ts_code (`_meta/stock_basic.json`, 含已退市)
 - `F` = 下表 feature
 - dtype: 统一 **float** (32 比特 float; bool 用 0.0/1.0)
-- kind:
+- kind (与「轴」独立, 勿用 kind 推断时序/截面; 以字段表「轴」列与 `FEATURES[]` 为准):
   - `filter` (1=排除该 D-A)
-  - `factor` (∈[0,1] NaN=不参与)
-  - `inter` (中间量)
+  - `factor` (∈[0,1] NaN=不参与; 当前实现均为截面归一后的连续得分)
+  - `inter` (中间量; 含时序与截面两类, 不一刀切)
 
 ## 数据源 → 张量 (build-time PIT)
 
@@ -127,7 +127,7 @@ qmt/
 
 `deps` 列约定: `itf:<name>` ≡ 该 itf 经 §入张量统一规则 切到 (D, A); 其它为 inter / filter feature 名.
 
-`轴` 列: `时序` = per A 沿 D 计算 (无截面依赖, A 维可并行); `截面` = per D 沿 A 计算 (有截面依赖, A 维不可并行).
+`轴` 列: `时序` = per A 沿 D 计算 (无截面依赖, A 维可并行); `截面` = per D 沿 A 计算 (有截面依赖, A 维不可并行). `filter` / `factor` / `inter` 三类均可能出现两种轴之一, 仅读本行.
 
 估值/盈利因子按 `<base>_ttm<N>` 命名, period 由季节性决定:
 - **ttm4** (高季节性, 4 报告期 ≡ 1 年): tushare 原生 TTM 字段直接取 (pe / ps / dy); YTD 累计字段 (income / cashflow / fina_indicator) 用 helper `ttm4_ytd(X) := X(t) + X(Y-1, 12) − X(Y-1, t.M)` 拼接, 其中 t = (Y, M) 为最新可见 `end_date`. 严格成立于流量字段 (revenue, n_cashflow_act); 对比率字段 (roe, roa) 是常用近似 (分子严格, 分母年内变动忽略).

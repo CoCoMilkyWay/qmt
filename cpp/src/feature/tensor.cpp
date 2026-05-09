@@ -1,10 +1,10 @@
-#include "factor/tensor.hpp"
+#include "feature/tensor.hpp"
 
 #include <cassert>
 #include <cmath>
 #include <cstddef>
 
-namespace factor {
+namespace feature {
 
 Tensor::Tensor(const Axes &ax) : axes(ax) {
   std::size_t n = static_cast<std::size_t>(ax.n_a()) * static_cast<std::size_t>(ax.n_d());
@@ -26,11 +26,11 @@ std::span<const float> Tensor::ts_row(F f, int a) const {
 }
 
 void Tensor::gather_cs_row(F, int, std::span<float>) const {
-  assert(false && "factor::Tensor::gather_cs_row not implemented");
+  assert(false && "feature::Tensor::gather_cs_row not implemented");
 }
 
 void Tensor::scatter_cs_row(F, int, std::span<const float>) {
-  assert(false && "factor::Tensor::scatter_cs_row not implemented");
+  assert(false && "feature::Tensor::scatter_cs_row not implemented");
 }
 
 float Tensor::at(F f, int a, int d) const {
@@ -47,4 +47,4 @@ float &Tensor::at(F f, int a, int d) {
   return mats[static_cast<std::size_t>(f)][off];
 }
 
-} // namespace factor
+} // namespace feature

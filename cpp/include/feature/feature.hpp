@@ -4,9 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace factor {
+namespace feature {
 
-// F 维枚举. 顺序: filter → factor (截面输出) → inter (中间, 含时序 raw / 衍生 bool / pool).
+// F 维枚举. 顺序: filter → factor → inter. Kind 与 Axis 正交, 逐项见 FEATURES[].
 // 与 README §字段表 一一对应; 新增 feature 在对应分组末尾追加, 不破坏既有索引.
 enum class F : int {
   // ---- filter ----
@@ -16,7 +16,7 @@ enum class F : int {
   trading_st,
   risk_warn,
   new_list,
-  // ---- factor (截面输出, pct_rank ∘ z ∘ winsor_mad) ----
+  // ---- factor ----
   close,
   mcap,
   fmcap,
@@ -27,7 +27,7 @@ enum class F : int {
   roe_ttm4,
   roa_ttm4,
   dy_ttm4,
-  // ---- inter: raw 时序 (来自 PIT 网格 / 事件 ttm4) ----
+  // ---- inter: raw ----
   close_raw,
   up_lim,
   dn_lim,
@@ -47,7 +47,7 @@ enum class F : int {
   // ---- inter: asset 静态 ----
   mb,
   list_age,
-  // ---- inter: 时序 衍生 bool ----
+  // ---- inter: 衍生 bool ----
   low_p,
   low_mc,
   limit_up,
@@ -71,4 +71,4 @@ struct FeatureMeta {
 // 静态表, 索引与 F 枚举一一对应.
 extern const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES;
 
-} // namespace factor
+} // namespace feature

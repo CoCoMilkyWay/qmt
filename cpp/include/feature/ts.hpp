@@ -1,10 +1,10 @@
 #pragma once
 
-#include "factor/axis.hpp"
-#include "factor/pit.hpp"
-#include "factor/tensor.hpp"
+#include "feature/axis.hpp"
+#include "feature/pit.hpp"
+#include "feature/tensor.hpp"
 
-namespace factor {
+namespace feature {
 
 // Phase 2: per-A 并行 (线程池, 任务粒度 = a, 总数 = n_a()).
 //   每 worker 拿到 a, 串行调 stage 1..6 (见 ts.cpp 内 compute_ts_for_one_a):
@@ -17,4 +17,4 @@ namespace factor {
 //   每 a 写自己的 ts_row(F, a), phase 内无写冲突.
 void compute_ts(const Axes &, const PitPool &, const StockMeta &, Tensor &);
 
-} // namespace factor
+} // namespace feature

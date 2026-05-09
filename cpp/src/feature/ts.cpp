@@ -1,11 +1,11 @@
-#include "factor/ts.hpp"
+#include "feature/ts.hpp"
 
 #include <cassert>
 #include <functional>
 #include <span>
 #include <vector>
 
-namespace factor {
+namespace feature {
 
 namespace {
 
@@ -71,44 +71,44 @@ void state_machine(const std::vector<Ev> &events, int n_d,
 // ============================================================================
 
 void compute_ts(const Axes &, const PitPool &, const StockMeta &, Tensor &) {
-  assert(false && "factor::compute_ts not implemented");
+  assert(false && "feature::compute_ts not implemented");
 }
 
 namespace {
 
 void compute_ts_for_one_a(int, const Axes &, const PitPool &,
                           const StockMeta &, Tensor &) {
-  assert(false && "factor::compute_ts_for_one_a not implemented");
+  assert(false && "feature::compute_ts_for_one_a not implemented");
 }
 
 void stage_extract_grid(int, const Axes &, const PitPool &, Tensor &) {
-  assert(false && "factor::stage_extract_grid not implemented");
+  assert(false && "feature::stage_extract_grid not implemented");
 }
 
 void stage_ttm4(int, const Axes &, const PitPool &, Tensor &) {
-  assert(false && "factor::stage_ttm4 not implemented");
+  assert(false && "feature::stage_ttm4 not implemented");
 }
 
 void stage_ni_raw(int, const Axes &, const PitPool &, Tensor &) {
-  assert(false && "factor::stage_ni_raw not implemented");
+  assert(false && "feature::stage_ni_raw not implemented");
 }
 
 void stage_static(int, const Axes &, const StockMeta &, Tensor &) {
-  assert(false && "factor::stage_static not implemented");
+  assert(false && "feature::stage_static not implemented");
 }
 
 void stage_derived(int, const Axes &, Tensor &) {
-  assert(false && "factor::stage_derived not implemented");
+  assert(false && "feature::stage_derived not implemented");
 }
 
 void stage_state_machines(int, const Axes &, const PitPool &, Tensor &) {
-  assert(false && "factor::stage_state_machines not implemented");
+  assert(false && "feature::stage_state_machines not implemented");
 }
 
 void stage_pool_b(int, const Axes &, const StockMeta &, Tensor &) {
-  assert(false && "factor::stage_pool_b not implemented");
+  assert(false && "feature::stage_pool_b not implemented");
 }
 
 } // namespace
 
-} // namespace factor
+} // namespace feature

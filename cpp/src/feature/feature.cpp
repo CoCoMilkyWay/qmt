@@ -1,16 +1,16 @@
-#include "factor/feature.hpp"
+#include "feature/feature.hpp"
 
-namespace factor {
+namespace feature {
 
 const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES = {{
-    // ---- filter (时序) ----
+    // ---- filter ----
     {"profit_st",   Kind::Filter, Axis::TimeSeries},
     {"revenue_st",  Kind::Filter, Axis::TimeSeries},
     {"dividend_st", Kind::Filter, Axis::TimeSeries},
     {"trading_st",  Kind::Filter, Axis::TimeSeries},
     {"risk_warn",   Kind::Filter, Axis::TimeSeries},
     {"new_list",    Kind::Filter, Axis::TimeSeries},
-    // ---- factor (截面) ----
+    // ---- factor ----
     {"close",       Kind::Factor, Axis::CrossSection},
     {"mcap",        Kind::Factor, Axis::CrossSection},
     {"fmcap",       Kind::Factor, Axis::CrossSection},
@@ -51,4 +51,4 @@ const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES = {{
     {"pool",        Kind::Inter,  Axis::CrossSection},
 }};
 
-} // namespace factor
+} // namespace feature

@@ -5,7 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace factor {
+namespace feature {
 
 // D 轴 + A 轴 + 反向索引. 由 load_axes() 一次性构造, 此后只读.
 //   dates: SSE ∪ SZSE 且 is_open=1 的交易日 YYYYMMDD, 升序去重
@@ -38,4 +38,4 @@ struct StockMeta {
 Axes load_axes();
 StockMeta load_stock_meta(const Axes &);
 
-} // namespace factor
+} // namespace feature

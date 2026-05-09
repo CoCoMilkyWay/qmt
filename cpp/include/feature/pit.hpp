@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace factor {
+namespace feature {
 
 // PIT 中间结构. Phase 1 写入, Phase 2 只读.
 //
@@ -91,4 +91,4 @@ struct PitPool {
   EventStore<FinaIndEv>  fina_indicator;
 };
 
-} // namespace factor
+} // namespace feature

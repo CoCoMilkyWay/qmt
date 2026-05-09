@@ -84,14 +84,14 @@ set(SOURCES
     ../../src/tushare/store.cpp
     ../../src/tushare/meta.cpp
     ../../src/tushare/pipeline.cpp
-    ../../src/factor/axis.cpp
-    ../../src/factor/feature.cpp
-    ../../src/factor/tensor.cpp
-    ../../src/factor/pit.cpp
-    ../../src/factor/load.cpp
-    ../../src/factor/ts.cpp
-    ../../src/factor/cs.cpp
-    ../../src/factor/build.cpp
+    ../../src/feature/axis.cpp
+    ../../src/feature/feature.cpp
+    ../../src/feature/tensor.cpp
+    ../../src/feature/pit.cpp
+    ../../src/feature/load.cpp
+    ../../src/feature/ts.cpp
+    ../../src/feature/cs.cpp
+    ../../src/feature/build.cpp
 )
 
 set(HEADERS
@@ -111,14 +111,14 @@ set(HEADERS
     ../../include/tushare/store.hpp
     ../../include/tushare/meta.hpp
     ../../include/tushare/pipeline.hpp
-    ../../include/factor/axis.hpp
-    ../../include/factor/feature.hpp
-    ../../include/factor/tensor.hpp
-    ../../include/factor/pit.hpp
-    ../../include/factor/load.hpp
-    ../../include/factor/ts.hpp
-    ../../include/factor/cs.hpp
-    ../../include/factor/build.hpp
+    ../../include/feature/axis.hpp
+    ../../include/feature/feature.hpp
+    ../../include/feature/tensor.hpp
+    ../../include/feature/pit.hpp
+    ../../include/feature/load.hpp
+    ../../include/feature/ts.hpp
+    ../../include/feature/cs.hpp
+    ../../include/feature/build.hpp
 )
 
 add_executable(app_main ${SOURCES} ${HEADERS})
