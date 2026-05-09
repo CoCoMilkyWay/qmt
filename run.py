@@ -23,9 +23,9 @@ from py import mode_debug, mode_profile, mode_assert, mode_production
 APP_NAME = "main"
 
 # Build & Run modes (set ONLY ONE to True)
+ENABLE_ASSERT = True
 ENABLE_DEBUG = False
 ENABLE_PROFILE = False
-ENABLE_ASSERT = True
 ENABLE_PRODUCTION = False  # Auto-enabled if all others are False
 
 

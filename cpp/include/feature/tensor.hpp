@@ -27,6 +27,8 @@ struct Tensor {
 
   float  at(F f, int a, int d) const;
   float &at(F f, int a, int d);
+
+  void assert_no_nan() const;
 };
 
 } // namespace feature

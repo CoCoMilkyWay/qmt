@@ -43,9 +43,27 @@ namespace feature {
 
 namespace {
 
+// 计算股票 a 的上市日索引 (在 axes.dates 中的 lower_bound)
+// 返回 -1 表示无有效 list_date (视为永远未上市)
+inline int get_list_d(int a, const Axes &axes, const StockMeta &meta) {
+  const std::string &ld = meta.list_date[a];
+  if (ld.size() != 8) return axes.n_d(); // 无 list_date → 永远未上市
+  auto it = std::lower_bound(axes.dates.begin(), axes.dates.end(), ld);
+  return static_cast<int>(std::distance(axes.dates.begin(), it));
+}
+
+// 把 d < list_d 的值填 0 (上市前无数据)
+inline void fill_before_list(std::span<float> out, int a, const Axes &axes,
+                             const StockMeta &meta) {
+  int list_d = get_list_d(a, axes, meta);
+  for (int d = 0; d < list_d && d < static_cast<int>(out.size()); ++d) {
+    out[d] = 0.0f;
+  }
+}
+
 // 通过 visible_date_idx 从 PitPool 网格抽 row D[d] 的 raw 值;
 //   offset=-1 (财报/盘后) → src=base+(d-1); offset=0 (盘前) → src=base+d.
-//   d 越界返回 NaN.
+//   d 越界返回 NaN (由调用方处理).
 inline float grid_at(const std::vector<float> &grid, std::size_t base, int d,
                      int offset) {
   int src = d + offset;
@@ -94,33 +112,38 @@ int find_forecast_off_d(const ForecastEv &fe,
 namespace impl {
 
 void ts_close_raw(int a, const Axes &axes, const PitPool &pool,
-                  const StockMeta &, Tensor &T) {
+                  const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(F::close_raw, a);
   for (int d = 0; d < n_d; ++d) {
     out[d] = grid_at(pool.daily_basic.close, base, d, -1);
   }
+  fill_before_list(out, a, axes, meta);
 }
 
-void ts_up_lim(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-               Tensor &T) {
+void ts_up_lim(int a, const Axes &axes, const PitPool &pool,
+               const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(F::up_lim, a);
   for (int d = 0; d < n_d; ++d) {
-    out[d] = grid_at(pool.stk_limit.up_limit, base, d, 0);
+    float v = grid_at(pool.stk_limit.up_limit, base, d, -1);
+    out[d] = (v >= 100000.0f || !is_finite(v)) ? 0.0f : v;
   }
+  fill_before_list(out, a, axes, meta);
 }
 
-void ts_dn_lim(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-               Tensor &T) {
+void ts_dn_lim(int a, const Axes &axes, const PitPool &pool,
+               const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(F::dn_lim, a);
   for (int d = 0; d < n_d; ++d) {
-    out[d] = grid_at(pool.stk_limit.down_limit, base, d, 0);
+    float v = grid_at(pool.stk_limit.down_limit, base, d, -1);
+    out[d] = (v <= 0.01f || !is_finite(v)) ? 0.0f : v;
   }
+  fill_before_list(out, a, axes, meta);
 }
 
 void ts_susp(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
@@ -133,94 +156,103 @@ void ts_susp(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
   }
 }
 
-void ts_mcap_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-                 Tensor &T) {
+void ts_mcap_raw(int a, const Axes &axes, const PitPool &pool,
+                 const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(F::mcap_raw, a);
   for (int d = 0; d < n_d; ++d) {
     float v = grid_at(pool.daily_basic.total_mv, base, d, -1);
-    out[d] = is_finite(v) ? v * 1e4f : std::nanf("");
+    out[d] = is_finite(v) ? v * 1e4f : v; // 保留 NaN 暴露数据问题
   }
+  fill_before_list(out, a, axes, meta);
 }
 
-void ts_fmcap_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-                  Tensor &T) {
+void ts_fmcap_raw(int a, const Axes &axes, const PitPool &pool,
+                  const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(F::fmcap_raw, a);
   for (int d = 0; d < n_d; ++d) {
     float v = grid_at(pool.daily_basic.circ_mv, base, d, -1);
-    out[d] = is_finite(v) ? v * 1e4f : std::nanf("");
+    out[d] = is_finite(v) ? v * 1e4f : v;
   }
+  fill_before_list(out, a, axes, meta);
 }
 
-void ts_share_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-                  Tensor &T) {
+void ts_share_raw(int a, const Axes &axes, const PitPool &pool,
+                  const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(F::share_raw, a);
   for (int d = 0; d < n_d; ++d) {
     float v = grid_at(pool.daily_basic.total_share, base, d, -1);
-    out[d] = is_finite(v) ? v * 1e4f : std::nanf("");
+    out[d] = is_finite(v) ? v * 1e4f : v;
   }
+  fill_before_list(out, a, axes, meta);
 }
 
-void ts_pe_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-               Tensor &T) {
+void ts_pe_raw(int a, const Axes &axes, const PitPool &pool,
+               const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(F::pe_raw, a);
   for (int d = 0; d < n_d; ++d) {
     out[d] = grid_at(pool.daily_basic.pe_ttm, base, d, -1);
   }
+  fill_before_list(out, a, axes, meta);
 }
 
-void ts_pb_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-               Tensor &T) {
+void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
+               const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(F::pb_raw, a);
   for (int d = 0; d < n_d; ++d) {
     out[d] = grid_at(pool.daily_basic.pb, base, d, -1);
   }
+  fill_before_list(out, a, axes, meta);
 }
 
-void ts_ps_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-               Tensor &T) {
+void ts_ps_raw(int a, const Axes &axes, const PitPool &pool,
+               const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(F::ps_raw, a);
   for (int d = 0; d < n_d; ++d) {
     out[d] = grid_at(pool.daily_basic.ps_ttm, base, d, -1);
   }
+  fill_before_list(out, a, axes, meta);
 }
 
-void ts_dy_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-               Tensor &T) {
+void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
+               const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(F::dy_raw, a);
   for (int d = 0; d < n_d; ++d) {
     out[d] = grid_at(pool.daily_basic.dv_ttm, base, d, -1);
   }
+  fill_before_list(out, a, axes, meta);
 }
 
 // ============================================================================
 // TS: ttm4 财报拼接 (依赖 mcap_raw 已就绪 → enum 顺序保证)
 // ============================================================================
 
-void ts_rev_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-                Tensor &T) {
+void ts_rev_raw(int a, const Axes &axes, const PitPool &pool,
+                const StockMeta &meta, Tensor &T) {
+  auto out = T.ts_row(F::rev_raw, a);
   ttm4_ytd_compute(
       pool.income[a], axes.n_d(),
       [](const IncomeEv &e) -> const std::string & { return e.report_type; },
       [](const IncomeEv &e) { return e.revenue; },
-      T.ts_row(F::rev_raw, a));
+      out);
+  fill_before_list(out, a, axes, meta);
 }
 
-void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-                Tensor &T) {
+void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool,
+                const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::vector<float> denom(n_d, std::nanf(""));
   ttm4_ytd_compute(
@@ -234,34 +266,42 @@ void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
   for (int d = 0; d < n_d; ++d) {
     float m = mcap[d];
     float c = denom[d];
-    out[d] = (is_finite(m) && is_finite(c) && c != 0.0f) ? m / c : std::nanf("");
+    // mcap=0 (上市前) 或 cashflow 缺失 → NaN; fill_before_list 会处理上市前
+    out[d] = (is_finite(m) && m != 0.0f && is_finite(c) && c != 0.0f)
+                 ? m / c
+                 : std::nanf("");
   }
+  fill_before_list(out, a, axes, meta);
 }
 
-void ts_roe_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-                Tensor &T) {
+void ts_roe_raw(int a, const Axes &axes, const PitPool &pool,
+                const StockMeta &meta, Tensor &T) {
   static const std::string kEmpty;
+  auto out = T.ts_row(F::roe_raw, a);
   ttm4_ytd_compute(
       pool.fina_indicator[a], axes.n_d(),
       [&](const FinaIndEv &) -> const std::string & { return kEmpty; },
       [](const FinaIndEv &e) { return e.roe; },
-      T.ts_row(F::roe_raw, a));
+      out);
+  fill_before_list(out, a, axes, meta);
 }
 
-void ts_roa_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-                Tensor &T) {
+void ts_roa_raw(int a, const Axes &axes, const PitPool &pool,
+                const StockMeta &meta, Tensor &T) {
   static const std::string kEmpty;
+  auto out = T.ts_row(F::roa_raw, a);
   ttm4_ytd_compute(
       pool.fina_indicator[a], axes.n_d(),
       [&](const FinaIndEv &) -> const std::string & { return kEmpty; },
       [](const FinaIndEv &e) { return e.roa; },
-      T.ts_row(F::roa_raw, a));
+      out);
+  fill_before_list(out, a, axes, meta);
 }
 
 // ni_raw: 仅 income.end_date.M==12 ∧ report_type=='1'; 同 end_date 后到覆盖前;
 //   取 last_v 最大的 2 条年报均值. (与 forecast/express 不混)
-void ts_ni_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
-               Tensor &T) {
+void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
+               const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   auto out = T.ts_row(F::ni_raw, a);
   std::fill(out.begin(), out.end(), std::nanf(""));
@@ -306,6 +346,7 @@ void ts_ni_raw(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
     if (i0 < 0 || i1 < 0) continue;
     out[d] = (annuals[i0].second.val + annuals[i1].second.val) * 0.5f;
   }
+  fill_before_list(out, a, axes, meta);
 }
 
 // ============================================================================
@@ -330,7 +371,8 @@ void ts_list_age(int a, const Axes &axes, const PitPool &, const StockMeta &meta
       out[d] = static_cast<float>((axes.date_days[d] - ld).count());
     }
   } else {
-    std::fill(out.begin(), out.end(), std::nanf(""));
+    // 无 list_date → 视为永远未上市 (list_age = 极负值)
+    std::fill(out.begin(), out.end(), -1e9f);
   }
 }
 

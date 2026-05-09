@@ -131,6 +131,11 @@ void load_pit(const Axes &axes, PitPool &pool) {
   for (int i = 0; i < ITFS_COUNT; ++i) {
     if (ITFS[i].post_sort) ITFS[i].post_sort(pool);
   }
+
+  // ---- 5. 通用 post_ffill: 迭代 ITFS[] (网格 itf per-A forward fill) ----
+  for (int i = 0; i < ITFS_COUNT; ++i) {
+    if (ITFS[i].post_ffill) ITFS[i].post_ffill(axes, pool);
+  }
 }
 
 } // namespace feature

@@ -123,7 +123,8 @@ struct ItfDesc {
   void (*prealloc)(const Axes &, PitPool &);
   void (*parse)(yyjson_val *arr, int v_idx, const Axes &, PitPool &,
                 std::vector<std::mutex> *mu /* 网格场合可为 nullptr */);
-  void (*post_sort)(PitPool &); // 事件 itf 末段 sort by v; 网格 itf 留 nullptr
+  void (*post_sort)(PitPool &);              // 事件 itf 末段 sort by v; 网格 itf 留 nullptr
+  void (*post_ffill)(const Axes &, PitPool &); // 网格 itf per-A forward fill; 事件 itf 留 nullptr
 };
 
 extern const ItfDesc ITFS[];

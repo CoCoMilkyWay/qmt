@@ -64,4 +64,12 @@ float &Tensor::at(F f, int a, int d) {
   return mats[static_cast<std::size_t>(f)][off];
 }
 
+void Tensor::assert_no_nan() const {
+  for (std::size_t f = 0; f < mats.size(); ++f) {
+    for (std::size_t i = 0; i < mats[f].size(); ++i) {
+      assert(std::isfinite(mats[f][i]) && "Tensor contains NaN/Inf");
+    }
+  }
+}
+
 } // namespace feature

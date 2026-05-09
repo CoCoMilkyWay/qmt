@@ -46,18 +46,21 @@ if(DEBUG_MODE)
 elseif(PROFILE_MODE)
     message(STATUS "Build mode: PROFILE (Tracy instrumentation)")
     add_compile_definitions(PROFILE_MODE TRACY_ENABLE TRACY_NO_SYSTEM_TRACING TRACY_NO_SAMPLING)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -march=native -ffast-math")
+    # NOTE: -ffast-math 不可加 — 代码全程靠 std::nanf("") 标记缺失值, 与 -ffinite-math-only 冲突会 SIGSEGV
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -march=native")
     set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -O2 -g -march=native")
 
 elseif(ASSERT_MODE)
     message(STATUS "Build mode: ASSERT (-O2 + asserts)")
     add_compile_definitions(ASSERT_MODE)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -march=native -ffast-math")
+    # NOTE: -ffast-math 不可加 — 代码全程靠 std::nanf("") 标记缺失值, 与 -ffinite-math-only 冲突会 SIGSEGV
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -march=native")
     set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -O2 -march=native")
 
 else()
     message(STATUS "Build mode: PRODUCTION (-O2 -DNDEBUG)")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -DNDEBUG -march=native -ffast-math")
+    # NOTE: -ffast-math 不可加 — 代码全程靠 std::nanf("") 标记缺失值, 与 -ffinite-math-only 冲突会 SIGSEGV
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -DNDEBUG -march=native")
     set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -O2 -DNDEBUG -march=native")
 endif()
 
@@ -92,6 +95,7 @@ set(SOURCES
     ../../src/feature/ts.cpp
     ../../src/feature/cs.cpp
     ../../src/feature/build.cpp
+    ../../src/feature/describe.cpp
 )
 
 set(HEADERS
@@ -119,6 +123,7 @@ set(HEADERS
     ../../include/feature/ts.hpp
     ../../include/feature/cs.hpp
     ../../include/feature/build.hpp
+    ../../include/feature/describe.hpp
 )
 
 add_executable(app_main ${SOURCES} ${HEADERS})

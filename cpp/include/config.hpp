@@ -15,9 +15,12 @@ inline constexpr const char *PIPELINE_START_DATE = "20150101"; // A 股财报电
 inline constexpr int LOOKBACK_DAYS = 7;                        // 最近 N 日历日强制重拉：≥5 交易日，兜住 tushare 端补登延迟
 inline constexpr int FETCH_MAX_DAYS_PER_CALL = 31;             // 单次 API 调用跨度上限；按月拉全市场仅几千行，安全在 8000 行限额内
 
-inline constexpr int API_DEDUP_WINDOW_SECONDS = 600; // 单 itf 去重窗口：上次成功更新距今 < 该值则跳过；时间戳落 data/_meta/<name>.lastupdate (粒度=数据文件名 spec.name)
+inline constexpr int API_DEDUP_WINDOW_SECONDS = 60 * 60; // 单 itf 去重窗口：上次成功更新距今 < 该值则跳过；时间戳落 data/_meta/<name>.lastupdate (粒度=数据文件名 spec.name)
 
 // feature 子系统
 inline constexpr int UNIVERSE_SIZE = 80; // pool 截面: pool_b ∧ rank(mcap_raw asc) ≤ N 取最终 strategy universe
+
+// describe (phase 4): 关闭则只输出 "all" 一行/feature; 开启则额外按自然年(axes.dates 前 4 位)展开
+inline constexpr bool DESCRIBE_BY_YEAR = true;
 
 } // namespace config

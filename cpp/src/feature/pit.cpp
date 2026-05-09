@@ -67,6 +67,23 @@ inline void event_post_sort(EventStore<Ev> &store) {
   }
 }
 
+// 网格字段 per-A forward fill: 遇到有效值记住，后续 NaN 用该值填充
+// 注：上市前的 NaN 在 ts 阶段根据 StockMeta.list_date 处理
+inline void grid_ffill(std::vector<float> &grid, int n_a, int n_d) {
+  for (int a = 0; a < n_a; ++a) {
+    std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+    float last = std::nanf("");
+    for (int d = 0; d < n_d; ++d) {
+      float v = grid[base + static_cast<std::size_t>(d)];
+      if (std::isfinite(v)) {
+        last = v;
+      } else if (std::isfinite(last)) {
+        grid[base + static_cast<std::size_t>(d)] = last;
+      }
+    }
+  }
+}
+
 } // namespace
 
 // ============================================================================
@@ -114,6 +131,18 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
   }
 }
 
+void post_ffill(const Axes &axes, PitPool &p) {
+  int n_a = axes.n_a(), n_d = axes.n_d();
+  grid_ffill(p.daily_basic.close, n_a, n_d);
+  grid_ffill(p.daily_basic.total_mv, n_a, n_d);
+  grid_ffill(p.daily_basic.circ_mv, n_a, n_d);
+  grid_ffill(p.daily_basic.total_share, n_a, n_d);
+  grid_ffill(p.daily_basic.pe_ttm, n_a, n_d);
+  grid_ffill(p.daily_basic.pb, n_a, n_d);
+  grid_ffill(p.daily_basic.ps_ttm, n_a, n_d);
+  grid_ffill(p.daily_basic.dv_ttm, n_a, n_d);
+}
+
 } // namespace itf_daily_basic
 
 namespace itf_stk_limit {
@@ -143,6 +172,12 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
     pool.stk_limit.up_limit[off]   = as_float_or_nan(yyjson_obj_get(item, "up_limit"));
     pool.stk_limit.down_limit[off] = as_float_or_nan(yyjson_obj_get(item, "down_limit"));
   }
+}
+
+void post_ffill(const Axes &axes, PitPool &p) {
+  int n_a = axes.n_a(), n_d = axes.n_d();
+  grid_ffill(p.stk_limit.up_limit, n_a, n_d);
+  grid_ffill(p.stk_limit.down_limit, n_a, n_d);
 }
 
 } // namespace itf_stk_limit
@@ -419,17 +454,17 @@ void post_sort(PitPool &p) { event_post_sort(p.fina_indicator); }
 
 const ItfDesc ITFS[] = {
     // 网格 itf (无锁)
-    {"daily_basic", false, &itf_daily_basic::prealloc, &itf_daily_basic::parse, nullptr},
-    {"stk_limit",   false, &itf_stk_limit::prealloc,   &itf_stk_limit::parse,   nullptr},
-    {"suspend_d",   false, &itf_suspend_d::prealloc,   &itf_suspend_d::parse,   nullptr},
+    {"daily_basic", false, &itf_daily_basic::prealloc, &itf_daily_basic::parse, nullptr, &itf_daily_basic::post_ffill},
+    {"stk_limit",   false, &itf_stk_limit::prealloc,   &itf_stk_limit::parse,   nullptr, &itf_stk_limit::post_ffill},
+    {"suspend_d",   false, &itf_suspend_d::prealloc,   &itf_suspend_d::parse,   nullptr, nullptr},
     // 事件 itf (per-A mutex)
-    {"forecast",       true, &itf_forecast::prealloc,       &itf_forecast::parse,       &itf_forecast::post_sort},
-    {"report",         true, &itf_report::prealloc,         &itf_report::parse,         &itf_report::post_sort},
-    {"st",             true, &itf_st::prealloc,             &itf_st::parse,             &itf_st::post_sort},
-    {"dividend",       true, &itf_dividend::prealloc,       &itf_dividend::parse,       &itf_dividend::post_sort},
-    {"income",         true, &itf_income::prealloc,         &itf_income::parse,         &itf_income::post_sort},
-    {"cashflow",       true, &itf_cashflow::prealloc,       &itf_cashflow::parse,       &itf_cashflow::post_sort},
-    {"fina_indicator", true, &itf_fina_indicator::prealloc, &itf_fina_indicator::parse, &itf_fina_indicator::post_sort},
+    {"forecast",       true, &itf_forecast::prealloc,       &itf_forecast::parse,       &itf_forecast::post_sort,       nullptr},
+    {"report",         true, &itf_report::prealloc,         &itf_report::parse,         &itf_report::post_sort,         nullptr},
+    {"st",             true, &itf_st::prealloc,             &itf_st::parse,             &itf_st::post_sort,             nullptr},
+    {"dividend",       true, &itf_dividend::prealloc,       &itf_dividend::parse,       &itf_dividend::post_sort,       nullptr},
+    {"income",         true, &itf_income::prealloc,         &itf_income::parse,         &itf_income::post_sort,         nullptr},
+    {"cashflow",       true, &itf_cashflow::prealloc,       &itf_cashflow::parse,       &itf_cashflow::post_sort,       nullptr},
+    {"fina_indicator", true, &itf_fina_indicator::prealloc, &itf_fina_indicator::parse, &itf_fina_indicator::post_sort, nullptr},
 };
 
 const int ITFS_COUNT = static_cast<int>(sizeof(ITFS) / sizeof(ITFS[0]));

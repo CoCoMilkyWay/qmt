@@ -37,6 +37,9 @@ Tensor build(Axes &out_axes, StockMeta &out_meta) {
     compute_cs(out_axes, T);
   }
 
+  // ---- 验证: 层层合理处理后, 应无 NaN ----
+  T.assert_no_nan();
+
   return T;
 }
 
