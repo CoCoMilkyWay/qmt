@@ -202,10 +202,29 @@ qmt/
 
 `feature::build()` 串 4 phase 全过程式; 入口 `cpp/src/feature/build.cpp`.
 
-**架构**: 业务密集化到 2 个单点真理文件 — `pit.cpp` (itf 维) + `feature.cpp` (feature 维); 外层 flow (`load.cpp` / `ts.cpp` / `cs.cpp` / `build.cpp`) 完全 agnostic, 仅通过函数指针表 (`ITFS[]` / `FEATURES[]`) 迭代调度. 改字段表/计算图 不动外层.
+**Phase 切分动机**
+
+| phase  | 数据形态          | 任务粒度             | 并行性             | 主要工作                              |
+| ------ | ----------------- | -------------------- | ------------------ | ------------------------------------- |
+| 0 axes | 标量级元数据      | 主线程               | 无                 | 一次性确定 D / A / per-A 静态         |
+| 1 load | 文件级 raw json   | (day, itf) ≈ 3650×16 | embarrassingly     | 解析 + **PIT cutoff 落到 row D 索引** |
+| 2 时序 | 列式 (per-A 全 D) | a ≈ 5500             | embarrassingly (A) | 单调时间序列计算 + 状态机             |
+| 3 截面 | 行式 (per-D 全 A) | d ≈ 2750             | embarrassingly (D) | 截面归一 + universe 选取              |
+
+**业务密集化 + agnostic 外层** — 改字段表/计算图不动外层:
+- `pit.cpp` (itf 维 单点真理): 每 itf 一组 `{prealloc, parse, post_sort?, post_ffill?}` + 末尾 `ITFS[]` 表挂载.
+- `feature.cpp` (feature 维 单点真理): 每 feature 一个 `ts_xxx`/`cs_xxx` compute fn + 末尾 `FEATURES[]` 表挂载.
+- 外层 flow (`load.cpp` / `ts.cpp` / `cs.cpp` / `build.cpp`) 仅通过函数指针表迭代调度, 不出现任何具体 itf 名 / feature 名.
+
+**关键设计选择** (动机性的, 散落点上提):
+- **PIT cutoff 在 Phase 1 一次性消化**: `parse` 内 `row = v_idx - itf::CUTOFF` 直接定位行 D, 写完后 `pool[a, d]` 即 "T 当日合法可见数据". Phase 2/3 不再做任何时间偏移 — 杜绝下游漏算 cutoff 导致的未来数据泄漏 (类比: PIT 责任收敛在数据入口, 不下放).
+- **F 枚举顺序 = 计算顺序 = 隐式 topo sort**: 调度器 (ts.cpp / cs.cpp) 仅按 `FEATURES[]` 索引顺序串行调; 只要 "新 feature 加在其依赖之后", 后段直接读 `T.ts_row(prior_f, a)` 即可, 无需运行时 topo / 依赖锁.
+- **网格无锁 + 事件 per-A 锁**: 网格 itf 因 `(a, v_idx)` slot 唯一 → 完全无锁写; 事件 itf 多对一 emplace, 锁粒度精到 `vector<mutex>(n_a)` (非全局, 非 per-itf), 接近无争用.
+- **F 段独立 A*D layout (a-major / d-minor)**: Phase 2 的 `ts_row(f, a)` 是连续 span (cache friendly, 主路径); Phase 3 的 `gather/scatter_cs_row(f, d)` 是 stride-D copy (3 buffer 复用, 一次性付出).
 
 ```text
 Phase 0 axes  (主线程; axis.cpp + tensor.cpp)
+  # 形态: 标量级, 串行. 后续所有 phase 共用的索引基线 — 只跑一次, 无并行收益可言.
   axes ← load_axes()
     D ← scan data/**/calendar.json, 取 (exchange ∈ {SSE,SZSE} ∧ is_open=1) 的 cal_date 升序去重
     A ← read data/_meta/stock_basic.json, 取全量 ts_code (含已退市) 升序
@@ -218,6 +237,10 @@ Phase 0 axes  (主线程; axis.cpp + tensor.cpp)
                                              #   gather/scatter_cs_row(f,d) = stride D copy (Phase 3 入口)
 
 Phase 1 PIT load  (per-(day, itf) 并行; load.cpp 通用 flow + pit.cpp 单点 itf 表)
+  # 形态: 文件级, 任务粒度 = (day, itf). 文件之间无依赖 → 任务池抢占式分发.
+  # 关键: cutoff 在此 一次性 落到 row 索引, 写后 pool[a, d] 即 "T 当日合法可见数据"; 下游 0 时间偏移.
+  # 并发: 网格 itf 写入完全无锁 (slot 唯一); 事件 itf 仅 per-A mutex 锁 emplace, 争用接近 0.
+
   for itf in pit.cpp::ITFS[]:                # 仅迭代 ITFS[] 表, 不出现具体 itf 名
     itf.prealloc(axes, pool)                 # 网格: 字段 vector A*D NaN/0; 事件: EventStore[A] 空链
 
@@ -229,32 +252,26 @@ Phase 1 PIT load  (per-(day, itf) 并行; load.cpp 通用 flow + pit.cpp 单点 
   parallel for task in tasks (n_threads = misc::Affinity::core_count()):
     arr ← yyjson_read(task.path)             # 单 day 单 itf 的 record 数组
     task.itf.parse(arr, v_idx, axes, pool, mu_or_null)
-                                             # parse 内统一应用 itf::CUTOFF: row = v_idx - CUTOFF
-                                             #   (CUTOFF=0 → row=v_idx; CUTOFF=-1 → row=v_idx+1)
-                                             #   row >= n_d → skip (越界, 数据落到 axes 外)
-                                             # 网格 itf: mu=nullptr, dense slot 写入无锁
-                                             #   per record (a = code_idx[ts_code])
-                                             #     → pool.<itf>.<field>[a*n_d + row]
-                                             # 事件 itf: mu=vector<mutex>(n_a), 取 mu[a] 后
-                                             #   pool.<itf>[a].emplace_back(Ev{v=row,…})
-                                             # ⇒ pool 即 row D 已 cutoff 的合法 PIT 数据,
-                                             #   下游 feature 直读 pool[a*n_d + d], 不再处理 cutoff.
+                                             # row = v_idx - itf::CUTOFF
+                                             #   (CUTOFF=0 → row=v_idx; CUTOFF=-1 → row=v_idx+1; row≥n_d 越界 skip)
+                                             # 网格: mu=nullptr; pool.<itf>.<field>[a*n_d + row] 无锁写
+                                             # 事件: mu[a] 锁后 pool.<itf>[a].emplace_back(Ev{v=row,…})
 
-  for itf in ITFS[] where itf.post_sort:     # 事件 itf 末段 sort by v 升序 (Phase 2 走单调指针扫)
+  for itf in ITFS[] where itf.post_sort:     # 事件 itf 末段 sort by v 升序 — 给 Phase 2 单调指针扫
     itf.post_sort(pool)
 
-  for itf in ITFS[] where itf.post_ffill:    # 网格 itf per-A forward fill (停牌期间用前值)
+  for itf in ITFS[] where itf.post_ffill:    # 网格 itf per-A forward fill (停牌期间继承前值)
     itf.post_ffill(axes, pool)
 
 Phase 2 时序  (per-A 并行; ts.cpp 通用 flow + feature.cpp 单点 feature 表)
+  # 形态: 列式 (per-A 全 D), A 维 embarrassingly parallel; D 内强 causal (滚动/状态机).
+  # 不变量: 每 worker 独占一段 ts_row(*, a), 无写冲突; FEATURES[] TS 段顺序 = 计算顺序,
+  #         后段直读 T.ts_row(prior_f, a) (例: low_p 读 close_raw; revenue_st 读 rev_raw).
+  # NaN 策略: 不人为补 0 — 上市前/退市后/长期停牌的 NaN 自然流到下游, 让数据可用性显式可判.
+
   parallel for a in [0, n_a) (n_threads = core_count):
     for f in FEATURES[] where axis == TimeSeries:
-      f.compute_ts(a, axes, pool, meta, T)   # 写自己的 T.ts_row(F::self, a)
-                                             # 可读 PitPool / StockMeta / 已写就的 T.ts_row(prior_f, a)
-
-  # NaN 保留策略: 不人为填 0, NaN 自然流到后续 stage 判断数据可用性
-  #   - 上市前/退市后: NaN (无需特殊处理, pool 本身无数据)
-  #   - 长期停牌: NaN (ffill 无前值时保留, 暴露数据源问题)
+      f.compute_ts(a, axes, pool, meta, T)   # 写 T.ts_row(F::self, a); 读 PitPool / StockMeta / 前段 T.ts_row
 
   # FEATURES[] 索引 = F 枚举值 = 计算顺序; enum 大段仅 TS / CS, 段内对仗如下:
   #   raw 网格      (PitPool dense 直读, pool[a, d] 已是 row D 合法数据):
@@ -298,10 +315,15 @@ Phase 2 时序  (per-A 并行; ts.cpp 通用 flow + feature.cpp 单点 feature �
   #                ∧ (true if config::POOL_INCLUDE_MARGIN else ¬is_margin)
 
 Phase 3 截面  (per-D 并行; cs.cpp 通用 flow + feature.cpp 单点 feature 表)
+  # 形态: 行式 (per-D 全 A), D 维 embarrassingly parallel; A 内强 causal (winsor/z/rank).
+  # 入口代价: gather_cs_row 是 stride-D copy (vs Phase 2 ts_row 连续 span); 每 worker
+  #          thread-local 3 buffer (length=n_a) 复用, 避免反复分配.
+  # 不变量: FEATURES[] CS 段顺序 = 计算顺序 (tradable 在最后, 读 pool + 6 filter).
+
   parallel for d in [0, n_d) (n_threads = core_count):
-    bufs ← thread-local {a, b, c}: 3 × vector<float>(n_a), 复用避免反复分配
+    bufs ← thread-local {a, b, c}: 3 × vector<float>(n_a)
     for f in FEATURES[] where axis == CrossSection:
-      f.compute_cs(d, axes, T, bufs)         # 写自己的 T.scatter_cs_row(F::self, d, …)
+      f.compute_cs(d, axes, T, bufs)         # 写 T.scatter_cs_row(F::self, d, …)
 
   # CS 业务一览 (实现见 feature.cpp::impl::cs_*):
   #   factor 流水: cs.hpp::factor_pipeline(d, src, dst, invert, T, buf):
@@ -318,11 +340,11 @@ Phase 3 截面  (per-D 并行; cs.cpp 通用 flow + feature.cpp 单点 feature �
   #   tradable: pool[a,d] ∧ ¬(profit_st ∨ revenue_st ∨ dividend_st ∨ trading_st ∨ risk_warn ∨ new_list)[a,d]
 ```
 
-并发模型一览
-- Phase 0: 主线程; 全量 in-memory.
-- Phase 1: 任务粒度 = (day, itf) (≈ 3650 day × |ITFS|). 网格 itf 因 (a, v_idx) slot 唯一 → 无锁 (`mu=nullptr`); 事件 itf → `vector<mutex>(n_a)` 仅锁 `pool[a].emplace_back`. 末段 `post_sort` 单线程 per-A `sort by v` 串行.
-- Phase 2: 任务粒度 = a (≈ 5500). 每 worker 独占 `T.ts_row(*, a)` 段写入, 无写冲突. FEATURES[] 顺序 = F 枚举顺序 = 计算顺序, 后段读前段输出 (例如 `low_p` 读 `close_raw`, `revenue_st` 读 `rev_raw`/`mb`).
-- Phase 3: 任务粒度 = d (≈ 2750). 每 worker 独占 cs_row 段; thread-local 3 buffer (length=n_a) 复用. CS 项之间多数互不依赖 (`tradable` 例外, 读 `pool` + 6 filter); FEATURES[] 顺序 = F 枚举顺序保证依赖已就绪, 串行调用即可.
+并发模型规格 (动机/不变量已在各 Phase 头部展开, 此处仅列数据 + 同步点)
+- Phase 0: 主线程; 全量 in-memory; 跑一次.
+- Phase 1: 任务数 ≈ 3650 day × |ITFS| (≈ 16); 网格 `mu=nullptr`, 事件 `vector<mutex>(n_a)`; 末段 `post_sort` / `post_ffill` 单线程串行.
+- Phase 2: 任务数 ≈ n_a (5500); 每 worker 独占 `T.ts_row(*, a)`.
+- Phase 3: 任务数 ≈ n_d (2750); 每 worker 独占 `cs_row` 段 + thread-local 3 buffer (length=n_a).
 - 同步点: 仅 phase 间硬屏障 (`build.cpp` 顺序 `join` + `misc::Timer` 报段时), phase 内无屏障.
 
 ## 增减用法 (改计算图 / 字段表)
