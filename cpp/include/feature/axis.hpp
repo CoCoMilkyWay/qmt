@@ -31,11 +31,14 @@ struct Axes {
 //   list_date / delist_date: YYYYMMDD; delist_date 空串 = 未退市
 //   market: 主板 / 创业板 / 科创板 / ...
 //   exchange: SSE / SZSE / BSE
+//   industry_l1: 申万 SW2021 一级行业中文名 (来自 _meta/index_member_all.json::l1_name);
+//                未覆盖的 ts_code 留空串 (新股未入指数 / B 股 / 退市等)
 struct StockMeta {
   std::vector<std::string> list_date;
   std::vector<std::string> delist_date;
   std::vector<std::string> market;
   std::vector<std::string> exchange;
+  std::vector<std::string> industry_l1;
 };
 
 Axes load_axes();

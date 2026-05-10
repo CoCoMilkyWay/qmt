@@ -38,6 +38,20 @@ struct GridSuspendD {
   std::vector<uint8_t> susp; // 1 = 当日有 suspend_d 记录 (停牌); 0 = 无
 };
 
+// margin_secs: 当日两融标的名单 (per-A bool 网格).
+//   1 = 当日 (ts_code, trade_date) 在 margin_secs 列表; 0 = 不在.
+struct GridMarginSecs {
+  std::vector<uint8_t> is_margin;
+};
+
+// margin_detail: 每日两融余额 (per-A 元 网格).
+//   mr_bal ← rzye (融资余额)
+//   ms_bal ← rqye (融券余额)
+//   注: rzrqye = mr_bal + ms_bal (不入张量, 下游需要时自相加)
+struct GridMarginDetail {
+  std::vector<float> mr_bal, ms_bal;
+};
+
 struct ForecastEv {
   int v;
   std::string end_date;
@@ -89,16 +103,18 @@ using EventStore = std::vector<std::vector<Ev>>;
 
 struct PitPool {
   GridDailyBasic daily_basic;
-  GridStkLimit   stk_limit;
-  GridSuspendD   suspend_d;
+  GridStkLimit stk_limit;
+  GridSuspendD suspend_d;
+  GridMarginSecs margin_secs;
+  GridMarginDetail margin_detail;
 
   EventStore<ForecastEv> forecast;
-  EventStore<ReportEv>   report;
-  EventStore<STEv>       st;
+  EventStore<ReportEv> report;
+  EventStore<STEv> st;
   EventStore<DividendEv> dividend;
-  EventStore<IncomeEv>   income;
+  EventStore<IncomeEv> income;
   EventStore<CashflowEv> cashflow;
-  EventStore<FinaIndEv>  fina_indicator;
+  EventStore<FinaIndEv> fina_indicator;
 };
 
 // ============================================================================
@@ -118,16 +134,16 @@ struct PitPool {
 // ============================================================================
 struct ItfDesc {
   const char *file_name; // .json basename, 也是日志/标识用名
-  bool        is_event;  // false=网格 (无锁), true=事件 (per-A mutex)
+  bool is_event;         // false=网格 (无锁), true=事件 (per-A mutex)
 
   void (*prealloc)(const Axes &, PitPool &);
   void (*parse)(yyjson_val *arr, int v_idx, const Axes &, PitPool &,
                 std::vector<std::mutex> *mu /* 网格场合可为 nullptr */);
-  void (*post_sort)(PitPool &);              // 事件 itf 末段 sort by v; 网格 itf 留 nullptr
+  void (*post_sort)(PitPool &);                // 事件 itf 末段 sort by v; 网格 itf 留 nullptr
   void (*post_ffill)(const Axes &, PitPool &); // 网格 itf per-A forward fill; 事件 itf 留 nullptr
 };
 
 extern const ItfDesc ITFS[];
-extern const int     ITFS_COUNT;
+extern const int ITFS_COUNT;
 
 } // namespace feature

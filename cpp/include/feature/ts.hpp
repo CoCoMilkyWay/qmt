@@ -25,16 +25,18 @@ void compute_ts(const Axes &, const PitPool &, const StockMeta &, Tensor &);
 // ============================================================================
 // 通用 TS kernel (供 feature.cpp 的 per-feature compute fn 复用)
 //
+// 注: 事件 ev.v 已在 pit.cpp parse 时应用 raw cutoff, 即 ev.v = 首次可见的 row D.
+//   下游直接 `ev.v <= d` 判可见, 不再 +1.
+//
 // 1) ttm4_ytd_compute<Ev>:
 //      按 v 升序回放 events, 维护 map<end_date, value> (latest version per end_date,
 //      可选 report_type=='1' 过滤; fina_indicator 不带 type → get_rt 返回空串接受全部);
-//      d_target = v + 1 (offset = -1, 财报 itf 全部 visible_date=ann_date).
 //      自动降级: 完整 X(t)+X(Y-1,12)-X(Y-1,M) → 缺同期 X(t)+X(Y-1,12)*(12-M)/12 → 缺年报 X(t)*12/M.
 //      M==12 退化为 X(t).
 //
 // 2) state_machine_intervals<TEv>:
 //      按 v 升序遍历 trigger_events, 每 trigger 用 find_off(trigger) 求终止 d,
-//      区间 [trigger.v+1, off_d) 写 1.0; 区间外 0.0; 多 trigger OR (重叠取并集).
+//      区间 [trigger.v, off_d) 写 1.0; 区间外 0.0; 多 trigger OR (重叠取并集).
 // ============================================================================
 
 template <class Ev, class GetReportType, class GetValue>
@@ -46,7 +48,7 @@ void ttm4_ytd_compute(const std::vector<Ev> &events, int n_d,
   std::map<std::string, float> latest;
   std::size_t ev_ptr = 0;
   for (int d = 0; d < n_d; ++d) {
-    while (ev_ptr < events.size() && (events[ev_ptr].v + 1) <= d) {
+    while (ev_ptr < events.size() && events[ev_ptr].v <= d) {
       const Ev &e = events[ev_ptr++];
       const std::string &rt = get_rt(e);
       if (!rt.empty() && rt != "1") continue; // 仅合并报表 (空串 = 不过滤)
@@ -92,7 +94,7 @@ void state_machine_intervals(const std::vector<TEv> &triggers, int n_d,
                              FindOff find_off, std::span<float> dst) {
   std::fill(dst.begin(), dst.end(), 0.0f);
   for (const TEv &e : triggers) {
-    int on_d  = e.v + 1; // offset=-1
+    int on_d  = e.v; // ev.v 已是首次可见 row D
     int off_d = find_off(e);
     if (on_d < 0) on_d = 0;
     if (off_d > n_d) off_d = n_d;

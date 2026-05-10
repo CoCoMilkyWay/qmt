@@ -218,6 +218,25 @@ const std::vector<InterfaceSpec> SPECS = {
      {"ann_date"},
      {"ts_code", "end_date", "report_type"},
      std::make_shared<PerDayStrategy>(std::vector<std::string>{"ann_date"})},
+    // 融资融券标的: 当日两融名单 (含 ETF). visible_date=trade_date, 盘前更新.
+    // - 一天全市场 ~3000-5000 行, 限额 6000 行/单次, PerDay 单 query 即可.
+    // - PK=(ts_code, trade_date): 同 trade_date 同 ts_code 唯一.
+    // - 用途: 后续策略可加"仅两融"过滤 (当前默认不过滤, 保持与 py 一致).
+    {"margin_secs",
+     "margin_secs",
+     {"trade_date"},
+     {"ts_code", "trade_date"},
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"trade_date"})},
+    // 融资融券明细: 每日两融余额/买卖量. visible_date=trade_date, "每日9点更新" (盘前).
+    // - tushare 9点入库的是 T-1 日明细 (trade_date=T-1), T 日盘中可见 (cutoff=0 自洽).
+    // - 一天全市场 ~1000-3000 行, 限额 6000 行/单次, PerDay 单 query 即可.
+    // - PK=(ts_code, trade_date).
+    // - 用途: 后续可派生融资余额/融券余额因子 (当前不入张量, 仅落地).
+    {"margin_detail",
+     "margin_detail",
+     {"trade_date"},
+     {"ts_code", "trade_date"},
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"trade_date"})},
 };
 
 } // namespace tushare

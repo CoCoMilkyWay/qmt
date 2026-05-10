@@ -131,14 +131,7 @@ StockMeta load_stock_meta(const Axes &ax) {
   m.delist_date.assign(na, {});
   m.market.assign(na, {});
   m.exchange.assign(na, {});
-
-  fs::path sb_path = misc::git_root() / "data" / "_meta" / "stock_basic.json";
-  std::string buf = misc::read_file_all(sb_path);
-  assert(!buf.empty());
-  yyjson_doc *doc = yyjson_read(buf.data(), buf.size(), 0);
-  assert(doc);
-  yyjson_val *root = yyjson_doc_get_root(doc);
-  assert(yyjson_is_arr(root));
+  m.industry_l1.assign(na, {});
 
   auto get_str = [](yyjson_val *obj, const char *key) -> std::string {
     yyjson_val *v = yyjson_obj_get(obj, key);
@@ -146,6 +139,15 @@ StockMeta load_stock_meta(const Axes &ax) {
     const char *s = yyjson_get_str(v);
     return s ? std::string(s) : std::string();
   };
+
+  // ---- stock_basic: list_date / delist_date / market / exchange ----
+  fs::path sb_path = misc::git_root() / "data" / "_meta" / "stock_basic.json";
+  std::string buf = misc::read_file_all(sb_path);
+  assert(!buf.empty());
+  yyjson_doc *doc = yyjson_read(buf.data(), buf.size(), 0);
+  assert(doc);
+  yyjson_val *root = yyjson_doc_get_root(doc);
+  assert(yyjson_is_arr(root));
 
   size_t i, n;
   yyjson_val *item;
@@ -160,6 +162,26 @@ StockMeta load_stock_meta(const Axes &ax) {
     m.exchange[a] = get_str(item, "exchange");
   }
   yyjson_doc_free(doc);
+
+  // ---- index_member_all: industry_l1 (申万 SW2021 L1 中文名) ----
+  fs::path im_path = misc::git_root() / "data" / "_meta" / "index_member_all.json";
+  std::string im_buf = misc::read_file_all(im_path);
+  assert(!im_buf.empty());
+  yyjson_doc *im_doc = yyjson_read(im_buf.data(), im_buf.size(), 0);
+  assert(im_doc);
+  yyjson_val *im_root = yyjson_doc_get_root(im_doc);
+  assert(yyjson_is_arr(im_root));
+
+  size_t im_i, im_n;
+  yyjson_val *im_item;
+  yyjson_arr_foreach(im_root, im_i, im_n, im_item) {
+    std::string ts_code = get_str(im_item, "ts_code");
+    auto it = ax.code_idx.find(ts_code);
+    if (it == ax.code_idx.end()) continue;
+    int a = it->second;
+    m.industry_l1[a] = get_str(im_item, "l1_name");
+  }
+  yyjson_doc_free(im_doc);
 
   return m;
 }
