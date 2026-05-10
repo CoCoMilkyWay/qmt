@@ -1,5 +1,7 @@
 #pragma once
 
+#include "feature/feature.hpp"
+
 #include <array>
 #include <string_view>
 
@@ -55,6 +57,49 @@ inline constexpr std::array<std::string_view, 28> POOL_INDUSTRY_L1_WHITELIST = {
 inline constexpr bool POOL_INCLUDE_MARGIN = true;
 
 // describe (phase 4): 关闭则只输出 "all" 一行/feature; 开启则额外按自然年(axes.dates 前 4 位)展开
+inline constexpr bool ENABLE_DESCRIBE = false;
 inline constexpr bool DESCRIBE_BY_YEAR = false;
+
+// ============================================================================
+// strategy / 回测 / 分析 配置
+// ============================================================================
+
+// 回测窗口 (YYYYMMDD; 含端点); 必为交易日或落到 axes 内的日期
+inline constexpr const char *BACKTEST_START_DATE = "20170101";
+inline constexpr const char *BACKTEST_END_DATE = "20260423";
+
+// tradable 启用哪些 filter (cs_tradable 在 pool ∧ ¬OR(此处 filter)); 删一行即禁用一项
+inline constexpr std::array<feature::F, 6> ENABLED_FILTERS = {{
+    feature::F::profit_st,
+    feature::F::revenue_st,
+    feature::F::dividend_st,
+    feature::F::trading_st,
+    feature::F::risk_warn,
+    feature::F::new_list,
+}};
+
+// factor 加权合成 score (cs_factor_score = Σ w_f · factor_f / Σ w_f · 1{finite}, 限于 pool).
+//   w 必须 > 0; 不想要的 factor 直接删行 (=禁用); F 必须是 enum 中的 factor (Kind::Factor)
+struct FactorWeight {
+  feature::F f;
+  float w;
+};
+inline constexpr std::array<FactorWeight, 2> FACTOR_WEIGHTS = {{
+    {feature::F::mcap, 0.6f},
+    {feature::F::close, 0.4f},
+}};
+
+// backtest 行为
+inline constexpr int BT_HOLD_N = 10;             // 目标持仓数
+inline constexpr float BT_EXIT_RATIO = 1.0f;     // 离开 top-(HOLD_N*EXIT_RATIO) 的持仓必卖
+inline constexpr float BT_CAPITAL_BASE = 1.0e6f; // 初始资金 [元]
+inline constexpr float BT_PRICE_LIMIT_EPS = 1e-4f;
+inline constexpr float BT_BUY_COST = 3e-4f;  // 单边万 3
+inline constexpr float BT_SELL_COST = 13e-4f; // 单边万 13
+inline constexpr float BT_MIN_COST = 5.0f;    // 单笔最低 5 元
+
+// analysis: 分层桶数 (TAG 4 排名分析); IC 移动平均窗口
+inline constexpr int N_QUANTILES = 10;
+inline constexpr int IC_MA_WINDOW = 250; // 因子 IC 250 日均值
 
 } // namespace config

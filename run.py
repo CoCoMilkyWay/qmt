@@ -28,6 +28,9 @@ ENABLE_DEBUG = False
 ENABLE_PROFILE = False
 ENABLE_PRODUCTION = False  # Auto-enabled if all others are False
 
+# cpp 跑完后自动生成 plotly HTML 报告 (output/report.html) 并打开浏览器
+ENABLE_REPORT = True
+
 
 def _cleanup_processes():
     subprocess.run(["pkill", "-f", f"app_{APP_NAME}"], capture_output=True, check=False)
@@ -73,6 +76,11 @@ def main():
     build_dir = os.path.abspath(f"cpp/projects/{APP_NAME}/build")
     binary_path = os.path.join(build_dir, f"bin/app_{APP_NAME}")
     _run(binary_path, build_dir, ENABLE_DEBUG, ENABLE_PROFILE, ENABLE_ASSERT)
+
+    if ENABLE_REPORT:
+        print("\nGenerating report...")
+        from py import report
+        report.main()
 
 
 if __name__ == "__main__":

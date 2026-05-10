@@ -826,27 +826,51 @@ void cs_pool(int d, const Axes &, Tensor &T, CsBufs &b) {
   T.scatter_cs_row(F::pool, d, std::span<const float>(b.c.data(), b.c.size()));
 }
 
-// tradable: pool ∧ ¬(profit_st ∨ revenue_st ∨ dividend_st ∨ trading_st ∨ risk_warn ∨ new_list)
+// tradable: pool ∧ ¬OR(config::ENABLED_FILTERS).
 //   pool 是 cs (pct_rank / nth-smallest 母集), tradable 是策略实际 top-K 母集.
+//   filter 子集集中在 config.hpp; 删一行即禁用该 filter.
 void cs_tradable(int d, const Axes &, Tensor &T, CsBufs &b) {
   T.gather_cs_row(F::pool, d, b.a);
   std::size_t na = b.a.size();
 
-  auto or_into = [&](F src) {
+  for (F src : ::config::ENABLED_FILTERS) {
     T.gather_cs_row(src, d, b.b);
     for (std::size_t a = 0; a < na; ++a) {
       if (b.b[a] > 0.5f)
         b.a[a] = 0.0f;
     }
-  };
-  or_into(F::profit_st);
-  or_into(F::revenue_st);
-  or_into(F::dividend_st);
-  or_into(F::trading_st);
-  or_into(F::risk_warn);
-  or_into(F::new_list);
+  }
 
   T.scatter_cs_row(F::tradable, d, std::span<const float>(b.a.data(), na));
+}
+
+// factor_score: pool 内 finite-加权平均.
+//   buf 用法: a = score_num accumulator, b = score_den accumulator, c = factor temp / pool mask.
+//   流: 0 累加 num/den; 1 读 pool 用作 mask; 2 num/den + pool → score; scatter.
+//   注: factor_pipeline 已对 raw=0 (上市前) 填 0, 这里 finite 会算入分母 → score 有定义但分子被压;
+//       对该业务可接受 — 上市前的样本理论上不会进 pool (asset list_age 过滤先于 pool).
+void cs_factor_score(int d, const Axes &, Tensor &T, CsBufs &b) {
+  std::size_t na = b.a.size();
+  std::fill(b.a.begin(), b.a.end(), 0.0f);
+  std::fill(b.b.begin(), b.b.end(), 0.0f);
+
+  for (const auto &fw : ::config::FACTOR_WEIGHTS) {
+    T.gather_cs_row(fw.f, d, b.c);
+    for (std::size_t a = 0; a < na; ++a) {
+      float v = b.c[a];
+      if (is_finite(v)) {
+        b.a[a] += fw.w * v;
+        b.b[a] += fw.w;
+      }
+    }
+  }
+
+  T.gather_cs_row(F::pool, d, b.c);
+  for (std::size_t a = 0; a < na; ++a) {
+    bool in_pool = b.c[a] > 0.5f;
+    b.a[a] = (in_pool && b.b[a] > 0.0f) ? (b.a[a] / b.b[a]) : std::nanf("");
+  }
+  T.scatter_cs_row(F::factor_score, d, std::span<const float>(b.a.data(), na));
 }
 
 } // namespace impl
@@ -911,6 +935,7 @@ const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES = {{
     // pool (CS) — universe 母集
     {"pool", Kind::Inter, Axis::CrossSection, nullptr, &impl::cs_pool},
     {"tradable", Kind::Inter, Axis::CrossSection, nullptr, &impl::cs_tradable},
+    {"factor_score", Kind::Inter, Axis::CrossSection, nullptr, &impl::cs_factor_score},
 }};
 
 } // namespace feature

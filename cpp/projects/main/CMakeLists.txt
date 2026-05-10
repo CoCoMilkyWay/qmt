@@ -81,6 +81,7 @@ set(SOURCES
     ../../src/misc/logging.cpp
     ../../src/misc/date.cpp
     ../../src/misc/fs.cpp
+    ../../src/misc/npy.cpp
     ../../include/package/yyjson/yyjson.c
     ../../src/tushare/http.cpp
     ../../src/tushare/spec.cpp
@@ -96,6 +97,8 @@ set(SOURCES
     ../../src/feature/cs.cpp
     ../../src/feature/build.cpp
     ../../src/feature/describe.cpp
+    ../../src/backtest/backtest.cpp
+    ../../src/analysis/analysis.cpp
 )
 
 set(HEADERS
@@ -108,6 +111,7 @@ set(HEADERS
     ../../include/misc/profiler.hpp
     ../../include/misc/date.hpp
     ../../include/misc/fs.hpp
+    ../../include/misc/npy.hpp
     ../../include/config.hpp
     ../../include/package/yyjson/yyjson.h
     ../../include/tushare/http.hpp
@@ -124,6 +128,8 @@ set(HEADERS
     ../../include/feature/cs.hpp
     ../../include/feature/build.hpp
     ../../include/feature/describe.hpp
+    ../../include/backtest/backtest.hpp
+    ../../include/analysis/analysis.hpp
 )
 
 add_executable(app_main ${SOURCES} ${HEADERS})
