@@ -301,15 +301,15 @@ def fig_tag1(bt, an, meta) -> go.Figure:
     fig.update_layout(
         title="TAG 1: 策略指标 / 交易统计 (二选一)",
         updatemenus=[dict(
-            type="dropdown", direction="down", showactive=True,
-            x=0.0, y=1.12, xanchor="left",
+            type="buttons", direction="right", showactive=True,
+            x=0.0, y=1.15, xanchor="left",
             buttons=[
                 dict(label="策略 / pool指数 指标",
                      method="update",
-                     args=[{"visible": [True, False]}]),
+                     args=[{"visible": [True, False]}, {"title": "TAG 1: 策略指标 / 交易统计 > 策略指标"}]),
                 dict(label="交易统计",
                      method="update",
-                     args=[{"visible": [False, True]}]),
+                     args=[{"visible": [False, True]}, {"title": "TAG 1: 策略指标 / 交易统计 > 交易统计"}]),
             ],
         )],
         height=600,
@@ -464,14 +464,14 @@ def fig_tag2(bt, an, meta) -> go.Figure:
         for j in traces_per_view[i]:
             vis[j] = True
         buttons.append(dict(label=label, method="update",
-                            args=[{"visible": vis}]))
+                            args=[{"visible": vis}, {"title": f"TAG 2: {label}"}]))
 
     fig.update_layout(
         title="TAG 2: 收益曲线 / 分布 / 表格 (多选一)",
-        updatemenus=[dict(type="dropdown", direction="down",
-                          showactive=True, x=0.0, y=1.12, xanchor="left",
+        updatemenus=[dict(type="buttons", direction="right",
+                          showactive=True, x=0.0, y=1.15, xanchor="left",
                           buttons=buttons)],
-        height=620, barmode="overlay",
+        height=650, barmode="group",
     )
     return fig
 
@@ -543,13 +543,13 @@ def fig_tag3(bt, codes, dates_all) -> go.Figure:
     fig.data[1].visible = False
     fig.update_layout(
         title="TAG 3: 每天持仓 / 交易记录 (二选一)",
-        updatemenus=[dict(type="dropdown", direction="down",
-                          showactive=True, x=0.0, y=1.12, xanchor="left",
+        updatemenus=[dict(type="buttons", direction="right",
+                          showactive=True, x=0.0, y=1.15, xanchor="left",
                           buttons=[
                               dict(label="每天持仓 (最近优先)", method="update",
-                                   args=[{"visible": [True, False]}]),
+                                   args=[{"visible": [True, False]}, {"title": "TAG 3: 每天持仓"}]),
                               dict(label="交易记录 (最近优先)", method="update",
-                                   args=[{"visible": [False, True]}]),
+                                   args=[{"visible": [False, True]}, {"title": "TAG 3: 交易记录"}]),
                           ])],
         height=720,
     )
@@ -680,14 +680,14 @@ def fig_tag4(an, meta) -> go.Figure:
         for j in traces_per_view[i]:
             vis[j] = True
         buttons.append(dict(label=label, method="update",
-                            args=[{"visible": vis}]))
+                            args=[{"visible": vis}, {"title": f"TAG 4: {label}"}]))
 
     fig.update_layout(
         title="TAG 4: 排名分析 / 因子相关性 (多选一)",
-        updatemenus=[dict(type="dropdown", direction="down",
-                          showactive=True, x=0.0, y=1.12, xanchor="left",
+        updatemenus=[dict(type="buttons", direction="right",
+                          showactive=True, x=0.0, y=1.15, xanchor="left",
                           buttons=buttons)],
-        height=620,
+        height=650,
     )
     return fig
 
