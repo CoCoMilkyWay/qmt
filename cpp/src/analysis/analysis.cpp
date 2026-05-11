@@ -125,7 +125,7 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
   auto t0 = std::chrono::high_resolution_clock::now();
 
   int bt_d_lo = find_d(axes, ::config::BACKTEST_START_DATE, false);
-  int bt_d_hi_inc = find_d(axes, ::config::BACKTEST_END_DATE, true);
+  int bt_d_hi_inc = axes.n_d() - 1;
   assert(bt_d_lo >= 0 && bt_d_hi_inc >= bt_d_lo &&
          bt_d_hi_inc < axes.n_d());
   int bt_d_hi = bt_d_hi_inc + 1;

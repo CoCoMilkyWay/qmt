@@ -127,6 +127,7 @@ Axes load_axes() {
 StockMeta load_stock_meta(const Axes &ax) {
   StockMeta m;
   size_t na = static_cast<size_t>(ax.n_a());
+  m.name.assign(na, {});
   m.list_date.assign(na, {});
   m.delist_date.assign(na, {});
   m.market.assign(na, {});
@@ -156,6 +157,7 @@ StockMeta load_stock_meta(const Axes &ax) {
     auto it = ax.code_idx.find(ts_code);
     if (it == ax.code_idx.end()) continue;
     int a = it->second;
+    m.name[a] = get_str(item, "name");
     m.list_date[a] = get_str(item, "list_date");
     m.delist_date[a] = get_str(item, "delist_date");
     m.market[a] = get_str(item, "market");

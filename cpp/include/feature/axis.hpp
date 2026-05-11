@@ -34,6 +34,7 @@ struct Axes {
 //   industry_l1: 申万 SW2021 一级行业中文名 (来自 _meta/index_member_all.json::l1_name);
 //                未覆盖的 ts_code 留空串 (新股未入指数 / B 股 / 退市等)
 struct StockMeta {
+  std::vector<std::string> name; // stock_basic.name (最新名, 仅用于日志/诊断, 非 PIT)
   std::vector<std::string> list_date;
   std::vector<std::string> delist_date;
   std::vector<std::string> market;

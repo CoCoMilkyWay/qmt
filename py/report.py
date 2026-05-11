@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # ============================================================================
 # 数据加载
@@ -37,25 +38,26 @@ AN_DIR = OUT_DIR / "analysis"
 TRADING_DAYS = 252
 
 # 各 TAG 外层 .view-container 高度 (px); TAG 内所有子图共用, 切换对齐
-_TAG_H = (160, 480, 620, 480)
+_TAG_H = (220, 480, 620, 480)
 _TAG1_H, _TAG2_H, _TAG3_H, _TAG4_H = _TAG_H
 
 _MARGIN_TBL = dict(t=8, b=8, l=8, r=8)
 _MARGIN_PLT = dict(t=30, b=30, l=50, r=20)
 
-# 表格唯一字号 / 行高 (px); 不设 columnwidth, 列宽由 Plotly 均分
-_FONT_HEADER = 13
-_FONT_CELL = 13
-_HEADER_H = 30
-_MIN_CELL_H = 24
+# 表格仅固定字号与紧凑行高, 其他布局交给 Plotly 自动处理
+_FONT_HEADER = 12
+_FONT_CELL = 12
+_HEADER_H = 22
+_CELL_H = 22
 
 
-def _fit_cell_h(total_h: int, n_rows: int, header_h: int = _HEADER_H,
-                margin: dict = _MARGIN_TBL) -> int:
-    """让 header + n_rows*cell_h 尽量填满 figure 的可绘制区."""
+def _fit_cell_h(total_h: int, n_rows: int,
+               margin: dict = _MARGIN_TBL) -> int:
+    """让单元格高度以紧凑值为主, 小屏下不致撑开."""
     assert n_rows > 0, "n_rows must be > 0"
-    avail = total_h - margin["t"] - margin["b"] - header_h
-    return max(_MIN_CELL_H, avail // n_rows)
+    avail = total_h - margin["t"] - margin["b"] - _HEADER_H
+    target = min(_CELL_H, avail // n_rows)
+    return max(12, target)
 
 
 def _tbl_header(values: list, align: str = "left") -> dict:
@@ -340,44 +342,98 @@ def _fmt_v(v, key=""):
 def _transposed_table(col_headers: list,
                       row_labels: list,
                       row_data: list,
-                      row_colors: list | None = None) -> go.Table:
+                      ) -> go.Table:
     """列 = 指标, 行 = 实体."""
     n_rows = len(row_labels)
-    if row_colors is None:
-        palette = ["#eef2f7", "#ffffff", "#fdf6e3", "#f0faf0", "#faf0f0"]
-        row_colors = [palette[i % len(palette)] for i in range(n_rows)]
 
     cols = [row_labels]
     for metric in col_headers:
         cols.append([_fmt_v(row.get(metric, "—"), metric) for row in row_data])
 
-    fill = [[row_colors[r] for r in range(n_rows)] for _ in range(len(cols))]
     ch = _fit_cell_h(_TAG1_H, n_rows=n_rows)
 
     return go.Table(
-        header=_tbl_header([""] + col_headers, align="center"),
-        cells=_tbl_cells(cols, align="center", height=ch, fill_color=fill),
+        header=_tbl_header(["指标"] + col_headers, align="center"),
+        cells=_tbl_cells(cols, align="center", height=ch),
+    )
+
+
+def _wide_metric_table(index: pd.Index,
+                      rows: pd.DataFrame,
+                      *,
+                      align: str = "left") -> go.Table:
+    """指标行在左, 期次列在上，适配较宽的年度/月度表.
+
+    目标: 横向布局 + 仅保留标准表头，不出现“指标/数值”二级表头。
+    """
+    metric_names = list(rows.columns)
+    if rows.empty:
+        return go.Table(
+            header=dict(values=["empty"]),
+            cells=dict(values=[[]]),
+        )
+
+    def _fmt(v, metric_key: str):
+        if not isinstance(v, (int, float, np.integer, np.floating)):
+            return str(v)
+        if not np.isfinite(v):
+            return "nan"
+        if metric_key in {"策略收益", "基准收益", "策略最大回撤", "基准最大回撤", "跟踪误差",
+                          "信息比率", "波动率", "夏普比率"}:
+            return f"{v*100:.2f}%"
+        return f"{v:.4f}"
+
+    cols = [metric_names]
+    for k in index.astype(str):
+        cols.append([_fmt(rows.loc[k, m], m) for m in metric_names])
+
+    header = ["指标"] + list(index.astype(str))
+    fill = [["#d9e9fb"] * len(metric_names)]
+    for _ in index:
+        fill.append(["#f8fbff"] * len(metric_names))
+
+    return go.Table(
+        header=_tbl_header(header, align=align),
+        cells=_tbl_cells(
+            cols,
+            align=align,
+            height=_fit_cell_h(_TAG2_H, n_rows=len(metric_names)),
+            fill_color=fill if len(index) > 0 else None,
+        ),
     )
 
 
 def _trade_stats_fig(trades: dict) -> go.Figure:
-    """交易统计: 单表密集 2 行 (9 列), 中间一行为第二组表头."""
-    keys1 = ["换股次数", "平均持有天数", "平均持仓股票数", "平均持仓仓位",
-             "调仓指令可执行比例", "持仓停牌股票比例",
-             "平均交易收益", "正收益平均", "负收益平均"]
-    keys2 = ["交易赢率", "日赢率", "周赢率", "月赢率", "年换手率",
-             "指数跟踪误差", "创新高最长天数", "CPU时长(秒)", "Tensor内存(GB)"]
-    row_v1 = [_fmt_v(trades.get(k, "—"), k) for k in keys1]
-    row_v2 = [_fmt_v(trades.get(k, "—"), k) for k in keys2]
-    steel = "lightsteelblue"
-    fill_2d = [["#f5f7fb"] * 9, [steel] * 9, ["#f5f7fb"] * 9]
+    """交易统计: 同策略表布局，一行一组（指标列）."""
+    trade_metrics = ["换股次数", "平均持有天数", "平均持仓股票数", "平均持仓仓位",
+                    "调仓指令可执行比例", "持仓停牌股票比例",
+                    "平均交易收益", "正收益平均", "负收益平均",
+                    "交易赢率", "日赢率", "周赢率", "月赢率",
+                    "年换手率", "指数跟踪误差", "创新高最长天数", "CPU时长(秒)", "Tensor内存(GB)"]
 
-    fig = go.Figure(go.Table(
-        header=_tbl_header(keys1, align="center"),
-        cells=_tbl_cells([row_v1, keys2, row_v2], align="center",
-                         height=_fit_cell_h(_TAG1_H, n_rows=3),
-                         fill_color=fill_2d),
-    ))
+    trade_row = {k: trades.get(k, "—") for k in trade_metrics}
+
+    top_metrics = trade_metrics[:9]
+    bot_metrics = trade_metrics[9:]
+    top = _transposed_table(
+        col_headers=top_metrics,
+        row_labels=["交易统计"],
+        row_data=[trade_row],
+    )
+    bot = _transposed_table(
+        col_headers=bot_metrics,
+        row_labels=["交易统计"],
+        row_data=[trade_row],
+    )
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        vertical_spacing=0.0,
+        specs=[[{"type": "table"}], [{"type": "table"}]],
+    )
+    fig.add_trace(top.data[0], row=1, col=1)
+    fig.add_trace(bot.data[0], row=2, col=1)
     fig.update_layout(height=_TAG1_H, margin=_MARGIN_TBL, autosize=True)
     return fig
 
@@ -403,13 +459,11 @@ def fig_tag1(bt, an, meta) -> list[tuple[str, go.Figure]]:
         col_headers=metrics_v1,
         row_labels=["策略", "pool指数", "超额"],
         row_data=[strat, pool, excess],
-        row_colors=["#ddeeff", "#f5f5f5", "#fff8e6"],
     ))
-    fig1.update_layout(height=_TAG1_H, margin=_MARGIN_TBL, autosize=True)
+    fig1.update_layout(height=int(_TAG1_H * 0.58), margin=_MARGIN_TBL, autosize=True)
 
-    # ── view2: 交易统计 (2 行 x 9 列) ──
+    # ── view2: 交易统计 (同风格) ──
     fig2 = _trade_stats_fig(trades)
-
     return [
         ("策略 / pool指数 指标", fig1),
         ("交易统计", fig2),
@@ -508,32 +562,12 @@ def fig_tag2(bt, an, meta) -> list[tuple[str, go.Figure]]:
 
     # view 6: 年收益表
     yt = _resample_table(daily_s, daily_p, dates, "YE")
-    fig6 = go.Figure(go.Table(
-        header=_tbl_header(["年份"] + list(yt.columns), align="left"),
-        cells=_tbl_cells(
-            [yt.index.tolist()] +
-            [[f"{v*100:.2f}%" if abs(v) < 1 else f"{v:.4f}"
-              if isinstance(v, float) else v
-              for v in yt[c]] for c in yt.columns],
-            align="left",
-            height=_fit_cell_h(_TAG2_H, n_rows=len(yt.index)),
-        ),
-    ))
+    fig6 = go.Figure(_wide_metric_table(yt.index, yt))
     fig6.update_layout(height=_TAG2_H, margin=_MARGIN_TBL, autosize=True)
 
     # view 7: 月收益表 (长表, 行多时 plotly 自动滚动)
     mt = _resample_table(daily_s, daily_p, dates, "ME")
-    fig7 = go.Figure(go.Table(
-        header=_tbl_header(["月份"] + list(mt.columns), align="left"),
-        cells=_tbl_cells(
-            [mt.index.tolist()] +
-            [[f"{v*100:.2f}%" if abs(v) < 1 else f"{v:.4f}"
-              if isinstance(v, float) else v
-              for v in mt[c]] for c in mt.columns],
-            align="left",
-            height=_fit_cell_h(_TAG2_H, n_rows=len(mt.index)),
-        ),
-    ))
+    fig7 = go.Figure(_wide_metric_table(mt.index, mt))
     fig7.update_layout(height=_TAG2_H, margin=_MARGIN_TBL, autosize=True)
 
     # view 8: 交易收益分布

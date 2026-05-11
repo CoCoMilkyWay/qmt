@@ -103,7 +103,7 @@ void write_meta(const feature::Axes &axes, const feature::Tensor &T,
   f << "  \"config\": {\n";
   f << "    \"backtest_start\": \"" << ::config::BACKTEST_START_DATE
     << "\",\n";
-  f << "    \"backtest_end\": \"" << ::config::BACKTEST_END_DATE << "\",\n";
+  f << "    \"backtest_end\": \"" << axes.dates.back() << "\",\n";
   f << "    \"hold_n\": " << ::config::BT_HOLD_N << ",\n";
   f << "    \"exit_ratio\": " << ::config::BT_EXIT_RATIO << ",\n";
   f << "    \"capital_base\": " << ::config::BT_CAPITAL_BASE << ",\n";

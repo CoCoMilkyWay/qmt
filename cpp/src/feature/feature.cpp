@@ -420,6 +420,8 @@ void ts_roa_raw(int a, const Axes &axes, const PitPool &pool,
 // TS: raw meta 派生 (per-A 动态: D - list_date / D - delist_date)
 // ============================================================================
 
+// list_age: D - list_date if D ≥ list_date else NaN.
+//   PIT: 不写"距上市天数" (未来信息). 下游用 is_finite 判 "已上市".
 void ts_list_age(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
                  Tensor &T) {
   int n_d = axes.n_d();
@@ -427,15 +429,16 @@ void ts_list_age(int a, const Axes &axes, const PitPool &, const StockMeta &meta
   if (meta.list_date[a].size() == 8) {
     auto ld = misc::parse_yyyymmdd(meta.list_date[a]);
     for (int d = 0; d < n_d; ++d) {
-      out[d] = static_cast<float>((axes.date_days[d] - ld).count());
+      float age = static_cast<float>((axes.date_days[d] - ld).count());
+      out[d] = (age >= 0.0f) ? age : std::nanf("");
     }
   } else {
-    // 无 list_date → 视为永远未上市 (list_age = 极负值)
-    std::fill(out.begin(), out.end(), -1e9f);
+    std::fill(out.begin(), out.end(), std::nanf(""));
   }
 }
 
-// delist_age: D - delist_date (正数=已退市天数, 负数=距退市天数)
+// delist_age: D - delist_date if D ≥ delist_date else NaN.
+//   PIT: 不写"距退市天数" (未来信息). 下游用 is_finite 判 "已退市".
 void ts_delist_age(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
                    Tensor &T) {
   int n_d = axes.n_d();
@@ -443,11 +446,11 @@ void ts_delist_age(int a, const Axes &axes, const PitPool &, const StockMeta &me
   if (meta.delist_date[a].size() == 8) {
     auto dd = misc::parse_yyyymmdd(meta.delist_date[a]);
     for (int d = 0; d < n_d; ++d) {
-      out[d] = static_cast<float>((axes.date_days[d] - dd).count());
+      float age = static_cast<float>((axes.date_days[d] - dd).count());
+      out[d] = (age >= 0.0f) ? age : std::nanf("");
     }
   } else {
-    // 无 delist_date → 视为永不退市 (delist_age = 0, 任何 "delist_age > 0" 判定都不命中)
-    std::fill(out.begin(), out.end(), 0.0f);
+    std::fill(out.begin(), out.end(), std::nanf(""));
   }
 }
 
@@ -723,7 +726,8 @@ void ts_new_list(int a, const Axes &axes, const PitPool &, const StockMeta &,
   auto la = T.ts_row(F::list_age, a);
   auto out = T.ts_row(F::new_list, a);
   for (int d = 0; d < n_d; ++d) {
-    out[d] = (is_finite(la[d]) && la[d] >= 0.0f && la[d] < 60.0f) ? 1.0f : 0.0f;
+    // list_age PIT 契约: finite ⇒ ≥ 0; NaN = 未上市.
+    out[d] = (is_finite(la[d]) && la[d] < 60.0f) ? 1.0f : 0.0f;
   }
 }
 
@@ -732,6 +736,7 @@ void ts_pool_b(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
   int n_d = axes.n_d();
   auto susp_ = T.ts_row(F::susp, a);
   auto is_marg_ = T.ts_row(F::is_margin, a);
+  auto delist_age_ = T.ts_row(F::delist_age, a);
   auto out = T.ts_row(F::pool_b, a);
   bool ex_ok = in_whitelist(meta.exchange[a], ::config::POOL_EXCHANGE_WHITELIST);
   bool mk_ok = in_whitelist(meta.market[a], ::config::POOL_MARKET_WHITELIST);
@@ -739,7 +744,8 @@ void ts_pool_b(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
   bool asset_ok = ex_ok && mk_ok && ind_ok;
   constexpr bool incl_margin = ::config::POOL_INCLUDE_MARGIN;
   for (int d = 0; d < n_d; ++d) {
-    bool b = asset_ok && !(susp_[d] > 0.5f);
+    // 已退市 (退市当日含) ↔ delist_age finite (PIT 契约保证 finite ⇒ ≥ 0).
+    bool b = asset_ok && !(susp_[d] > 0.5f) && !is_finite(delist_age_[d]);
     if (!incl_margin)
       b = b && !(is_marg_[d] > 0.5f);
     out[d] = b ? 1.0f : 0.0f;

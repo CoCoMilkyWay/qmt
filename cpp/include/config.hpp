@@ -23,7 +23,7 @@ inline constexpr int FETCH_MAX_DAYS_PER_CALL = 31;             // 单次 API 调
 inline constexpr int API_DEDUP_WINDOW_SECONDS = 60 * 60; // 单 itf 去重窗口：上次成功更新距今 < 该值则跳过；时间戳落 data/_meta/<name>.lastupdate (粒度=数据文件名 spec.name)
 
 // feature 子系统
-inline constexpr int UNIVERSE_SIZE = 80; // pool 截面: pool_b ∧ rank(mcap_raw asc) ≤ N 取最终 strategy universe
+inline constexpr int UNIVERSE_SIZE = 100; // pool 截面: pool_b ∧ rank(mcap_raw asc) ≤ N 取最终 strategy universe
 
 // pool_b 交易所白名单 (asset 静态过滤, 与 _meta/stock_basic.json::exchange 匹配).
 //   候选: SSE 上交所 / SZSE 深交所 / BSE 北交所.
@@ -64,9 +64,9 @@ inline constexpr bool DESCRIBE_BY_YEAR = false;
 // strategy / 回测 / 分析 配置
 // ============================================================================
 
-// 回测窗口 (YYYYMMDD; 含端点); 必为交易日或落到 axes 内的日期
+// 回测窗口起点 (YYYYMMDD; 含端点); 必为交易日或落到 axes 内的日期.
+//   右端点固定为 axes 最新日 (即 build 时拉到的最后一个交易日), 不再可配.
 inline constexpr const char *BACKTEST_START_DATE = "20170101";
-inline constexpr const char *BACKTEST_END_DATE = "20260423";
 
 // tradable 启用哪些 filter (cs_tradable 在 pool ∧ ¬OR(此处 filter)); 删一行即禁用一项
 inline constexpr std::array<feature::F, 6> ENABLED_FILTERS = {{

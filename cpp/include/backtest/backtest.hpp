@@ -12,7 +12,7 @@ namespace backtest {
 //     limit_up, limit_dn, pool 已就绪)
 //
 // 配置 (来自 config.hpp):
-//   - BACKTEST_START_DATE / BACKTEST_END_DATE
+//   - BACKTEST_START_DATE (右端点固定为 axes 最新日)
 //   - BT_HOLD_N / BT_EXIT_RATIO / BT_CAPITAL_BASE
 //   - BT_BUY_COST / BT_SELL_COST / BT_MIN_COST / BT_PRICE_LIMIT_EPS
 //
