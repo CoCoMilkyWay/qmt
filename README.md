@@ -2,6 +2,7 @@ Motive: 实盘量化交易; 国金证券 QMT 客户端下单, tushare 维护本�
 
 # 项目结构
 
+```
 qmt/
 ├── run.py                           # 统一入口: build (py/main.py) + run (py/mode_*.py)
 ├── app/
@@ -63,7 +64,7 @@ qmt/
         ├── help/                    # 通用 trick (本地化 / HTTP 协议 / 数据库落地)
         ├── basic/                   # 基础信息 (stock_basic / trade_cal / st / bak_basic / ...)
         └── financial/               # 财务报表 (forecast / express / disclosure_date / dividend / ...)
-
+```
 
 # 因子张量 T[D, A, F]
 
