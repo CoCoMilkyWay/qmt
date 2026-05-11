@@ -52,9 +52,14 @@ struct GridMarginDetail {
   std::vector<float> mr_bal, ms_bal;
 };
 
-// stock_st: 每日 ST 名单快照. state 三态: 0=正常, 1=ST (name 不含 '*'), 2=*ST (name 含 '*').
-//   tushare stock_st 每日返回当日全部 ST 股票, 不在列表 ⇒ 当日正常 (state=0).
-//   不需要 ffill (每日重发完整快照, 缺席日 = 不在名单, 与 stock_st.json 文件缺失等价).
+// stock_st: 每日 ST 名单快照. state 三态: 0=正常/未知, 1=ST (name 不含 '*'), 2=*ST (name 含 '*').
+//   tushare stock_st 每日返回当日 ST 名单 (含 *ST), 不在列表 ⇒ 该 (a, d) 不更新.
+//
+//   ffill 必要性:
+//     ① data/<D>/stock_st.json 历史拉取漏日 (≥15% 交易日缺该文件) → 整日无更新.
+//     ② 标的进入"退市整理期" (改名 "退市XX" / "XX退") 后 tushare 不再 list (~15 交易日) → 漏掉关键退市前 *ST 状态.
+//   解法: prealloc=0; parse 只写 1/2 不写 0; post_ffill 把 0 视为 "未知" 用前向最近 1/2 填充.
+//   trade-off: 已撤销 ST 的票会被永久保持 *ST 状态 (false positive 保守, 策略侧只是少买).
 struct GridStockSt {
   std::vector<uint8_t> state;
 };

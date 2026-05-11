@@ -685,18 +685,46 @@ void ts_dividend_st(int a, const Axes &axes, const PitPool &pool,
   apply_segment(next_apply_d, n_d, current_3ysum);
 }
 
-// risk_warn: 直读 stock_st 每日快照 (per-A 拷贝).
+// risk_warn: stock_st 每日快照 (含 ffill 0→1/2) + namechange 段修正.
 //   输出 0=正常, 1=ST (name 不含 '*'), 2=*ST (name 含 '*').
-//   stock_st cutoff=0 → row = idx_of(trade_date), 缺席日 (周末/假日 / 不在名单) = 0.
-//   每日完整快照, 不需要状态机/回放.
+//
+//   单一 stock_st 不准: tushare "票今天不在 ST 名单" 二义 — ① 撤销 ST 转正常 (应=0)
+//   ② 进入退市整理期 "退市XX"/"XX退", tushare 不再 list (应保留 *ST 等级).
+//   ffill 无法区分这两种情况. 用 namechange 派生的 "当段 name" 做边界修正:
+//     段 = [start_date_i, start_date_{i+1}), name = records[i].name
+//     段 name 含 "ST" 或 "退" → 信 stock_st (保留 ffill 后的 1/2)
+//     段 name 不含 "ST" 也不含 "退" → 强制 0 (撤销 ST 转正常段, 抹掉 ffill 误延续)
+//     最早 start_date 之前 (无 namechange 记录段) → 信 stock_st (上市初期 / 未改名票)
+//
+//   关键字检测: std::string::find 字节级匹配, "退" 在 UTF-8 是 0xE9 0x80 0x80, 不与 ASCII "ST" 冲突.
 void ts_risk_warn(int a, const Axes &axes, const PitPool &pool,
-                  const StockMeta &, Tensor &T) {
+                  const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   auto out = T.ts_row(F::risk_warn, a);
   std::size_t base =
       static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
-  for (int d = 0; d < n_d; ++d)
-    out[d] = static_cast<float>(pool.stock_st.state[base + static_cast<std::size_t>(d)]);
+
+  const auto &hist = meta.name_history[static_cast<std::size_t>(a)];
+
+  // 段游标 cur: -1 = 早于所有 namechange (信 stock_st); 否则 = 当前段索引.
+  int cur = -1;
+  bool keep_st = true; // 当前段是否允许 stock_st 值 (cur=-1 时为 true)
+  std::size_t next_i = 0;
+
+  for (int d = 0; d < n_d; ++d) {
+    const std::string &today = axes.dates[static_cast<std::size_t>(d)];
+    // 推进游标到包含 d 的段
+    while (next_i < hist.size() && hist[next_i].start_date <= today) {
+      cur = static_cast<int>(next_i);
+      const std::string &nm = hist[next_i].name;
+      keep_st = (nm.find("ST") != std::string::npos) ||
+                (nm.find("\xe9\x80\x80") != std::string::npos); // "退" UTF-8
+      ++next_i;
+    }
+    uint8_t raw = pool.stock_st.state[base + static_cast<std::size_t>(d)];
+    out[d] = keep_st ? static_cast<float>(raw) : 0.0f;
+  }
+  (void)cur; // cur 仅用于语义/调试, 可省
 }
 
 // trading_st: rolling 20D (low_p ∨ low_mc).all(). 单调连续计数即可.

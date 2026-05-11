@@ -432,8 +432,8 @@ def _trade_stats_fig(trades: dict) -> go.Figure:
         vertical_spacing=0.0,
         specs=[[{"type": "table"}], [{"type": "table"}]],
     )
-    fig.add_trace(top.data[0], row=1, col=1)
-    fig.add_trace(bot.data[0], row=2, col=1)
+    fig.add_trace(top, row=1, col=1)
+    fig.add_trace(bot, row=2, col=1)
     fig.update_layout(height=_TAG1_H, margin=_MARGIN_TBL, autosize=True)
     return fig
 

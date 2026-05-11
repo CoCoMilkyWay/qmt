@@ -133,6 +133,7 @@ StockMeta load_stock_meta(const Axes &ax) {
   m.market.assign(na, {});
   m.exchange.assign(na, {});
   m.industry_l1.assign(na, {});
+  m.name_history.assign(na, {});
 
   auto get_str = [](yyjson_val *obj, const char *key) -> std::string {
     yyjson_val *v = yyjson_obj_get(obj, key);
@@ -184,6 +185,41 @@ StockMeta load_stock_meta(const Axes &ax) {
     m.industry_l1[a] = get_str(im_item, "l1_name");
   }
   yyjson_doc_free(im_doc);
+
+  // ---- namechange: per-A 改名时间线 (按 start_date 升序) ----
+  //   _meta/namechange.json 格式: {ts_code: [{name, start_date, ann_date, change_reason}, ...]}
+  //   refresh_namechange_meta 已保证内层数组按 start_date 升序.
+  fs::path nc_path = misc::git_root() / "data" / "_meta" / "namechange.json";
+  std::string nc_buf = misc::read_file_all(nc_path);
+  assert(!nc_buf.empty());
+  yyjson_doc *nc_doc = yyjson_read(nc_buf.data(), nc_buf.size(), 0);
+  assert(nc_doc);
+  yyjson_val *nc_root = yyjson_doc_get_root(nc_doc);
+  assert(yyjson_is_obj(nc_root));
+
+  yyjson_obj_iter nc_iter;
+  yyjson_obj_iter_init(nc_root, &nc_iter);
+  yyjson_val *nc_key;
+  while ((nc_key = yyjson_obj_iter_next(&nc_iter)) != nullptr) {
+    const char *ts_code_cstr = yyjson_get_str(nc_key);
+    if (!ts_code_cstr) continue;
+    auto it = ax.code_idx.find(ts_code_cstr);
+    if (it == ax.code_idx.end()) continue;
+    int a = it->second;
+    yyjson_val *arr = yyjson_obj_iter_get_val(nc_key);
+    if (!arr || !yyjson_is_arr(arr)) continue;
+
+    size_t ai, an;
+    yyjson_val *rec;
+    yyjson_arr_foreach(arr, ai, an, rec) {
+      NameChange nc;
+      nc.start_date = get_str(rec, "start_date");
+      nc.name = get_str(rec, "name");
+      if (nc.start_date.size() != 8 || nc.name.empty()) continue;
+      m.name_history[a].push_back(std::move(nc));
+    }
+  }
+  yyjson_doc_free(nc_doc);
 
   return m;
 }

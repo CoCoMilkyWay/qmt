@@ -33,6 +33,12 @@ struct Axes {
 //   exchange: SSE / SZSE / BSE
 //   industry_l1: 申万 SW2021 一级行业中文名 (来自 _meta/index_member_all.json::l1_name);
 //                未覆盖的 ts_code 留空串 (新股未入指数 / B 股 / 退市等)
+// 单次改名记录 (PIT-safe: start_date 为新名生效日, 公告之后).
+struct NameChange {
+  std::string start_date; // YYYYMMDD, 新名生效日 (升序排列)
+  std::string name;       // 新名字 (含 ST/*ST/退 等关键字时触发 risk_warn)
+};
+
 struct StockMeta {
   std::vector<std::string> name; // stock_basic.name (最新名, 仅用于日志/诊断, 非 PIT)
   std::vector<std::string> list_date;
@@ -40,6 +46,9 @@ struct StockMeta {
   std::vector<std::string> market;
   std::vector<std::string> exchange;
   std::vector<std::string> industry_l1;
+  // per-A 改名时间线 (按 start_date 升序). 段语义: [start_date_i, start_date_{i+1}) 内名 = records[i].name.
+  // 用于 ts_risk_warn 区分 "撤销 ST 转正常" (name 不含 ST/退) vs "退市整理期" (name 含 退).
+  std::vector<std::vector<NameChange>> name_history;
 };
 
 Axes load_axes();

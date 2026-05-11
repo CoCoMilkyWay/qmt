@@ -461,7 +461,6 @@ namespace itf_stock_st {
 constexpr int CUTOFF = 0; // 盘前 9:20 入库 → 当日 row 可见
 
 // stock_st 每日返回当日全部 ST 名单, name 含 "*" ⇒ *ST (2), 否则 ⇒ ST (1).
-//   不在当日列表中 ⇒ 当日正常 (state=0, prealloc 默认值).
 //   name 字段为 ST 状态名 (例: "*ST天山" / "ST联创"), 必含 "ST" 子串.
 inline uint8_t name_to_state(const char *name) {
   assert(name && "stock_st.name missing");
@@ -471,7 +470,7 @@ inline uint8_t name_to_state(const char *name) {
 void prealloc(const Axes &axes, PitPool &p) {
   std::size_t n = static_cast<std::size_t>(axes.n_a()) *
                   static_cast<std::size_t>(axes.n_d());
-  p.stock_st.state.assign(n, 0u); // 0 = 正常
+  p.stock_st.state.assign(n, 0u); // 0 = 未知 / 正常 (post_ffill 把 0 当 miss 填)
 }
 
 void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
@@ -485,6 +484,7 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
     return;
   std::size_t base_off = static_cast<std::size_t>(row);
 
+  // 只写 1/2; 不写 0. "不在 list 的票" 保持 prealloc 的 0 → 由 post_ffill 用前向最近 1/2 覆盖.
   size_t i, n;
   yyjson_val *item;
   yyjson_arr_foreach(arr, i, n, item) {
@@ -498,8 +498,25 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
   }
 }
 
-// 注: stock_st 不做 ffill — 每日完整快照, 缺席日 (周末/假日已被 floor) 即 0.
-//     与 margin_secs / suspend_d 同语义 (稀疏存在 = 非 0, 否则 0).
+// ffill: 0 视为 "未知" (= 文件缺失 / 退市整理期 tushare 不再 list / 未上市), 用 per-A 前向最近 非 0 值填.
+//   首段 (未出现过任何 1/2) 保持 0.
+//   trade-off: 已撤销 ST 的票会被永久保持 *ST 状态 — 保守 false positive, 策略仅 "少买", 不主动伤害.
+void post_ffill(const Axes &axes, PitPool &p) {
+  int n_a = axes.n_a(), n_d = axes.n_d();
+  for (int a = 0; a < n_a; ++a) {
+    std::size_t base = static_cast<std::size_t>(a) *
+                       static_cast<std::size_t>(n_d);
+    uint8_t last = 0u;
+    for (int d = 0; d < n_d; ++d) {
+      uint8_t v = p.stock_st.state[base + static_cast<std::size_t>(d)];
+      if (v != 0u) {
+        last = v;
+      } else if (last != 0u) {
+        p.stock_st.state[base + static_cast<std::size_t>(d)] = last;
+      }
+    }
+  }
+}
 
 } // namespace itf_stock_st
 
@@ -676,7 +693,7 @@ const ItfDesc ITFS[] = {
     {"suspend_d", false, &itf_suspend_d::prealloc, &itf_suspend_d::parse, nullptr, nullptr},
     {"margin_secs", false, &itf_margin_secs::prealloc, &itf_margin_secs::parse, nullptr, nullptr},
     {"margin_detail", false, &itf_margin_detail::prealloc, &itf_margin_detail::parse, nullptr, &itf_margin_detail::post_ffill},
-    {"stock_st", false, &itf_stock_st::prealloc, &itf_stock_st::parse, nullptr, nullptr},
+    {"stock_st", false, &itf_stock_st::prealloc, &itf_stock_st::parse, nullptr, &itf_stock_st::post_ffill},
     // 事件 itf (per-A mutex)
     {"forecast", true, &itf_forecast::prealloc, &itf_forecast::parse, &itf_forecast::post_sort, nullptr},
     {"report", true, &itf_report::prealloc, &itf_report::parse, &itf_report::post_sort, nullptr},

@@ -67,17 +67,17 @@ inline void wi(const fs::path &p, const std::vector<std::int32_t> &v) {
 
 } // namespace
 
-double run(const feature::Axes &axes, const feature::StockMeta & /*meta*/,
+double run(const feature::Axes &axes, const feature::StockMeta &meta,
            const feature::Tensor &T) {
-  // 注: meta.delist_date 是 ex-post (build 时拉的最新表), `delist_age < 0` 含未来信息
-  //     (今日已知未来某日退市), 不可用作 filter; 但 `delist_age >= 0` 是当下事实 (今日已退市),
-  //     PIT 安全, 仅用于持仓兜底强制平仓.
+  // 注: meta.delist_date 是 ex-post (build 时拉的最新表), 但 `delist_age` 已在
+  //     feature 层做 PIT 截断 — 仅 D ≥ delist_date 写值 (≥ 0), 否则 NaN. 此处兜底
+  //     用 is_finite 判 "今日已退市" 即可, 不需也不应去读"距退市天数".
   misc::Timer t("[backtest] run");
   auto t0 = std::chrono::high_resolution_clock::now();
 
-  // ---- 解析回测窗口 (闭区间) ----------------------------------------------
+  // ---- 解析回测窗口 (闭区间; 右端点固定为最新日) --------------------------
   int bt_d_lo = find_d(axes, ::config::BACKTEST_START_DATE, /*floor=*/false);
-  int bt_d_hi_inc = find_d(axes, ::config::BACKTEST_END_DATE, /*floor=*/true);
+  int bt_d_hi_inc = axes.n_d() - 1;
   assert(bt_d_lo >= 0 && bt_d_hi_inc >= bt_d_lo &&
          bt_d_hi_inc < axes.n_d() && "backtest window invalid");
   int bt_d_hi = bt_d_hi_inc + 1; // half-open
@@ -130,31 +130,41 @@ double run(const feature::Axes &axes, const feature::StockMeta & /*meta*/,
       if (is_finite(c)) last_close[a] = c;
     }
 
-    // (1.5) 持仓兜底: 已退市股 (delist_age >= 0) 强制按 last_close 平仓.
-    //   PIT 安全: 仅在退市当日及之后命中, delist_age < 0 不读 (不用未来信息).
+    // (1.5) 持仓兜底: 已退市股 (delist_age finite) 强制按 last_close 平仓.
+    //   PIT 安全: feature 层已保证 delist_age 只在 D ≥ delist_date 写值, 否则 NaN.
     //   触发说明 上游 filter 未能在退市前卖出该持仓 (可能因停牌一直卡住 / 数据源缺 ST 标记).
     //   不 assert, 打印 [WARN] 后继续, 与 sell 逻辑一致地关闭 trade record.
     for (auto it = holdings.begin(); it != holdings.end();) {
       int a = it->first;
       float da = T.at(F::delist_age, a, d);
-      if (!is_finite(da) || da < 0.0f) {
+      if (!is_finite(da)) {
         ++it;
         continue;
       }
+      assert(da >= 0.0f && "delist_age finite ⇒ ≥ 0 (PIT contract)");
       float c = last_close[static_cast<std::size_t>(a)];
       assert(is_finite(c) && "delisted holding has no last_close");
-      std::printf("[WARN] backtest d=%s 持仓 %s 已退市 (delist_age=%.0f), "
-                  "强制按 last_close=%.4f 平仓\n",
-                  axes.dates[static_cast<std::size_t>(d)].c_str(),
-                  axes.codes[static_cast<std::size_t>(a)].c_str(),
-                  da, c);
-      double proceeds = it->second * static_cast<double>(c) *
-                        (1.0 - ::config::BT_SELL_COST);
-      cash += proceeds;
 
       auto rec_it = open_recs.find(a);
       assert(rec_it != open_recs.end() &&
              "delisted holding without open record");
+      float open_px = rec_it->second.open_px;
+      int hold_days = d - rec_it->second.open_d; // 交易日数 (axes D 索引差)
+      float pnl_pct = (open_px > 0.0f)
+                          ? (c / open_px - 1.0f) * 100.0f
+                          : 0.0f;
+      std::printf("[WARN] backtest d=%s 持仓 %s (%s) 已退市 "
+                  "(delist_age=%.0f), 持有 %d 交易日, "
+                  "开仓 %s@%.4f → 强平 @%.4f, 盈亏 %+.2f%%\n",
+                  axes.dates[static_cast<std::size_t>(d)].c_str(),
+                  axes.codes[static_cast<std::size_t>(a)].c_str(),
+                  meta.name[static_cast<std::size_t>(a)].c_str(),
+                  da, hold_days,
+                  axes.dates[static_cast<std::size_t>(rec_it->second.open_d)].c_str(),
+                  open_px, c, pnl_pct);
+      double proceeds = it->second * static_cast<double>(c) *
+                        (1.0 - ::config::BT_SELL_COST);
+      cash += proceeds;
       tr_inst.push_back(static_cast<std::int32_t>(a));
       tr_open_d.push_back(static_cast<std::int32_t>(rec_it->second.open_d));
       tr_close_d.push_back(static_cast<std::int32_t>(d));
@@ -310,20 +320,34 @@ double run(const feature::Axes &axes, const feature::StockMeta & /*meta*/,
     double pv_end = cash + mv_end;
     strat_nav[i] = static_cast<float>(pv_end);
 
-    // pool benchmark: pool[a, d] 内等权 daily_return[a, d].
-    //   口径与 strategy 对齐 — day 0 起点 = capital_base (假设当日盘后买入 pool),
-    //   daily_return 仅 i > 0 才累积 (i=1 用 daily_return[d_lo+1] 实现 close→close 收益).
-    double dr_sum = 0.0;
-    int dr_n = 0;
-    for (int a = 0; a < n_a; ++a) {
-      if (!read_bool(T, F::pool, a, d)) continue;
-      float r = T.at(F::daily_return, a, d);
-      if (!is_finite(r)) continue; // daily_return 预期可 NaN (d==0 / close_raw 缺)
-      dr_sum += static_cast<double>(r);
-      ++dr_n;
+    // pool benchmark: "等权持有 pool 的影子策略" — 假装真有钱在跑.
+    //   时点: D-1 日 close 按 pool[a, d-1] 等权再平衡 → 持有到 D 日 close
+    //         获得 daily_return[a, d] = close[d]/close[d-1] - 1.
+    //         pool 动态调入调出 → 每日按新 pool 等权重平衡 (等权下数学等价于均值,
+    //         无需显式建仓/卖出簿记).
+    //   universe: pool 已排 susp + 已退市 (pool_b); 此处额外排 risk_warn (ST/*ST).
+    //         不排 profit_st / revenue_st / dividend_st / trading_st / new_list —
+    //         这些是策略自定义风控信号, 不应假设 benchmark 也具备.
+    //   PIT: 用 pool[d-1] 和 risk_warn[d-1] — D-1 收盘才能据此决策.
+    //   NaN 处理: daily_return[d] NaN (退市/缺价) ⇒ 该持仓静默退出当日均值池.
+    //   i=0: NAV = capital_base (尚未建仓); i>=1: 累乘.
+    if (i > 0) {
+      double dr_sum = 0.0;
+      int dr_n = 0;
+      int d_prev = d - 1;
+      for (int a = 0; a < n_a; ++a) {
+        if (!read_bool(T, F::pool, a, d_prev)) continue;
+        float rw = T.at(F::risk_warn, a, d_prev);
+        assert(is_finite(rw) && "risk_warn NaN — should be 0/1/2");
+        if (rw > 0.5f) continue; // ST (1) / *ST (2) 排除
+        float r = T.at(F::daily_return, a, d);
+        if (!is_finite(r)) continue;
+        dr_sum += static_cast<double>(r);
+        ++dr_n;
+      }
+      double dr = dr_n > 0 ? dr_sum / static_cast<double>(dr_n) : 0.0;
+      pool_nav_d *= (1.0 + dr);
     }
-    double dr = dr_n > 0 ? dr_sum / static_cast<double>(dr_n) : 0.0;
-    if (i > 0) pool_nav_d *= (1.0 + dr);
     pool_nav[i] = static_cast<float>(pool_nav_d);
 
     // 持仓数 / 仓位 / 换手 / 停牌占比 / 可执行率
