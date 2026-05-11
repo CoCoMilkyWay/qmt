@@ -682,80 +682,18 @@ void ts_dividend_st(int a, const Axes &axes, const PitPool &pool,
   apply_segment(next_apply_d, n_d, current_3ysum);
 }
 
-// risk_warn: st events 升序回放, (n_st, n_star) 双计数器 + (delist, high_risk) 两 latch.
-//   输出 0=正常, 1=ST (仅 n_st>0), 2=*ST (n_star>0 ∨ delist ∨ high_risk).
-//   st itf cutoff=0 → ev.v = idx_of(imp_date) (imp_date 必为交易日, 当日生效).
-//   减法一律 clamp(0): 容忍数据轴起点前漏标 (axes.dates[0] 前已是 ST 的股票, 起始计数=0).
+// risk_warn: 直读 stock_st 每日快照 (per-A 拷贝).
+//   输出 0=正常, 1=ST (name 不含 '*'), 2=*ST (name 含 '*').
+//   stock_st cutoff=0 → row = idx_of(trade_date), 缺席日 (周末/假日 / 不在名单) = 0.
+//   每日完整快照, 不需要状态机/回放.
 void ts_risk_warn(int a, const Axes &axes, const PitPool &pool,
                   const StockMeta &, Tensor &T) {
   int n_d = axes.n_d();
   auto out = T.ts_row(F::risk_warn, a);
-  std::fill(out.begin(), out.end(), 0.0f);
-
-  const auto &sts = pool.st[a];
-  if (sts.empty())
-    return;
-
-  int n_st = 0, n_star = 0;
-  bool delist_latch = false, high_risk_latch = false;
-  auto state = [&]() -> float {
-    if (n_star > 0 || delist_latch || high_risk_latch)
-      return 2.0f;
-    if (n_st > 0)
-      return 1.0f;
-    return 0.0f;
-  };
-
-  int next_d = 0;
-  for (const auto &e : sts) {
-    int e_d = e.v;
-    if (e_d < 0)
-      e_d = 0;
-    if (e_d > n_d)
-      e_d = n_d;
-    float s = state();
-    for (int d = next_d; d < e_d; ++d)
-      out[d] = s;
-    switch (e.type) {
-    case StType::st:
-    case StType::st_overlay:
-      n_st += 1;
-      break;
-    case StType::st_revoke:
-    case StType::st_overlay_revoke:
-      n_st = std::max(0, n_st - 1);
-      break;
-    case StType::star:
-    case StType::star_overlay:
-      n_star += 1;
-      break;
-    case StType::star_revoke:
-    case StType::star_overlay_revoke:
-      n_star = std::max(0, n_star - 1);
-      break;
-    case StType::st_to_star:
-      n_st = std::max(0, n_st - 1);
-      n_star += 1;
-      break;
-    case StType::star_to_st:
-      n_star = std::max(0, n_star - 1);
-      n_st += 1;
-      break;
-    case StType::delist_period:
-      delist_latch = true;
-      break;
-    case StType::high_risk:
-      high_risk_latch = true;
-      break;
-    case StType::high_risk_revoke:
-      high_risk_latch = false;
-      break;
-    }
-    next_d = e_d;
-  }
-  float s = state();
-  for (int d = next_d; d < n_d; ++d)
-    out[d] = s;
+  std::size_t base =
+      static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  for (int d = 0; d < n_d; ++d)
+    out[d] = static_cast<float>(pool.stock_st.state[base + static_cast<std::size_t>(d)]);
 }
 
 // trading_st: rolling 20D (low_p ∨ low_mc).all(). 单调连续计数即可.

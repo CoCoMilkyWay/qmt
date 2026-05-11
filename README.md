@@ -48,10 +48,10 @@ qmt/
 │           ├── _empty.json          # 反向稀疏标记 {itf: [DD,...]} = 拉过且为空
 │           └── DD/<itf>.json        # 仅在该天有数据时存在 (PK 唯一, 路径 = visible_date)
 │                                    # 三态: file 存在 / 在 _empty / 都不在 = 有数据 / 拉过空 / 未拉
-│                                    # itf ∈ {forecast, express, disclosure, report, st, calendar,
+│                                    # itf ∈ {forecast, express, disclosure, report, stock_st, calendar,
 │                                    #        dividend, daily_basic, adj_factor, stk_limit, suspend_d,
 │                                    #        fina_indicator, income, cashflow,
-│                                    #        margin_secs, margin_detail}
+│                                    #        margin_secs, margin_detail, st(归档,不入张量)}
 ├── py/                              # 构建/运行模式 (run.py 调用)
 │   ├── main.py                      # CMake 配置 + 编译
 │   └── mode_{debug,profile,assert,production}.py
@@ -94,7 +94,7 @@ qmt/
 
 **入张量映射** (cutoff 后按 itf 类落 row D)
 - **网格** (D=trade_date, A=ts_code): 每条记录唯一 (D, A) 单元. row D 取 `max{ trade_date ≤ T + offset }` (offset=0 → 自身; offset=−1 → 上一交易日, 周末/假日 visible_date 不存在自动跳过).
-- **事件 sparse PIT** (D, A): 每 (A, group_key) 取 `visible_date ≤ T + offset` 的最新一条. group_key 见 §字段表 deps (例: `forecast/express/income/cashflow/fina_indicator/disclosure/report` 按 `end_date`, `dividend` 按 `(end_date, div_proc)`). 状态机型 (`profit_st / risk_warn`) 同样按此 cutoff 回放 `visible_date` 升序流.
+- **事件 sparse PIT** (D, A): 每 (A, group_key) 取 `visible_date ≤ T + offset` 的最新一条. group_key 见 §字段表 deps (例: `forecast/express/income/cashflow/fina_indicator/disclosure/report` 按 `end_date`, `dividend` 按 `(end_date, div_proc)`). 状态机型 (`profit_st`) 同样按此 cutoff 回放 `visible_date` 升序流.
 - **asset 静态**: `_meta/stock_basic` 全量 snapshot 广播到 (D, A); `list_date / delist_date` 决定 (D, A) 行有效, 不走 `visible_date`.
 - **axis**: `calendar` 仅生成 D 轴 (`is_open=1` ∩ `exchange ∈ {SSE, SZSE}`); `_meta/stock_basic` 全量 ts_code 生成 A 轴.
 
@@ -124,6 +124,7 @@ qmt/
 | 事件  | report                 | `disclosure_date`    | 公告实时 (随财报实际披露)                              | `actual_date`             | −1   |
 | 事件  | dividend               | `dividend`           | 公告实时 (预案/通过/实施)                              | `imp_ann_date / ann_date` | −1   |
 | 事件  | st                     | `st`                 | **盘前** imp_date 当日                                 | `imp_date`                | 0    |
+| 网格  | stock_st               | `stock_st`           | **盘前** 09:20 当日全量快照 (始 20160101)              | `trade_date`              | 0    |
 | 事件  | fina_indicator         | `fina_indicator_vip` | 公告实时 (随财报)                                      | `ann_date`                | −1   |
 | 事件  | income                 | `income_vip`         | 公告实时 (随财报)                                      | `ann_date`                | −1   |
 | 事件  | cashflow               | `cashflow_vip`       | 公告实时 (随财报)                                      | `ann_date`                | −1   |
@@ -156,7 +157,7 @@ qmt/
 |        |              |      |                                                            | 按 `forecast.ann_date` 触发, 至 `report.actual_date` 或 `(forecast.end_date.Y + 1, 4, monthend)` 终止 (取较早)                                                                          |                                                                                                                                                                                                                       |
 | filter | dividend_st  | 时序 | itf:dividend, ni_raw, share_raw, _meta/stock_basic         | `meta.market=="主板" ∧ ni_raw > 0 ∧ 3y_sum(dividend.cash_div_tax × share_raw) < 0.30 × ni_raw ∧ 3y_sum < 5e7`                                                                           | 3y 窗口 = `dividend.end_date.Y ∈ [Y-3, Y-1]` (Y = `dividend.ann_date.Y`); share_raw 取 `dividend.ann_date` 当日快照 (除权后, 实际派发若在大额送转前后会有偏差, 业务接受); 单位均 [元]; 主板判定 inline meta.market[a] |
 | filter | trading_st   | 时序 | low_p, low_mc                                              | `rolling_20D(low_p ∨ low_mc).all()`                                                                                                                                                     | —                                                                                                                                                                                                                     |
-| filter | risk_warn    | 时序 | itf:st                                                     | 状态机 (per A): 按 `st.imp_date` 升序回放 `st.name` (变更后名), 含 "ST" 子串则上线, 不含则下线                                                                                          | A 股监管命名规则: ST 状态名必含 "ST" 子串 (含 *ST/SST 等变体), 撤销摘帽后名不含 "ST". **TODO**: 数据起点 (axes.dates[0]) 之前已是 ST 的股票漏标 (初始 state=0), 需手工维护初始 ST 列表注入                            |
+| filter | risk_warn    | 时序 | itf:stock_st                                               | 直读 stock_st 每日快照 (per A): 0=不在名单, 1=ST (name 不含 '*'), 2=\*ST (name 含 '*'); 下游 tradable 仅用真假, 三态等价 boolean filter                                                  | stock_st 每交易日全量快照 (始 20160101), 无需状态机/回放; 数据起点前 (2015) 一律 0 不影响 2016+ 回测/实盘; name 字段必含 "ST" 子串 (\*ST/SST/退市 等变体), 通过是否含 '*' 区分 ST/\*ST                                |
 | filter | new_list     | 时序 | list_age                                                   | `0 ≤ list_age < 60`                                                                                                                                                                     | —                                                                                                                                                                                                                     |
 | factor | close        | 截面 | close_raw                                                  | `pct_rank(z(winsor_mad(1 / close_raw)))`                                                                                                                                                | —                                                                                                                                                                                                                     |
 | factor | mcap         | 截面 | mcap_raw                                                   | `pct_rank(z(winsor_mad(1 / mcap_raw)))`                                                                                                                                                 | —                                                                                                                                                                                                                     |
@@ -283,6 +284,7 @@ Phase 2 时序  (per-A 并行; ts.cpp 通用 flow + feature.cpp 单点 feature �
   #     is_margin   ← margin_secs[a, d] (bool: 当日是否两融标的)
   #     mr_bal_raw  ← margin_detail.rzye[a, d]   (融资余额 [元])
   #     ms_bal_raw  ← margin_detail.rqye[a, d]   (融券余额 [元])
+  #     risk_warn   ← stock_st.state[a, d] (uint8: 0=正常 / 1=ST / 2=*ST; 每日快照, 不需回放)
   #   raw 自算      (财报 ttm4 ytd 拼接; ts.hpp::ttm4_ytd_compute 模板, 自动降级):
   #     rev_raw ← ttm4(income.revenue, type=='1')
   #     ni_raw  ← mean(latest 2 distinct income.end_date.M==12 ∧ type=='1' 的 n_income_attr_p)
@@ -305,8 +307,6 @@ Phase 2 时序  (per-A 并行; ts.cpp 通用 flow + feature.cpp 单点 feature �
   #                     end_date.Y ∈ [ann_y-3, ann_y-1] 的 cash_div_tax × share_raw[event.v]),
   #                     仅主板 (meta.market=="主板"); 区间 [e.v, next.v) 内按 (ni_raw>0 ∧ 3y_sum 双阈) 写 1.
   #                     warmup_d = max(axes 起点+3y, list_date+3y), 之前一律 0 (3y 窗口不完整, 不偏严).
-  #     risk_warn   ← v 升序回放 st events: state ← (st_name 含 "ST"), forward fill;
-  #                   d_target = v (st cutoff=0, imp_date 必为交易日)
   #     trading_st  ← rolling 20D over (low_p ∨ low_mc).all()     # 单调计数
   #     new_list    ← 0 ≤ list_age < 60
   #   pool (TS):

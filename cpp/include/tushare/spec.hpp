@@ -33,6 +33,7 @@ public:
 
 // 切连续段 + 可选 (key, [values]) 单键变体笛卡尔积
 //   - forecast/express/suspend_d:  RangeStrategy(31)
+//   - income/cashflow:             RangeStrategy(7)  (财报记录密度高, 按周保守切)
 //   - trade_cal:                   RangeStrategy(3650, "exchange", {"SSE","SZSE"})
 // task.params = [(start_date, S), (end_date, E)] (+ (variant_key, v) 若有)
 class RangeStrategy : public FetchStrategy {
@@ -55,7 +56,9 @@ private:
 //   - report:                              PerDayStrategy({"actual_date"})
 //   - st:                                  PerDayStrategy({"imp_date"})
 //   - daily_basic/adj_factor/stk_limit:    PerDayStrategy({"trade_date"})
-//   - fina_indicator/income/cashflow:      PerDayStrategy({"ann_date"})
+//   - margin_secs/margin_detail/stock_st:  PerDayStrategy({"trade_date"})
+//   - fina_indicator:                      PerDayStrategy({"ann_date"})
+//     (start_date/end_date 文档语义=报告期, 非 ann_date, 不能 Range)
 //   - dividend:                            PerDayStrategy({"ann_date","imp_ann_date"})
 //                                          双查询：当天预案/决议 + 当天实施
 // task.params = [(day_params[i], day)]

@@ -136,13 +136,25 @@ const std::vector<InterfaceSpec> SPECS = {
      {"actual_date"},
      {"ts_code", "end_date"},
      std::make_shared<PerDayStrategy>(std::vector<std::string>{"actual_date"})},
-    // ST 风险警示：visible_date=imp_date (状态生效日, 盘前已知)
+    // ST 风险警示 (旧, 事件型): visible_date=imp_date (状态生效日, 盘前已知)
     // PK=(ts_code, pub_date, imp_date, st_tpye): 同 imp_date 可能多种类型 or 多次修正
+    // 注: 已不再入张量 (pit.cpp 无 itf_st 块); 保留 spec 以维持 data/**/st.json 落地连续
+    //     (历史归档用; risk_warn 改读 stock_st 每日快照, 数据起点不漏标)
     {"st",
      "st",
      {"imp_date"},
      {"ts_code", "pub_date", "imp_date", "st_tpye"},
      std::make_shared<PerDayStrategy>(std::vector<std::string>{"imp_date"})},
+    // ST 股票列表 (新, 每日快照): visible_date=trade_date (盘前 9:20 入库)
+    // - 每个交易日返回当日全部 ST 名单 (~150 行, 含 *ST), 数据起点 20160101
+    // - 相比旧 st 事件流, 优点是「开始不漏」: 首日即获完整存量
+    // - PK=(ts_code, trade_date): 单日单股唯一
+    // - 用途: 入张量喂 risk_warn (name 是否含 '*' 区分 ST=1 / *ST=2)
+    {"stock_st",
+     "stock_st",
+     {"trade_date"},
+     {"ts_code", "trade_date"},
+     std::make_shared<PerDayStrategy>(std::vector<std::string>{"trade_date"})},
     // 交易日历：每天每交易所仅 1 行，按 10 年/段切；变体笛卡尔积全部 7 个交易所
     // 文档支持枚举: SSE 上交所 / SZSE 深交所 / CFFEX 中金所 / SHFE 上期所 /
     //              CZCE 郑商所 / DCE 大商所 / INE 上能源
@@ -200,24 +212,26 @@ const std::vector<InterfaceSpec> SPECS = {
      {"ann_date"},
      {"ts_code", "end_date"},
      std::make_shared<PerDayStrategy>(std::vector<std::string>{"ann_date"})},
-    // 利润表 (vip)：与 fina_indicator 同套打法 (ann_date 单日拉)
+    // 利润表 (vip)：start_date/end_date 文档语义=公告日范围 (= 我们的 visible_date)，可用 Range
     // - 普通 income 接口必传 ts_code 不能扫全市场, 只能用 income_vip
     // - PK 含 report_type：同 (ts_code, end_date) 可能并存合并/单季/调整等多版本
     //   (1合并/2单季/3调整单季/4调整合并/5调整前/6母公司/7母单季/...)
     // - fields=""：默认列已覆盖 revenue / n_income_attr_p (rev_raw / ni_raw 用)
+    // - max_days=7：4月底/8月底/10月底披露高峰单日 ~1000-2000 行 × 多 report_type，
+    //   按周窗口估算峰值 < 8000 行；比 forecast/express 的 31 天更保守 (财报记录密度更高)
     {"income",
      "income_vip",
      {"ann_date"},
      {"ts_code", "end_date", "report_type"},
-     std::make_shared<PerDayStrategy>(std::vector<std::string>{"ann_date"})},
-    // 现金流量表 (vip)：同上
+     std::make_shared<RangeStrategy>(7)},
+    // 现金流量表 (vip)：同 income (start_date/end_date = 公告日范围)
     // - PK 含 report_type 同理
     // - 默认列已覆盖 n_cashflow_act (pcf_raw 用)
     {"cashflow",
      "cashflow_vip",
      {"ann_date"},
      {"ts_code", "end_date", "report_type"},
-     std::make_shared<PerDayStrategy>(std::vector<std::string>{"ann_date"})},
+     std::make_shared<RangeStrategy>(7)},
     // 融资融券标的: 当日两融名单 (含 ETF). visible_date=trade_date, 盘前更新.
     // - 一天全市场 ~3000-5000 行, 限额 6000 行/单次, PerDay 单 query 即可.
     // - PK=(ts_code, trade_date): 同 trade_date 同 ts_code 唯一.

@@ -456,44 +456,34 @@ void post_sort(PitPool &p) { event_post_sort(p.report); }
 
 } // namespace itf_report
 
-namespace itf_st {
+namespace itf_stock_st {
 
-constexpr int CUTOFF = 0; // 盘前 imp_date 当日 → 当日 row 可见
+constexpr int CUTOFF = 0; // 盘前 9:20 入库 → 当日 row 可见
 
-// tushare st.st_tpye → StType (枚举见 pit.hpp). 13 种穷举, 未知值 assert fail.
-inline StType parse_st_type(const char *s) {
-  assert(s && "st.st_tpye missing");
-  // 频次降序 (见 py/app/st.py 统计输出), 命中越早越好
-  if (std::strcmp(s, "*ST") == 0)              return StType::star;
-  if (std::strcmp(s, "撤销*ST") == 0)          return StType::star_revoke;
-  if (std::strcmp(s, "ST") == 0)               return StType::st;
-  if (std::strcmp(s, "从ST变为*ST") == 0)      return StType::st_to_star;
-  if (std::strcmp(s, "撤消*ST并实行ST") == 0)  return StType::star_to_st;
-  if (std::strcmp(s, "撤销ST") == 0)           return StType::st_revoke;
-  if (std::strcmp(s, "退市整理期") == 0)       return StType::delist_period;
-  if (std::strcmp(s, "叠加ST") == 0)           return StType::st_overlay;
-  if (std::strcmp(s, "叠加*ST") == 0)          return StType::star_overlay;
-  if (std::strcmp(s, "撤销叠加*ST") == 0)      return StType::star_overlay_revoke;
-  if (std::strcmp(s, "撤销叠加ST") == 0)       return StType::st_overlay_revoke;
-  if (std::strcmp(s, "高风险警示") == 0)       return StType::high_risk;
-  if (std::strcmp(s, "撤销高风险警示") == 0)   return StType::high_risk_revoke;
-  assert(false && "unknown st.st_tpye");
-  return StType::st;
+// stock_st 每日返回当日全部 ST 名单, name 含 "*" ⇒ *ST (2), 否则 ⇒ ST (1).
+//   不在当日列表中 ⇒ 当日正常 (state=0, prealloc 默认值).
+//   name 字段为 ST 状态名 (例: "*ST天山" / "ST联创"), 必含 "ST" 子串.
+inline uint8_t name_to_state(const char *name) {
+  assert(name && "stock_st.name missing");
+  return (std::strchr(name, '*') != nullptr) ? uint8_t{2} : uint8_t{1};
 }
 
 void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.st, static_cast<std::size_t>(axes.n_a()));
+  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
+                  static_cast<std::size_t>(axes.n_d());
+  p.stock_st.state.assign(n, 0u); // 0 = 正常
 }
 
 void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> *mu) {
+           std::vector<std::mutex> * /*mu*/) {
   assert(arr && yyjson_is_arr(arr));
-  assert(mu);
   if (v_idx < 0)
     return;
+  int n_d = axes.n_d();
   int row = v_idx - CUTOFF;
-  if (row >= axes.n_d())
+  if (row >= n_d)
     return;
+  std::size_t base_off = static_cast<std::size_t>(row);
 
   size_t i, n;
   yyjson_val *item;
@@ -501,19 +491,17 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
     int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
     if (a < 0)
       continue;
-    STEv ev;
-    ev.v = row;
-    ev.type = parse_st_type(as_cstr_or_null(yyjson_obj_get(item, "st_tpye")));
-    {
-      std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.st[a].push_back(std::move(ev));
-    }
+    std::size_t off = static_cast<std::size_t>(a) *
+                          static_cast<std::size_t>(n_d) +
+                      base_off;
+    pool.stock_st.state[off] = name_to_state(as_cstr_or_null(yyjson_obj_get(item, "name")));
   }
 }
 
-void post_sort(PitPool &p) { event_post_sort(p.st); }
+// 注: stock_st 不做 ffill — 每日完整快照, 缺席日 (周末/假日已被 floor) 即 0.
+//     与 margin_secs / suspend_d 同语义 (稀疏存在 = 非 0, 否则 0).
 
-} // namespace itf_st
+} // namespace itf_stock_st
 
 namespace itf_dividend {
 
@@ -688,10 +676,10 @@ const ItfDesc ITFS[] = {
     {"suspend_d", false, &itf_suspend_d::prealloc, &itf_suspend_d::parse, nullptr, nullptr},
     {"margin_secs", false, &itf_margin_secs::prealloc, &itf_margin_secs::parse, nullptr, nullptr},
     {"margin_detail", false, &itf_margin_detail::prealloc, &itf_margin_detail::parse, nullptr, &itf_margin_detail::post_ffill},
+    {"stock_st", false, &itf_stock_st::prealloc, &itf_stock_st::parse, nullptr, nullptr},
     // 事件 itf (per-A mutex)
     {"forecast", true, &itf_forecast::prealloc, &itf_forecast::parse, &itf_forecast::post_sort, nullptr},
     {"report", true, &itf_report::prealloc, &itf_report::parse, &itf_report::post_sort, nullptr},
-    {"st", true, &itf_st::prealloc, &itf_st::parse, &itf_st::post_sort, nullptr},
     {"dividend", true, &itf_dividend::prealloc, &itf_dividend::parse, &itf_dividend::post_sort, nullptr},
     {"income", true, &itf_income::prealloc, &itf_income::parse, &itf_income::post_sort, nullptr},
     {"cashflow", true, &itf_cashflow::prealloc, &itf_cashflow::parse, &itf_cashflow::post_sort, nullptr},

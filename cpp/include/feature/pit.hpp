@@ -52,6 +52,13 @@ struct GridMarginDetail {
   std::vector<float> mr_bal, ms_bal;
 };
 
+// stock_st: 每日 ST 名单快照. state 三态: 0=正常, 1=ST (name 不含 '*'), 2=*ST (name 含 '*').
+//   tushare stock_st 每日返回当日全部 ST 股票, 不在列表 ⇒ 当日正常 (state=0).
+//   不需要 ffill (每日重发完整快照, 缺席日 = 不在名单, 与 stock_st.json 文件缺失等价).
+struct GridStockSt {
+  std::vector<uint8_t> state;
+};
+
 struct ForecastEv {
   int v;
   std::string end_date;
@@ -62,30 +69,6 @@ struct ForecastEv {
 struct ReportEv {
   int v;
   std::string end_date;
-};
-
-// st.st_tpye (tushare 原字段, 拼写为 tpye) 的 13 个枚举.
-// 状态机轴: 维护 (n_st, n_star) 双计数器 + (delist_period, high_risk) 两 latch.
-// risk_warn 输出: 0=正常, 1=ST (仅 n_st>0), 2=*ST (n_star>0 ∨ delist ∨ high_risk).
-enum class StType : uint8_t {
-  st,                  // "ST"               n_st += 1
-  st_overlay,          // "叠加ST"           n_st += 1
-  st_revoke,           // "撤销ST"           n_st = max(0, n_st-1)
-  st_overlay_revoke,   // "撤销叠加ST"       n_st = max(0, n_st-1)
-  star,                // "*ST"              n_star += 1
-  star_overlay,        // "叠加*ST"          n_star += 1
-  star_revoke,         // "撤销*ST"          n_star = max(0, n_star-1)
-  star_overlay_revoke, // "撤销叠加*ST"      n_star = max(0, n_star-1)
-  st_to_star,          // "从ST变为*ST"      n_st = max(0, n_st-1); n_star += 1
-  star_to_st,          // "撤消*ST并实行ST"  n_star = max(0, n_star-1); n_st += 1
-  delist_period,       // "退市整理期"       delist_latch = true (永久)
-  high_risk,           // "高风险警示"       high_risk_latch = true
-  high_risk_revoke,    // "撤销高风险警示"   high_risk_latch = false
-};
-
-struct STEv {
-  int v;
-  StType type;
 };
 
 struct DividendEv {
@@ -126,10 +109,10 @@ struct PitPool {
   GridSuspendD suspend_d;
   GridMarginSecs margin_secs;
   GridMarginDetail margin_detail;
+  GridStockSt stock_st;
 
   EventStore<ForecastEv> forecast;
   EventStore<ReportEv> report;
-  EventStore<STEv> st;
   EventStore<DividendEv> dividend;
   EventStore<IncomeEv> income;
   EventStore<CashflowEv> cashflow;
