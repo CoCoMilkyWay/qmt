@@ -102,4 +102,20 @@ inline constexpr float BT_MIN_COST = 5.0f;    // 单笔最低 5 元
 inline constexpr int N_QUANTILES = 10;
 inline constexpr int IC_MA_WINDOW = 250; // 因子 IC 250 日均值
 
+// 契约: 这些 feature 在 build 末尾必须全 finite (0/1 bool).
+//   任何一格 NaN 都表示 compute fn 漏写或上游污染, fail fast.
+//   raw / factor / *_age / daily_return 等列预期可能 NaN, 不在此列表.
+inline constexpr std::array<feature::F, 15> NO_NAN_FEATURES = {{
+    // TS bool (ts_* 内 std::fill(0.0f) 后选中置 1.0f, 或 grid_copy_bool)
+    feature::F::susp,       feature::F::is_margin,
+    feature::F::low_p,      feature::F::low_mc,
+    feature::F::limit_up,   feature::F::limit_dn,
+    feature::F::profit_st,  feature::F::revenue_st,
+    feature::F::dividend_st,feature::F::risk_warn,
+    feature::F::trading_st, feature::F::new_list,
+    feature::F::pool_b,
+    // CS bool (cs_pool / cs_tradable scatter 全行)
+    feature::F::pool,       feature::F::tradable,
+}};
+
 } // namespace config

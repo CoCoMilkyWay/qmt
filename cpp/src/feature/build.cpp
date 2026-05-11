@@ -1,5 +1,6 @@
 #include "feature/build.hpp"
 
+#include "config.hpp"
 #include "feature/cs.hpp"
 #include "feature/load.hpp"
 #include "feature/pit.hpp"
@@ -37,8 +38,11 @@ Tensor build(Axes &out_axes, StockMeta &out_meta) {
     compute_cs(out_axes, T);
   }
 
-  // ---- 验证: 层层合理处理后, 应无 NaN ----
-  // T.assert_no_nan();
+  // ---- 验证: 契约级 bool feature 必须全 finite (raw/factor 列可 NaN, 不校验) ----
+  {
+    misc::Timer t("[feature] phase 4 assert_finite");
+    for (F f : ::config::NO_NAN_FEATURES) T.assert_finite(f);
+  }
 
   return T;
 }

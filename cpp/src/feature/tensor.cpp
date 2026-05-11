@@ -64,10 +64,15 @@ float &Tensor::at(F f, int a, int d) {
   return mats[static_cast<std::size_t>(f)][off];
 }
 
-void Tensor::assert_no_nan() const {
-  for (std::size_t f = 0; f < mats.size(); ++f) {
-    for (std::size_t i = 0; i < mats[f].size(); ++i) {
-      assert(std::isfinite(mats[f][i]) && "Tensor contains NaN/Inf");
+void Tensor::assert_finite(F f) const {
+  const auto &m = mats[static_cast<std::size_t>(f)];
+  int n_a = axes.n_a();
+  int n_d = axes.n_d();
+  for (int a = 0; a < n_a; ++a) {
+    for (int d = 0; d < n_d; ++d) {
+      float v = m[static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d) +
+                  static_cast<std::size_t>(d)];
+      assert(std::isfinite(v) && "Tensor::assert_finite: NaN/Inf detected");
     }
   }
 }

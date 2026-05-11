@@ -32,6 +32,13 @@ using feature::FEATURES;
 using feature::is_finite;
 using feature::Kind;
 
+// 契约 bool mask (pool 等) 必 finite ∈ {0, 1}. NaN 即 fail fast.
+//   raw / factor / dr_next 等可 NaN 列禁用此 helper.
+inline bool mask_bool(float v) {
+  assert(is_finite(v) && "analysis::mask_bool: NaN — pool mask should be 0/1");
+  return v > 0.5f;
+}
+
 inline int find_d(const feature::Axes &axes, std::string_view yyyymmdd,
                   bool floor) {
   if (floor) return axes.floor_date(yyyymmdd);
@@ -47,7 +54,7 @@ float pearson_masked(const float *x, const float *y, int n,
   double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
   int cnt = 0;
   for (int i = 0; i < n; ++i) {
-    if (pool_mask[i] <= 0.5f) continue;
+    if (!mask_bool(pool_mask[i])) continue;
     float xi = x[i], yi = y[i];
     if (!is_finite(xi) || !is_finite(yi)) continue;
     double xd = xi, yd = yi;
@@ -75,7 +82,7 @@ void compute_top_k(const float *score, const float *pool_mask, int n,
   std::vector<std::pair<float, int>> tmp;
   tmp.reserve(static_cast<std::size_t>(K) * 2);
   for (int a = 0; a < n; ++a) {
-    if (pool_mask[a] <= 0.5f) continue;
+    if (!mask_bool(pool_mask[a])) continue;
     float s = score[a];
     if (!is_finite(s)) continue;
     tmp.emplace_back(s, a);
@@ -215,9 +222,9 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
       double dr_sum = 0.0;
       int dr_n = 0;
       for (int a = 0; a < n_a; ++a) {
-        if (buf_pool[a] <= 0.5f) continue;
+        if (!mask_bool(buf_pool[a])) continue;
         float r = buf_dr_today[a];
-        if (!is_finite(r)) continue;
+        if (!is_finite(r)) continue; // daily_return 预期可 NaN
         dr_sum += r;
         ++dr_n;
       }
@@ -262,7 +269,7 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
                              static_cast<std::size_t>(n_factor) +
                          static_cast<std::size_t>(fj)];
           for (int a = 0; a < n_a; ++a) {
-            if (buf_pool[a] <= 0.5f) continue;
+            if (!mask_bool(buf_pool[a])) continue;
             float vi = xi[a], vj = xj[a];
             if (!is_finite(vi) || !is_finite(vj)) continue;
             double di = vi, dj = vj;
@@ -280,7 +287,7 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
       std::vector<std::pair<float, int>> ranked;
       ranked.reserve(static_cast<std::size_t>(n_a));
       for (int a = 0; a < n_a; ++a) {
-        if (buf_pool[a] <= 0.5f) continue;
+        if (!mask_bool(buf_pool[a])) continue;
         float s = buf_score[a];
         if (!is_finite(s)) continue;
         ranked.emplace_back(s, a);

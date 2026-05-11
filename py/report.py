@@ -25,7 +25,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-
 # ============================================================================
 # 数据加载
 # ============================================================================
@@ -37,11 +36,56 @@ AN_DIR = OUT_DIR / "analysis"
 
 TRADING_DAYS = 252
 
+# 各 TAG 外层 .view-container 高度 (px); TAG 内所有子图共用, 切换对齐
+_TAG_H = (160, 480, 620, 480)
+_TAG1_H, _TAG2_H, _TAG3_H, _TAG4_H = _TAG_H
+
+_MARGIN_TBL = dict(t=8, b=8, l=8, r=8)
+_MARGIN_PLT = dict(t=30, b=30, l=50, r=20)
+
+# 表格唯一字号 / 行高 (px); 不设 columnwidth, 列宽由 Plotly 均分
+_FONT_HEADER = 13
+_FONT_CELL = 13
+_HEADER_H = 30
+_MIN_CELL_H = 24
+
+
+def _fit_cell_h(total_h: int, n_rows: int, header_h: int = _HEADER_H,
+                margin: dict = _MARGIN_TBL) -> int:
+    """让 header + n_rows*cell_h 尽量填满 figure 的可绘制区."""
+    assert n_rows > 0, "n_rows must be > 0"
+    avail = total_h - margin["t"] - margin["b"] - header_h
+    return max(_MIN_CELL_H, avail // n_rows)
+
+
+def _tbl_header(values: list, align: str = "left") -> dict:
+    return dict(
+        values=values, fill_color="lightsteelblue", align=align,
+        font=dict(size=_FONT_HEADER, color="#222"), height=_HEADER_H,
+    )
+
+
+def _tbl_cells(values: list, align: str = "left", height: int | None = None,
+               fill_color=None) -> dict:
+    kw = dict(values=values, align=align, font=dict(size=_FONT_CELL))
+    if height is not None:
+        kw["height"] = height
+    if fill_color is not None:
+        kw["fill_color"] = fill_color
+    return kw
+
 
 def _load() -> dict:
     meta = json.loads((OUT_DIR / "meta.json").read_text(encoding="utf-8"))
     dates_all = np.array(meta["dates"])
     codes = np.array(meta["codes"])
+
+    basic = json.loads(
+        (ROOT / "data" / "_meta" / "stock_basic.json").read_text(encoding="utf-8")
+    )
+    name_map = {x["ts_code"]: x["name"] for x in basic}
+    for c in codes:
+        assert c in name_map, f"缺中文名: {c}"
 
     bt_d_idx = np.load(BT_DIR / "dates.npy")
     bt_dates_str = dates_all[bt_d_idx]
@@ -86,9 +130,15 @@ def _load() -> dict:
         "meta": meta,
         "dates_all": dates_all,
         "codes": codes,
+        "name_map": name_map,
         "bt": bt,
         "an": an,
     }
+
+
+def _label(code: str, name_map: dict) -> str:
+    """标的显示: 中文名在前, 括号注释代码."""
+    return f"{name_map[code]} ({code})"
 
 
 # ============================================================================
@@ -263,58 +313,107 @@ def _trade_stats(bt, an, meta) -> dict:
 # TAG 1: 指标卡 (table) + 交易统计 (table). updatemenu 切换.
 # ============================================================================
 
-def _table_from_dict(d: dict, *, header_name="项") -> go.Table:
-    rows = []
-    for sub_name, sub in d.items():
-        if isinstance(sub, dict):
-            for k, v in sub.items():
-                rows.append((f"{sub_name} · {k}", v))
-        else:
-            rows.append((sub_name, sub))
+# 格式化规则：按指标名分类
+_PCT_METRICS = {"年化", "波动率", "最大回撤", "Alpha", "跟踪误差",
+                "平均交易收益", "正收益平均", "负收益平均", "交易赢率",
+                "持仓停牌股票比例", "月赢率", "周赢率", "日赢率",
+                "调仓指令可执行比例", "指数跟踪误差", "平均持仓仓位"}
+_INT_METRICS  = {"天数", "创新高最长天数", "换股次数"}
 
-    def _fmt(v):
-        if isinstance(v, float):
-            if abs(v) < 1 and abs(v) > 1e-6:
-                return f"{v*100:.2f}%"
-            return f"{v:.4f}"
+
+def _fmt_v(v, key=""):
+    if v == "—":
+        return "—"
+    if isinstance(v, int):
         return str(v)
+    if not isinstance(v, float):
+        return str(v)
+    if not np.isfinite(v):
+        return "nan"
+    if key in _INT_METRICS:
+        return str(int(round(v)))
+    if key in _PCT_METRICS:
+        return f"{v*100:.2f}%"
+    return f"{v:.4f}"
+
+
+def _transposed_table(col_headers: list,
+                      row_labels: list,
+                      row_data: list,
+                      row_colors: list | None = None) -> go.Table:
+    """列 = 指标, 行 = 实体."""
+    n_rows = len(row_labels)
+    if row_colors is None:
+        palette = ["#eef2f7", "#ffffff", "#fdf6e3", "#f0faf0", "#faf0f0"]
+        row_colors = [palette[i % len(palette)] for i in range(n_rows)]
+
+    cols = [row_labels]
+    for metric in col_headers:
+        cols.append([_fmt_v(row.get(metric, "—"), metric) for row in row_data])
+
+    fill = [[row_colors[r] for r in range(n_rows)] for _ in range(len(cols))]
+    ch = _fit_cell_h(_TAG1_H, n_rows=n_rows)
 
     return go.Table(
-        header=dict(values=[header_name, "值"],
-                    fill_color="lightsteelblue", align="left"),
-        cells=dict(values=[[r[0] for r in rows],
-                           [_fmt(r[1]) for r in rows]],
-                   align="left"),
+        header=_tbl_header([""] + col_headers, align="center"),
+        cells=_tbl_cells(cols, align="center", height=ch, fill_color=fill),
     )
 
 
-def fig_tag1(bt, an, meta) -> go.Figure:
+def _trade_stats_fig(trades: dict) -> go.Figure:
+    """交易统计: 单表密集 2 行 (9 列), 中间一行为第二组表头."""
+    keys1 = ["换股次数", "平均持有天数", "平均持仓股票数", "平均持仓仓位",
+             "调仓指令可执行比例", "持仓停牌股票比例",
+             "平均交易收益", "正收益平均", "负收益平均"]
+    keys2 = ["交易赢率", "日赢率", "周赢率", "月赢率", "年换手率",
+             "指数跟踪误差", "创新高最长天数", "CPU时长(秒)", "Tensor内存(GB)"]
+    row_v1 = [_fmt_v(trades.get(k, "—"), k) for k in keys1]
+    row_v2 = [_fmt_v(trades.get(k, "—"), k) for k in keys2]
+    steel = "lightsteelblue"
+    fill_2d = [["#f5f7fb"] * 9, [steel] * 9, ["#f5f7fb"] * 9]
+
+    fig = go.Figure(go.Table(
+        header=_tbl_header(keys1, align="center"),
+        cells=_tbl_cells([row_v1, keys2, row_v2], align="center",
+                         height=_fit_cell_h(_TAG1_H, n_rows=3),
+                         fill_color=fill_2d),
+    ))
+    fig.update_layout(height=_TAG1_H, margin=_MARGIN_TBL, autosize=True)
+    return fig
+
+
+def fig_tag1(bt, an, meta) -> list[tuple[str, go.Figure]]:
     indicators = _stat_indicators(bt, an, meta)
     trades = _trade_stats(bt, an, meta)
 
-    fig = go.Figure()
-    fig.add_trace(_table_from_dict(indicators, header_name="指标"))
-    fig.add_trace(_table_from_dict(trades, header_name="交易统计"))
-    # 默认显示第 0 个
-    fig.data[1].visible = False
+    # ── view1: 策略指标横排 (3 行: 策略 / pool指数 / 超额) ──
+    strat = indicators["策略"]
+    pool  = indicators["pool指数"]
 
-    fig.update_layout(
-        title="TAG 1: 策略指标 / 交易统计 (二选一)",
-        updatemenus=[dict(
-            type="buttons", direction="right", showactive=True,
-            x=0.0, y=1.15, xanchor="left",
-            buttons=[
-                dict(label="策略 / pool指数 指标",
-                     method="update",
-                     args=[{"visible": [True, False]}, {"title": "TAG 1: 策略指标 / 交易统计 > 策略指标"}]),
-                dict(label="交易统计",
-                     method="update",
-                     args=[{"visible": [False, True]}, {"title": "TAG 1: 策略指标 / 交易统计 > 交易统计"}]),
-            ],
-        )],
-        height=600,
-    )
-    return fig
+    excess: dict = {}
+    for k in ["年化", "波动率", "夏普", "最大回撤"]:
+        sv, pv = strat.get(k), pool.get(k)
+        excess[k] = (sv - pv) if isinstance(sv, float) and isinstance(pv, float) else "—"
+    for k in ["信息比率", "Alpha", "跟踪误差"]:
+        excess[k] = strat.get(k, "—")
+
+    metrics_v1 = ["天数", "年化", "波动率", "夏普", "最大回撤",
+                  "信息比率", "Beta", "Alpha", "跟踪误差", "创新高最长天数"]
+    fig1 = go.Figure(_transposed_table(
+        col_headers=metrics_v1,
+        row_labels=["策略", "pool指数", "超额"],
+        row_data=[strat, pool, excess],
+        row_colors=["#ddeeff", "#f5f5f5", "#fff8e6"],
+    ))
+    fig1.update_layout(height=_TAG1_H, margin=_MARGIN_TBL, autosize=True)
+
+    # ── view2: 交易统计 (2 行 x 9 列) ──
+    fig2 = _trade_stats_fig(trades)
+
+    return [
+        ("策略 / pool指数 指标", fig1),
+        ("交易统计", fig2),
+    ]
 
 
 # ============================================================================
@@ -354,7 +453,7 @@ def _resample_table(daily_ret: np.ndarray, daily_bench: np.ndarray,
     return out
 
 
-def fig_tag2(bt, an, meta) -> go.Figure:
+def fig_tag2(bt, an, meta) -> list[tuple[str, go.Figure]]:
     nav_s = bt["strategy_nav"]
     nav_p = bt["pool_nav"]
     dates = bt["dates"]
@@ -363,126 +462,104 @@ def fig_tag2(bt, an, meta) -> go.Figure:
     dd_s = _drawdown_curve(nav_s)
     dd_p = _drawdown_curve(nav_p)
 
-    fig = go.Figure()
-    traces_per_view: list[list[int]] = []
-
-    def _add(traces):
-        idxs = []
+    def _chart(*traces, **kw):
+        fig = go.Figure()
         for tr in traces:
-            idxs.append(len(fig.data))
             fig.add_trace(tr)
-        traces_per_view.append(idxs)
+        fig.update_layout(height=_TAG2_H, margin=_MARGIN_PLT,
+                          autosize=True, font=dict(size=_FONT_CELL), **kw)
+        return fig
 
     # view 1: 收益曲线
-    _add([
+    fig1 = _chart(
         go.Scatter(x=dates, y=nav_s / nav_s[0],
                    mode="lines", name="策略", line=dict(color="crimson")),
         go.Scatter(x=dates, y=nav_p / nav_p[0],
                    mode="lines", name="pool指数", line=dict(color="steelblue")),
-    ])
+    )
 
     # view 2: 回撤曲线
-    _add([
+    fig2 = _chart(
         go.Scatter(x=dates, y=dd_s, mode="lines",
                    name="策略回撤", line=dict(color="crimson"), fill="tozeroy"),
         go.Scatter(x=dates, y=dd_p, mode="lines",
                    name="pool回撤", line=dict(color="steelblue"), fill="tozeroy"),
-    ])
+    )
 
-    # view 3: 年/月/周收益分布 (3 子直方图)
+    # view 3: 年/月/周收益分布
     df = pd.DataFrame({"d": dates, "r": daily_s}).set_index("d")
-    yearly = df.resample("YE").apply(lambda x: (
-        1 + x).prod() - 1)["r"].dropna().values
-    monthly = df.resample("ME").apply(
-        lambda x: (1 + x).prod() - 1)["r"].dropna().values
-    weekly = df.resample("W").apply(lambda x: (
-        1 + x).prod() - 1)["r"].dropna().values
-    _add([
-        go.Histogram(x=yearly, name="年", marker_color="darkred",
-                     xbins=dict(size=0.05)),
-        go.Histogram(x=monthly, name="月", marker_color="orange",
-                     xbins=dict(size=0.02)),
-        go.Histogram(x=weekly, name="周", marker_color="gold",
-                     xbins=dict(size=0.01)),
-    ])
+    yearly = df.resample("YE").apply(lambda x: (1 + x).prod() - 1)["r"].dropna().values
+    monthly = df.resample("ME").apply(lambda x: (1 + x).prod() - 1)["r"].dropna().values
+    weekly = df.resample("W").apply(lambda x: (1 + x).prod() - 1)["r"].dropna().values
+    fig3 = _chart(
+        go.Histogram(x=yearly, name="年", marker_color="darkred", xbins=dict(size=0.05)),
+        go.Histogram(x=monthly, name="月", marker_color="orange", xbins=dict(size=0.02)),
+        go.Histogram(x=weekly, name="周", marker_color="gold", xbins=dict(size=0.01)),
+        barmode="group",
+    )
 
     # view 4: 月换手率分布
     turn_df = pd.DataFrame({"d": dates, "t": bt["turnover"]}).set_index("d")
     monthly_turn = turn_df.resample("ME").sum()["t"].dropna().values
-    _add([go.Histogram(x=monthly_turn, name="月换手率",
-                       marker_color="purple")])
+    fig4 = _chart(go.Histogram(x=monthly_turn, name="月换手率", marker_color="purple"))
 
     # view 5: 日仓位分布
-    _add([go.Histogram(x=bt["position_pct"], name="日仓位",
-                       marker_color="seagreen")])
+    fig5 = _chart(go.Histogram(x=bt["position_pct"], name="日仓位", marker_color="seagreen"))
 
     # view 6: 年收益表
     yt = _resample_table(daily_s, daily_p, dates, "YE")
-    _add([go.Table(
-        header=dict(values=["年份"] + list(yt.columns),
-                    fill_color="lightsteelblue", align="left"),
-        cells=dict(values=[yt.index.tolist()] +
-                          [[f"{v*100:.2f}%" if abs(v) < 1 else f"{v:.4f}"
-                            if isinstance(v, float) else v
-                            for v in yt[c]]
-                           for c in yt.columns],
-                   align="left"),
-    )])
+    fig6 = go.Figure(go.Table(
+        header=_tbl_header(["年份"] + list(yt.columns), align="left"),
+        cells=_tbl_cells(
+            [yt.index.tolist()] +
+            [[f"{v*100:.2f}%" if abs(v) < 1 else f"{v:.4f}"
+              if isinstance(v, float) else v
+              for v in yt[c]] for c in yt.columns],
+            align="left",
+            height=_fit_cell_h(_TAG2_H, n_rows=len(yt.index)),
+        ),
+    ))
+    fig6.update_layout(height=_TAG2_H, margin=_MARGIN_TBL, autosize=True)
 
-    # view 7: 月收益表
+    # view 7: 月收益表 (长表, 行多时 plotly 自动滚动)
     mt = _resample_table(daily_s, daily_p, dates, "ME")
-    _add([go.Table(
-        header=dict(values=["月份"] + list(mt.columns),
-                    fill_color="lightsteelblue", align="left"),
-        cells=dict(values=[mt.index.tolist()] +
-                          [[f"{v*100:.2f}%" if abs(v) < 1 else f"{v:.4f}"
-                            if isinstance(v, float) else v
-                            for v in mt[c]]
-                           for c in mt.columns],
-                   align="left"),
-    )])
+    fig7 = go.Figure(go.Table(
+        header=_tbl_header(["月份"] + list(mt.columns), align="left"),
+        cells=_tbl_cells(
+            [mt.index.tolist()] +
+            [[f"{v*100:.2f}%" if abs(v) < 1 else f"{v:.4f}"
+              if isinstance(v, float) else v
+              for v in mt[c]] for c in mt.columns],
+            align="left",
+            height=_fit_cell_h(_TAG2_H, n_rows=len(mt.index)),
+        ),
+    ))
+    fig7.update_layout(height=_TAG2_H, margin=_MARGIN_TBL, autosize=True)
 
     # view 8: 交易收益分布
     if len(bt["trades_open_px"]) > 0:
         rets = bt["trades_close_px"] / bt["trades_open_px"] - 1.0
-        _add([go.Histogram(x=rets, name="交易收益",
-                           nbinsx=80, marker_color="teal")])
+        fig8 = _chart(go.Histogram(x=rets, name="交易收益", nbinsx=80, marker_color="teal"))
     else:
-        _add([go.Scatter(x=[], y=[], name="无交易")])
+        fig8 = _chart(go.Scatter(x=[], y=[], name="无交易"))
 
-    # 默认显示第 0 个 view
-    for i, idxs in enumerate(traces_per_view):
-        for j in idxs:
-            fig.data[j].visible = (i == 0)
-
-    labels = ["收益曲线", "回撤曲线", "年/月/周收益分布",
-              "月换手率分布", "日仓位分布",
-              "年收益表", "月收益表", "交易收益分布"]
-    buttons = []
-    for i, label in enumerate(labels):
-        vis = [False] * len(fig.data)
-        for j in traces_per_view[i]:
-            vis[j] = True
-        buttons.append(dict(label=label, method="update",
-                            args=[{"visible": vis}, {"title": f"TAG 2: {label}"}]))
-
-    fig.update_layout(
-        title="TAG 2: 收益曲线 / 分布 / 表格 (多选一)",
-        updatemenus=[dict(type="buttons", direction="right",
-                          showactive=True, x=0.0, y=1.15, xanchor="left",
-                          buttons=buttons)],
-        height=650, barmode="group",
-    )
-    return fig
+    return [
+        ("收益曲线", fig1),
+        ("回撤曲线", fig2),
+        ("年/月/周收益分布", fig3),
+        ("月换手率分布", fig4),
+        ("日仓位分布", fig5),
+        ("年收益表", fig6),
+        ("月收益表", fig7),
+        ("交易收益分布", fig8),
+    ]
 
 
 # ============================================================================
 # TAG 3: 每天持仓 / 交易记录 (table 切换)
 # ============================================================================
 
-def fig_tag3(bt, codes, dates_all) -> go.Figure:
-    fig = go.Figure()
-
+def fig_tag3(bt, codes, dates_all, name_map) -> list[tuple[str, go.Figure]]:
     # view 1: 每天持仓 — 最近优先
     off = bt["holdings_offsets"]
     rows = []
@@ -495,25 +572,26 @@ def fig_tag3(bt, codes, dates_all) -> go.Figure:
         for k in range(lo, hi):
             a = int(bt["holdings_codes"][k])
             w = float(bt["holdings_weights"][k])
-            rows.append((date_str, codes[a], w))
+            rows.append((date_str, _label(codes[a], name_map), w))
     if rows:
         df = pd.DataFrame(rows, columns=["日期", "标的", "权重"])
-        df = df.head(2000)  # 只显示最近 2000 行避免 HTML 太大
-        fig.add_trace(go.Table(
-            header=dict(values=list(df.columns),
-                        fill_color="lightsteelblue", align="left"),
-            cells=dict(values=[df["日期"], df["标的"],
-                               [f"{x*100:.2f}%" for x in df["权重"]]],
-                       align="left"),
+        df = df.head(2000)
+        fig1 = go.Figure(go.Table(
+            header=_tbl_header(list(df.columns), align="left"),
+            cells=_tbl_cells(
+                [df["日期"], df["标的"], [f"{x*100:.2f}%" for x in df["权重"]]],
+                align="left",
+                height=_fit_cell_h(_TAG3_H, n_rows=len(df)),
+            ),
         ))
     else:
-        fig.add_trace(go.Table(header=dict(values=["empty"]),
-                               cells=dict(values=[[]])))
+        fig1 = go.Figure(go.Table(header=dict(values=["empty"]),
+                                  cells=dict(values=[[]])))
+    fig1.update_layout(height=_TAG3_H, margin=_MARGIN_TBL, autosize=True)
 
     # view 2: 交易记录
     if len(bt["trades_inst"]) > 0:
-        n_tr = len(bt["trades_inst"])
-        order = np.argsort(-bt["trades_close_d"])  # 最近优先
+        order = np.argsort(-bt["trades_close_d"])
         rows = []
         for k in order[:2000]:
             a = int(bt["trades_inst"][k])
@@ -522,7 +600,7 @@ def fig_tag3(bt, codes, dates_all) -> go.Figure:
             op = float(bt["trades_open_px"][k])
             cp = float(bt["trades_close_px"][k])
             rows.append((
-                codes[a],
+                _label(codes[a], name_map),
                 str(dates_all[od]),
                 str(dates_all[cd]),
                 cd - od,
@@ -531,29 +609,23 @@ def fig_tag3(bt, codes, dates_all) -> go.Figure:
             ))
         df = pd.DataFrame(rows, columns=["标的", "开仓日", "平仓日",
                                          "持仓天数", "价格", "收益"])
-        fig.add_trace(go.Table(
-            header=dict(values=list(df.columns),
-                        fill_color="lightsteelblue", align="left"),
-            cells=dict(values=[df[c] for c in df.columns], align="left"),
+        fig2 = go.Figure(go.Table(
+            header=_tbl_header(list(df.columns), align="left"),
+            cells=_tbl_cells(
+                [df[c] for c in df.columns],
+                align="left",
+                height=_fit_cell_h(_TAG3_H, n_rows=len(df)),
+            ),
         ))
     else:
-        fig.add_trace(go.Table(header=dict(values=["empty"]),
-                               cells=dict(values=[[]])))
+        fig2 = go.Figure(go.Table(header=dict(values=["empty"]),
+                                  cells=dict(values=[[]])))
+    fig2.update_layout(height=_TAG3_H, margin=_MARGIN_TBL, autosize=True)
 
-    fig.data[1].visible = False
-    fig.update_layout(
-        title="TAG 3: 每天持仓 / 交易记录 (二选一)",
-        updatemenus=[dict(type="buttons", direction="right",
-                          showactive=True, x=0.0, y=1.15, xanchor="left",
-                          buttons=[
-                              dict(label="每天持仓 (最近优先)", method="update",
-                                   args=[{"visible": [True, False]}, {"title": "TAG 3: 每天持仓"}]),
-                              dict(label="交易记录 (最近优先)", method="update",
-                                   args=[{"visible": [False, True]}, {"title": "TAG 3: 交易记录"}]),
-                          ])],
-        height=720,
-    )
-    return fig
+    return [
+        ("每天持仓 (最近优先)", fig1),
+        ("交易记录 (最近优先)", fig2),
+    ]
 
 
 # ============================================================================
@@ -565,17 +637,7 @@ def _rolling_mean(x: np.ndarray, w: int) -> np.ndarray:
     return s.rolling(window=w, min_periods=max(1, w // 4)).mean().values
 
 
-def fig_tag4(an, meta) -> go.Figure:
-    fig = go.Figure()
-    traces_per_view: list[list[int]] = []
-
-    def _add(traces):
-        idxs = []
-        for tr in traces:
-            idxs.append(len(fig.data))
-            fig.add_trace(tr)
-        traces_per_view.append(idxs)
-
+def fig_tag4(an, meta) -> list[tuple[str, go.Figure]]:
     factor_names = meta["factor_names"]
     n_factor = len(factor_names)
     dates = an["dates"]
@@ -590,106 +652,99 @@ def fig_tag4(an, meta) -> go.Figure:
     yearly_q = df_q.resample("YE").apply(
         lambda x: (1 + x).prod() ** (TRADING_DAYS / max(1, len(x))) - 1)
     yearly_avg = yearly_q.mean(axis=0)
-    _add([
-        go.Bar(x=yearly_avg.index, y=yearly_avg.values,
-               marker_color=["steelblue"] * Q + ["darkred"],
-               name="年化均值"),
-    ])
+    fig1 = go.Figure(go.Bar(x=yearly_avg.index, y=yearly_avg.values,
+                            marker_color=["steelblue"] * Q + ["darkred"],
+                            name="年化均值"))
+    fig1.update_layout(height=_TAG4_H, margin=_MARGIN_PLT,
+                       autosize=True, font=dict(size=_FONT_CELL))
 
     # view 2: 分层累计收益曲线 (绝对)
-    cum_traces = []
+    # NaN 视作 0 收益 (与 backtest pool_nav 在 dr_n=0 时 dr=0 同口径).
+    # 不 nan_to_num 的话, numpy.cumprod 遇 NaN 后续全 NaN → 图断在首个空桶日.
     colors = px_colors(Q + 1)
+    fig2 = go.Figure()
     for q in range(Q):
-        cum = (1 + qret[q]).cumprod()
-        cum_traces.append(go.Scatter(x=dates, y=cum, mode="lines",
-                                     name=f"Q{q+1}",
-                                     line=dict(color=colors[q])))
-    cum_p = (1 + pool_ret).cumprod()
-    cum_traces.append(go.Scatter(x=dates, y=cum_p, mode="lines",
-                                 name="pool",
-                                 line=dict(color="black", dash="dash")))
-    _add(cum_traces)
+        cum = np.cumprod(1.0 + np.nan_to_num(qret[q], nan=0.0))
+        fig2.add_trace(go.Scatter(x=dates, y=cum, mode="lines",
+                                  name=f"Q{q+1}", line=dict(color=colors[q])))
+    cum_p = np.cumprod(1.0 + np.nan_to_num(pool_ret, nan=0.0))
+    fig2.add_trace(go.Scatter(x=dates, y=cum_p, mode="lines",
+                              name="pool", line=dict(color="black", dash="dash")))
+    fig2.update_layout(height=_TAG4_H, margin=_MARGIN_PLT,
+                       autosize=True, font=dict(size=_FONT_CELL))
 
     # view 3: 聚合 factor_score IC (raw + 250d MA)
     ma = _rolling_mean(an["score_ic"], meta["config"]["ic_ma_window"])
-    _add([
-        go.Scatter(x=dates, y=an["score_ic"], mode="lines",
-                   name="raw", line=dict(color="lightgray")),
-        go.Scatter(x=dates, y=ma, mode="lines",
-                   name=f"{meta['config']['ic_ma_window']}日均",
-                   line=dict(color="crimson", width=2)),
-    ])
+    fig3 = go.Figure()
+    fig3.add_trace(go.Scatter(x=dates, y=an["score_ic"], mode="lines",
+                              name="raw", line=dict(color="lightgray")))
+    fig3.add_trace(go.Scatter(x=dates, y=ma, mode="lines",
+                              name=f"{meta['config']['ic_ma_window']}日均",
+                              line=dict(color="crimson", width=2)))
+    fig3.update_layout(height=_TAG4_H, margin=_MARGIN_PLT,
+                       autosize=True, font=dict(size=_FONT_CELL))
 
     # view 4: 单个因子 IC 250 日均 (overlaid)
-    ic_traces = []
     colors_f = px_colors(n_factor)
+    fig4 = go.Figure()
     for f in range(n_factor):
-        ic_ma = _rolling_mean(an["factor_ic"][f],
-                              meta["config"]["ic_ma_window"])
-        ic_traces.append(go.Scatter(x=dates, y=ic_ma, mode="lines",
-                                    name=factor_names[f],
-                                    line=dict(color=colors_f[f])))
-    _add(ic_traces)
+        ic_ma = _rolling_mean(an["factor_ic"][f], meta["config"]["ic_ma_window"])
+        fig4.add_trace(go.Scatter(x=dates, y=ic_ma, mode="lines",
+                                  name=factor_names[f], line=dict(color=colors_f[f])))
+    fig4.update_layout(height=_TAG4_H, margin=_MARGIN_PLT,
+                       autosize=True, font=dict(size=_FONT_CELL))
 
     # view 5: 因子表格
     summary_rows = []
     for f in range(n_factor):
         ic_full = an["factor_ic"][f]
-        ic_now = ic_full[-1] if np.isfinite(ic_full[-1]
-                                            ) else np.nanmean(ic_full[-20:])
+        tail = ic_full[-20:]
+        ic_now = ic_full[-1] if np.isfinite(ic_full[-1]) else (
+            np.nanmean(tail) if np.any(np.isfinite(tail)) else float("nan"))
         ic_ma_full = _rolling_mean(ic_full, meta["config"]["ic_ma_window"])
         ic_ma_now = ic_ma_full[-1]
         ic_mean = float(np.nanmean(ic_full))
         ic_std = float(np.nanstd(ic_full))
-        ir = ic_mean / ic_std * \
-            np.sqrt(TRADING_DAYS) if ic_std > 0 else float("nan")
+        ir = ic_mean / ic_std * np.sqrt(TRADING_DAYS) if ic_std > 0 else float("nan")
         turn = float(np.nanmean(an["factor_turnover"][f]))
-        summary_rows.append((factor_names[f], ic_now, ic_ma_now, ic_mean,
-                             ir, turn))
+        summary_rows.append((factor_names[f], ic_now, ic_ma_now, ic_mean, ir, turn))
     df_sum = pd.DataFrame(summary_rows, columns=[
         "因子", "当期IC", f"IC均值({meta['config']['ic_ma_window']})",
         "平均IC(全range)", "IR", "换手率"])
-    _add([go.Table(
-        header=dict(values=list(df_sum.columns),
-                    fill_color="lightsteelblue", align="left"),
-        cells=dict(values=[
-            df_sum["因子"],
-            [f"{v:.4f}" for v in df_sum["当期IC"]],
-            [f"{v:.4f}" for v in df_sum[f"IC均值({meta['config']['ic_ma_window']})"]],
-            [f"{v:.4f}" for v in df_sum["平均IC(全range)"]],
-            [f"{v:.4f}" for v in df_sum["IR"]],
-            [f"{v*100:.2f}%" for v in df_sum["换手率"]],
-        ], align="left"),
-    )])
+    fig5 = go.Figure(go.Table(
+        header=_tbl_header(list(df_sum.columns), align="left"),
+        cells=_tbl_cells(
+            [
+                df_sum["因子"],
+                [f"{v:.4f}" for v in df_sum["当期IC"]],
+                [f"{v:.4f}" for v in df_sum[f"IC均值({meta['config']['ic_ma_window']})"]],
+                [f"{v:.4f}" for v in df_sum["平均IC(全range)"]],
+                [f"{v:.4f}" for v in df_sum["IR"]],
+                [f"{v*100:.2f}%" for v in df_sum["换手率"]],
+            ],
+            align="left",
+            height=_fit_cell_h(_TAG4_H, n_rows=len(df_sum)),
+        ),
+    ))
+    fig5.update_layout(height=_TAG4_H, margin=_MARGIN_TBL, autosize=True)
 
     # view 6: 因子相关性矩阵
-    _add([go.Heatmap(z=an["factor_corr"], x=factor_names, y=factor_names,
-                     colorscale="RdBu", zmid=0,
-                     colorbar=dict(title="corr"))])
-
-    # 默认 view 0
-    for i, idxs in enumerate(traces_per_view):
-        for j in idxs:
-            fig.data[j].visible = (i == 0)
-
-    labels = ["分层年化对比", "分层累计收益", "聚合因子IC",
-              "单因子IC(250均)", "因子表格", "因子相关性矩阵"]
-    buttons = []
-    for i, label in enumerate(labels):
-        vis = [False] * len(fig.data)
-        for j in traces_per_view[i]:
-            vis[j] = True
-        buttons.append(dict(label=label, method="update",
-                            args=[{"visible": vis}, {"title": f"TAG 4: {label}"}]))
-
-    fig.update_layout(
-        title="TAG 4: 排名分析 / 因子相关性 (多选一)",
-        updatemenus=[dict(type="buttons", direction="right",
-                          showactive=True, x=0.0, y=1.15, xanchor="left",
-                          buttons=buttons)],
-        height=650,
+    fig6 = go.Figure(go.Heatmap(z=an["factor_corr"], x=factor_names, y=factor_names,
+                                colorscale="RdBu", zmid=0,
+                                colorbar=dict(title="corr")))
+    fig6.update_layout(
+        height=_TAG4_H, margin=_MARGIN_PLT, autosize=True,
+        font=dict(size=_FONT_CELL), xaxis=dict(tickangle=-45),
     )
-    return fig
+
+    return [
+        ("分层年化对比", fig1),
+        ("分层累计收益", fig2),
+        ("聚合因子IC", fig3),
+        ("单因子IC(250均)", fig4),
+        ("因子表格", fig5),
+        ("因子相关性矩阵", fig6),
+    ]
 
 
 def px_colors(n: int) -> list[str]:
@@ -709,10 +764,30 @@ REPORT_HEAD = """<!DOCTYPE html>
 body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
        margin: 0; padding: 12px 24px; background: #fafafa; }
 h1 { font-size: 20px; }
-.section { margin-top: 32px; padding: 0; background: #fff;
-           border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08);
-           overflow: hidden; }
-</style></head><body>
+h2 { font-size: 15px; margin: 0 0 10px; color: #444; }
+.tag-section { margin-top: 32px; padding: 16px; background: #fff;
+               border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08);
+               box-sizing: border-box; }
+.view-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.view-btn { padding: 6px 14px; border: 1px solid #ccc; border-radius: 4px;
+            background: #f5f5f5; cursor: pointer; font-size: 14px; white-space: nowrap; }
+.view-btn.active { background: steelblue; color: #fff; border-color: steelblue; }
+.view-btn:hover:not(.active) { background: #e0e8f0; }
+.view-container { position: relative; }
+.view-container .view { width: 100%; }
+</style>
+<script>
+function showView(tagIdx, viewIdx) {
+  var section = document.querySelectorAll('.tag-section')[tagIdx];
+  section.querySelectorAll('.view').forEach(function(v, i) {
+    v.style.display = i === viewIdx ? '' : 'none';
+  });
+  section.querySelectorAll('.view-btn').forEach(function(b, i) {
+    b.classList.toggle('active', i === viewIdx);
+  });
+}
+</script>
+</head><body>
 <h1>策略回测 / 因子分析报告</h1>
 """
 
@@ -726,21 +801,41 @@ def main():
     meta = data["meta"]
     codes = data["codes"]
     dates_all = data["dates_all"]
+    name_map = data["name_map"]
 
-    figs = [
-        fig_tag1(bt, an, meta),
-        fig_tag2(bt, an, meta),
-        fig_tag3(bt, codes, dates_all),
-        fig_tag4(an, meta),
+    tag_views = [
+        ("TAG 1: 策略指标 / 交易统计", fig_tag1(bt, an, meta)),
+        ("TAG 2: 收益曲线 / 分布 / 表格", fig_tag2(bt, an, meta)),
+        ("TAG 3: 每天持仓 / 交易记录", fig_tag3(bt, codes, dates_all, name_map)),
+        ("TAG 4: 排名分析 / 因子相关性", fig_tag4(an, meta)),
     ]
+
+    tag_heights = list(_TAG_H)
 
     out_path = OUT_DIR / "report.html"
     parts = [REPORT_HEAD]
-    for i, fig in enumerate(figs):
-        div = fig.to_html(full_html=False,
-                          include_plotlyjs=False,
-                          div_id=f"tag{i+1}")
-        parts.append(f'<div class="section">{div}</div>')
+    for tag_i, (tag_name, views) in enumerate(tag_views):
+        h = tag_heights[tag_i]
+        parts.append('<div class="tag-section">')
+        parts.append(f'<h2>{tag_name}</h2>')
+        parts.append('<div class="view-buttons">')
+        for view_i, (label, _) in enumerate(views):
+            active = " active" if view_i == 0 else ""
+            parts.append(
+                f'<button class="view-btn{active}" '
+                f'onclick="showView({tag_i},{view_i})">{label}</button>'
+            )
+        parts.append('</div>')
+        parts.append(f'<div class="view-container" style="height:{h}px">')
+        for view_i, (_, fig) in enumerate(views):
+            style = '' if view_i == 0 else ' style="display:none"'
+            div = fig.to_html(full_html=False, include_plotlyjs=False,
+                              div_id=f"tag{tag_i+1}_view{view_i+1}",
+                              default_width="100%",
+                              config={"responsive": True})
+            parts.append(f'<div class="view"{style}>{div}</div>')
+        parts.append('</div>')
+        parts.append('</div>')
     parts.append(REPORT_FOOT)
     out_path.write_text("\n".join(parts), encoding="utf-8")
     print(f"report -> {out_path}")

@@ -460,6 +460,27 @@ namespace itf_st {
 
 constexpr int CUTOFF = 0; // 盘前 imp_date 当日 → 当日 row 可见
 
+// tushare st.st_tpye → StType (枚举见 pit.hpp). 13 种穷举, 未知值 assert fail.
+inline StType parse_st_type(const char *s) {
+  assert(s && "st.st_tpye missing");
+  // 频次降序 (见 py/app/st.py 统计输出), 命中越早越好
+  if (std::strcmp(s, "*ST") == 0)              return StType::star;
+  if (std::strcmp(s, "撤销*ST") == 0)          return StType::star_revoke;
+  if (std::strcmp(s, "ST") == 0)               return StType::st;
+  if (std::strcmp(s, "从ST变为*ST") == 0)      return StType::st_to_star;
+  if (std::strcmp(s, "撤消*ST并实行ST") == 0)  return StType::star_to_st;
+  if (std::strcmp(s, "撤销ST") == 0)           return StType::st_revoke;
+  if (std::strcmp(s, "退市整理期") == 0)       return StType::delist_period;
+  if (std::strcmp(s, "叠加ST") == 0)           return StType::st_overlay;
+  if (std::strcmp(s, "叠加*ST") == 0)          return StType::star_overlay;
+  if (std::strcmp(s, "撤销叠加*ST") == 0)      return StType::star_overlay_revoke;
+  if (std::strcmp(s, "撤销叠加ST") == 0)       return StType::st_overlay_revoke;
+  if (std::strcmp(s, "高风险警示") == 0)       return StType::high_risk;
+  if (std::strcmp(s, "撤销高风险警示") == 0)   return StType::high_risk_revoke;
+  assert(false && "unknown st.st_tpye");
+  return StType::st;
+}
+
 void prealloc(const Axes &axes, PitPool &p) {
   event_prealloc(p.st, static_cast<std::size_t>(axes.n_a()));
 }
@@ -482,7 +503,7 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
       continue;
     STEv ev;
     ev.v = row;
-    ev.st_name = as_str(yyjson_obj_get(item, "name"));
+    ev.type = parse_st_type(as_cstr_or_null(yyjson_obj_get(item, "st_tpye")));
     {
       std::lock_guard<std::mutex> lk((*mu)[a]);
       pool.st[a].push_back(std::move(ev));

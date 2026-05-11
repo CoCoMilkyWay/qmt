@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,6 +31,15 @@ using feature::F;
 using feature::is_finite;
 
 // ---- helpers ---------------------------------------------------------------
+
+// 读"契约 bool" feature: 必 finite + ∈ {0, 1}. 任一违背 → assert fail (定位污染源).
+//   适用: tradable / pool / susp / limit_up / limit_dn 等 NO_NAN_FEATURES 子集.
+//   raw / factor / daily_return 等可 NaN 列禁用此 helper.
+inline bool read_bool(const feature::Tensor &T, F f, int a, int d) {
+  float v = T.at(f, a, d);
+  assert(is_finite(v) && "backtest::read_bool: NaN — feature should be 0/1");
+  return v > 0.5f;
+}
 
 inline int find_d(const feature::Axes &axes, std::string_view yyyymmdd,
                   bool floor) {
@@ -59,6 +69,9 @@ inline void wi(const fs::path &p, const std::vector<std::int32_t> &v) {
 
 double run(const feature::Axes &axes, const feature::StockMeta & /*meta*/,
            const feature::Tensor &T) {
+  // 注: meta.delist_date 是 ex-post (build 时拉的最新表), `delist_age < 0` 含未来信息
+  //     (今日已知未来某日退市), 不可用作 filter; 但 `delist_age >= 0` 是当下事实 (今日已退市),
+  //     PIT 安全, 仅用于持仓兜底强制平仓.
   misc::Timer t("[backtest] run");
   auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -117,6 +130,43 @@ double run(const feature::Axes &axes, const feature::StockMeta & /*meta*/,
       if (is_finite(c)) last_close[a] = c;
     }
 
+    // (1.5) 持仓兜底: 已退市股 (delist_age >= 0) 强制按 last_close 平仓.
+    //   PIT 安全: 仅在退市当日及之后命中, delist_age < 0 不读 (不用未来信息).
+    //   触发说明 上游 filter 未能在退市前卖出该持仓 (可能因停牌一直卡住 / 数据源缺 ST 标记).
+    //   不 assert, 打印 [WARN] 后继续, 与 sell 逻辑一致地关闭 trade record.
+    for (auto it = holdings.begin(); it != holdings.end();) {
+      int a = it->first;
+      float da = T.at(F::delist_age, a, d);
+      if (!is_finite(da) || da < 0.0f) {
+        ++it;
+        continue;
+      }
+      float c = last_close[static_cast<std::size_t>(a)];
+      assert(is_finite(c) && "delisted holding has no last_close");
+      std::printf("[WARN] backtest d=%s 持仓 %s 已退市 (delist_age=%.0f), "
+                  "强制按 last_close=%.4f 平仓\n",
+                  axes.dates[static_cast<std::size_t>(d)].c_str(),
+                  axes.codes[static_cast<std::size_t>(a)].c_str(),
+                  da, c);
+      double proceeds = it->second * static_cast<double>(c) *
+                        (1.0 - ::config::BT_SELL_COST);
+      cash += proceeds;
+
+      auto rec_it = open_recs.find(a);
+      assert(rec_it != open_recs.end() &&
+             "delisted holding without open record");
+      tr_inst.push_back(static_cast<std::int32_t>(a));
+      tr_open_d.push_back(static_cast<std::int32_t>(rec_it->second.open_d));
+      tr_close_d.push_back(static_cast<std::int32_t>(d));
+      tr_open_px.push_back(rec_it->second.open_px);
+      tr_close_px.push_back(c);
+      tr_buy_value.push_back(rec_it->second.buy_value);
+      tr_pv_at_open.push_back(rec_it->second.pv_at_open);
+      open_recs.erase(rec_it);
+
+      it = holdings.erase(it);
+    }
+
     // (2) 组合市值 (mark-to-market)
     double mv_holdings = 0.0;
     for (auto &kv : holdings) {
@@ -128,10 +178,12 @@ double run(const feature::Axes &axes, const feature::StockMeta & /*meta*/,
     assert(pv > 0.0 && "portfolio value <= 0");
 
     // (3) 候选 universe: tradable ∧ finite(factor_score)
+    //   factor_score 在 pool 外是 NaN (按 cs_factor_score 契约), 跳过即可;
+    //   pool 内全 factor 缺时也可能 NaN (理论上 pool 已保 mcap_raw finite → 不应触发).
     std::vector<std::pair<float, int>> cands;
     cands.reserve(::config::UNIVERSE_SIZE);
     for (int a = 0; a < n_a; ++a) {
-      if (T.at(F::tradable, a, d) <= 0.5f) continue;
+      if (!read_bool(T, F::tradable, a, d)) continue;
       float s = T.at(F::factor_score, a, d);
       if (!is_finite(s)) continue;
       cands.emplace_back(s, a);
@@ -162,9 +214,8 @@ double run(const feature::Axes &axes, const feature::StockMeta & /*meta*/,
     for (auto &kv : holdings) {
       int a = kv.first;
       if (top_exit_set.count(a)) continue;
-      bool lu = T.at(F::limit_up, a, d) > 0.5f;
-      bool ld = T.at(F::limit_dn, a, d) > 0.5f;
-      if (lu || ld) continue;
+      if (read_bool(T, F::limit_up, a, d) || read_bool(T, F::limit_dn, a, d))
+        continue;
       intended_sell.push_back(a);
     }
     // 决定空槽 — 仍持有 (not in to_sell) 占的槽
@@ -181,9 +232,8 @@ double run(const feature::Axes &axes, const feature::StockMeta & /*meta*/,
         int a = p.second;
         if (holdings.count(a) && !sold_set.count(a)) continue; // 已持仓且未卖
         if (!top_n_set.count(a)) break; // 已超 top N 范围 (排序后)
-        bool lu = T.at(F::limit_up, a, d) > 0.5f;
-        bool ld = T.at(F::limit_dn, a, d) > 0.5f;
-        if (lu || ld) continue;
+        if (read_bool(T, F::limit_up, a, d) || read_bool(T, F::limit_dn, a, d))
+          continue;
         intended_buy.push_back(a);
         --slots;
       }
@@ -195,7 +245,7 @@ double run(const feature::Axes &axes, const feature::StockMeta & /*meta*/,
     int n_buy_intent = static_cast<int>(intended_buy.size());
 
     for (int a : intended_sell) {
-      bool susp = T.at(F::susp, a, d) > 0.5f;
+      bool susp = read_bool(T, F::susp, a, d);
       float c = last_close[static_cast<std::size_t>(a)];
       if (susp || !is_finite(c)) continue; // 失败: 停牌或无价
       double sh = holdings[a];
@@ -266,9 +316,9 @@ double run(const feature::Axes &axes, const feature::StockMeta & /*meta*/,
     double dr_sum = 0.0;
     int dr_n = 0;
     for (int a = 0; a < n_a; ++a) {
-      if (T.at(F::pool, a, d) <= 0.5f) continue;
+      if (!read_bool(T, F::pool, a, d)) continue;
       float r = T.at(F::daily_return, a, d);
-      if (!is_finite(r)) continue;
+      if (!is_finite(r)) continue; // daily_return 预期可 NaN (d==0 / close_raw 缺)
       dr_sum += static_cast<double>(r);
       ++dr_n;
     }
@@ -284,7 +334,7 @@ double run(const feature::Axes &axes, const feature::StockMeta & /*meta*/,
                   static_cast<float>(::config::BT_HOLD_N);
     int n_susp_h = 0;
     for (auto &kv : holdings) {
-      if (T.at(F::susp, kv.first, d) > 0.5f) ++n_susp_h;
+      if (read_bool(T, F::susp, kv.first, d)) ++n_susp_h;
     }
     susp_pct[i] = holdings.empty()
                       ? 0.0f
