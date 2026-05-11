@@ -42,6 +42,7 @@ qmt/
 │   ├── _meta/
 │   │   ├── stock_basic.json         # 全局 meta: ts_code 全量 (L+D+P+G), 每次 update 覆盖刷新
 │   │   ├── index_member_all.json    # 申万 SW2021 行业成分 (is_new=Y), 按 L1 分批合并 (PK=ts_code)
+│   │   ├── namechange.json          # 全局 meta: 股票曾用名 (聚合 data/**/namechange.json), 每次 update 末尾重生成; nested {ts_code: [{name, start_date, ann_date, change_reason}, ...]} (内层 start_date 升序)
 │   │   └── <name>.lastupdate        # 单 itf 去重时间戳 (unix epoch s, name=数据文件名); 上次成功距今 < config::API_DEDUP_WINDOW_SECONDS 跳过
 │   └── YYYY/
 │       └── MM/
@@ -51,7 +52,8 @@ qmt/
 │                                    # itf ∈ {forecast, express, disclosure, report, stock_st, calendar,
 │                                    #        dividend, daily_basic, adj_factor, stk_limit, suspend_d,
 │                                    #        fina_indicator, income, cashflow,
-│                                    #        margin_secs, margin_detail, st(归档,不入张量)}
+│                                    #        margin_secs, margin_detail,
+│                                    #        st(归档,不入张量), namechange(归档,不入张量)}
 ├── py/                              # 构建/运行模式 (run.py 调用)
 │   ├── main.py                      # CMake 配置 + 编译
 │   └── mode_{debug,profile,assert,production}.py
@@ -128,6 +130,7 @@ qmt/
 | 事件  | fina_indicator         | `fina_indicator_vip` | 公告实时 (随财报)                                      | `ann_date`                | −1   |
 | 事件  | income                 | `income_vip`         | 公告实时 (随财报)                                      | `ann_date`                | −1   |
 | 事件  | cashflow               | `cashflow_vip`       | 公告实时 (随财报)                                      | `ann_date`                | −1   |
+| 事件  | namechange             | `namechange`         | 公告实时(通常**盘后**)                                 | `ann_date`                | −1   |
 
 ## 字段表
 

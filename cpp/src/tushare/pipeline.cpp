@@ -78,6 +78,9 @@ void update(std::string_view start, std::string_view end,
     mark_api_updated(spec.name);
   }
 
+  // 全局 namechange meta: 每次 update 末尾无条件重生成 (本地聚合, 不调 API)
+  refresh_namechange_meta();
+
   std::cout << "\n[update] done" << std::endl;
 }
 

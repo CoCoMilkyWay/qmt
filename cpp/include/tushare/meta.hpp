@@ -17,6 +17,15 @@ void refresh_stock_basic(Http &http);
 // 与 stock_basic 同套，仅在 update() 入口调一次。
 void refresh_index_member_all(Http &http);
 
+// 聚合所有 data/YYYY/MM/DD/namechange.json 为全局 meta，覆盖
+// data/_meta/namechange.json。不调 tushare API，纯本地扫描。
+// 结构 = nested object {ts_code: [{name, start_date, ann_date, change_reason}, ...]}
+//   - 外层 ts_code 升序; 内层数组按 start_date 升序 (历史正序, 旧 → 新)
+//   - PK=(ts_code, start_date) 去重: 按 day file YYYY/MM/DD 升序遍历, 后写覆盖
+//     (lookback 内 tushare 修正会让较新 ann_date 的记录胜出)
+// 在 update() 末尾无条件调用 (本地操作, 不受 namechange spec dedup 影响)。
+void refresh_namechange_meta();
+
 // ============================================================================
 // 单 itf 去重 (data/_meta/<name>.lastupdate, 内容 = unix epoch seconds)
 // 调用方语义: should_skip_api 命中 → 跳过整段; 否则跑完后 mark_api_updated。

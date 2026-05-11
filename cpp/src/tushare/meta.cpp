@@ -11,6 +11,7 @@
 #include <ctime>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -30,6 +31,10 @@ fs::path stock_basic_path() {
 
 fs::path index_member_all_path() {
   return misc::git_root() / "data" / "_meta" / "index_member_all.json";
+}
+
+fs::path namechange_meta_path() {
+  return misc::git_root() / "data" / "_meta" / "namechange.json";
 }
 
 fs::path lastupdate_path(std::string_view name) {
@@ -274,6 +279,107 @@ void refresh_index_member_all(Http &http) {
   yyjson_mut_doc_free(out_doc);
 
   std::cout << " -> " << records.size() << " total" << std::endl;
+}
+
+// ============================================================================
+// namechange 全局 meta: 聚合 data/**/namechange.json -> data/_meta/namechange.json
+// 不调 tushare API, 仅扫描本地 day files; PK=(ts_code, start_date) 去重,
+// day file 升序遍历后写覆盖 (lookback 内 tushare 修正自动胜出)
+// 输出 nested: {ts_code: [{name, start_date, ann_date, change_reason}, ...]}
+// ============================================================================
+
+void refresh_namechange_meta() {
+  std::cout << "\n[namechange] refresh meta ..." << std::flush;
+
+  fs::path data_root = misc::git_root() / "data";
+
+  // 收集 data/YYYY/MM/DD/namechange.json, 按路径升序 (= YYYY/MM/DD 升序)
+  std::vector<fs::path> files;
+  if (fs::exists(data_root)) {
+    for (auto &yyyy_entry : fs::directory_iterator(data_root)) {
+      if (!yyyy_entry.is_directory()) continue;
+      std::string yyyy = yyyy_entry.path().filename().string();
+      if (yyyy.size() != 4) continue;
+      bool all_digit = true;
+      for (char c : yyyy) if (c < '0' || c > '9') { all_digit = false; break; }
+      if (!all_digit) continue;
+      for (auto &mm_entry : fs::directory_iterator(yyyy_entry)) {
+        if (!mm_entry.is_directory()) continue;
+        for (auto &dd_entry : fs::directory_iterator(mm_entry)) {
+          if (!dd_entry.is_directory()) continue;
+          fs::path p = dd_entry.path() / "namechange.json";
+          if (fs::exists(p)) files.push_back(p);
+        }
+      }
+    }
+  }
+  std::sort(files.begin(), files.end());
+
+  yyjson_mut_doc *out_doc = yyjson_mut_doc_new(nullptr);
+
+  // {ts_code -> {start_date -> mut_obj}}; map 保证内层 start_date 升序;
+  // 外层 unordered_map 后面再 sort ts_code (避免外层 map 多次 rehash 比较慢)
+  std::unordered_map<std::string, std::map<std::string, yyjson_mut_val *>>
+      by_code;
+
+  for (auto &p : files) {
+    std::string buf = misc::read_file_all(p);
+    if (buf.empty()) continue;
+    yyjson_doc *doc = yyjson_read(buf.data(), buf.size(), 0);
+    assert(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    assert(yyjson_is_arr(root));
+    size_t i, n;
+    yyjson_val *obj;
+    yyjson_arr_foreach(root, i, n, obj) {
+      yyjson_val *tc = yyjson_obj_get(obj, "ts_code");
+      yyjson_val *sd = yyjson_obj_get(obj, "start_date");
+      assert(yyjson_is_str(tc) && yyjson_is_str(sd));
+      std::string ts_code = yyjson_get_str(tc);
+      std::string start_date = yyjson_get_str(sd);
+
+      // 全量拷贝到 out_doc, 然后剥掉 ts_code (外层 key 已承载)
+      yyjson_mut_val *mv = yyjson_val_mut_copy(out_doc, obj);
+      assert(mv);
+      yyjson_mut_obj_remove_str(mv, "ts_code");
+
+      // last-write-wins: day asc 遍历, 新 day 修正覆盖旧记录
+      by_code[ts_code][start_date] = mv;
+    }
+    yyjson_doc_free(doc);
+  }
+
+  // 外层 ts_code 升序输出
+  std::vector<std::string> codes;
+  codes.reserve(by_code.size());
+  for (auto &[k, _] : by_code) codes.push_back(k);
+  std::sort(codes.begin(), codes.end());
+
+  yyjson_mut_val *out_root = yyjson_mut_obj(out_doc);
+  yyjson_mut_doc_set_root(out_doc, out_root);
+
+  size_t total_records = 0;
+  for (auto &code : codes) {
+    auto &records = by_code[code];
+    yyjson_mut_val *arr = yyjson_mut_arr(out_doc);
+    for (auto &[sd, mv] : records) {
+      yyjson_mut_arr_append(arr, mv);
+    }
+    total_records += records.size();
+    // code.c_str() 生命周期: codes 在本函数内稳定到 mut_write 之后
+    yyjson_mut_obj_add_val(out_doc, out_root, code.c_str(), arr);
+  }
+
+  size_t out_len = 0;
+  char *json_str =
+      yyjson_mut_write(out_doc, YYJSON_WRITE_PRETTY_TWO_SPACES, &out_len);
+  assert(json_str);
+  misc::atomic_write(namechange_meta_path(), json_str, out_len);
+  std::free(json_str);
+  yyjson_mut_doc_free(out_doc);
+
+  std::cout << " -> " << codes.size() << " codes, " << total_records
+            << " records (from " << files.size() << " day files)" << std::endl;
 }
 
 // ============================================================================
