@@ -28,7 +28,8 @@ inline constexpr int UNIVERSE_SIZE = 100; // pool 截面: pool_b ∧ rank(mcap_r
 // pool_b 交易所白名单 (asset 静态过滤, 与 _meta/stock_basic.json::exchange 匹配).
 //   候选: SSE 上交所 / SZSE 深交所 / BSE 北交所.
 inline constexpr std::array<std::string_view, 2> POOL_EXCHANGE_WHITELIST = {{
-    "SSE", "SZSE",
+    "SSE",
+    "SZSE",
 }};
 
 // pool_b 板块白名单 (asset 静态过滤, 与 _meta/stock_basic.json::market 中文枚举匹配).
@@ -42,13 +43,34 @@ inline constexpr std::array<std::string_view, 1> POOL_MARKET_WHITELIST = {{
 // pool_b 行业白名单 (asset 静态过滤, 与 _meta/index_member_all.json::l1_name 申万 SW2021 一级行业中文名匹配).
 //   全量 31 个 L1, 此处保留 28 个 (排除「环保 / 交通运输 / 房地产」 — 弹性差, 长期沉底).
 inline constexpr std::array<std::string_view, 28> POOL_INDUSTRY_L1_WHITELIST = {{
-    "基础化工", "有色金属", "建筑材料", "建筑装饰",
-    "机械设备", "电子",     "汽车",     "家用电器",
-    "食品饮料", "纺织服饰", "轻工制造", "医药生物",
-    "公用事业", "商贸零售", "社会服务", "非银金融",
-    "综合",     "电力设备", "国防军工", "计算机",
-    "传媒",     "通信",     "煤炭",     "石油石化",
-    "美容护理", "农林牧渔", "钢铁",     "银行",
+    "基础化工",
+    "有色金属",
+    "建筑材料",
+    "建筑装饰",
+    "机械设备",
+    "电子",
+    "汽车",
+    "家用电器",
+    "食品饮料",
+    "纺织服饰",
+    "轻工制造",
+    "医药生物",
+    "公用事业",
+    "商贸零售",
+    "社会服务",
+    "非银金融",
+    "综合",
+    "电力设备",
+    "国防军工",
+    "计算机",
+    "传媒",
+    "通信",
+    "煤炭",
+    "石油石化",
+    "美容护理",
+    "农林牧渔",
+    "钢铁",
+    "银行",
 }};
 
 // pool_b 是否在池子里包括两融标的 (per-D per-A 动态过滤, 来自 itf:margin_secs).
@@ -94,9 +116,10 @@ inline constexpr int BT_HOLD_N = 10;             // 目标持仓数
 inline constexpr float BT_EXIT_RATIO = 1.0f;     // 离开 top-(HOLD_N*EXIT_RATIO) 的持仓必卖
 inline constexpr float BT_CAPITAL_BASE = 1.0e6f; // 初始资金 [元]
 inline constexpr float BT_PRICE_LIMIT_EPS = 1e-4f;
-inline constexpr float BT_BUY_COST = 3e-4f;  // 单边万 3
-inline constexpr float BT_SELL_COST = 13e-4f; // 单边万 13
-inline constexpr float BT_MIN_COST = 5.0f;    // 单笔最低 5 元
+inline constexpr float BT_BUY_COST = 3e-4f;      // 单边万 3
+inline constexpr float BT_SELL_COST = 13e-4f;    // 单边万 13
+inline constexpr float BT_MIN_COST = 5.0f;       // 单笔最低 5 元
+inline constexpr float BT_REBALANCE_THD = 0.02f; // 再平衡阈值: 持仓与目标差额 ≥ BT_REBALANCE_THD × pv_after 才补仓 (合理降低交易次数)
 
 // analysis: 分层桶数 (TAG 4 排名分析); IC 移动平均窗口
 inline constexpr int N_QUANTILES = 10;
@@ -107,15 +130,22 @@ inline constexpr int IC_MA_WINDOW = 250; // 因子 IC 250 日均值
 //   raw / factor / *_age / daily_return 等列预期可能 NaN, 不在此列表.
 inline constexpr std::array<feature::F, 15> NO_NAN_FEATURES = {{
     // TS bool (ts_* 内 std::fill(0.0f) 后选中置 1.0f, 或 grid_copy_bool)
-    feature::F::susp,       feature::F::is_margin,
-    feature::F::low_p,      feature::F::low_mc,
-    feature::F::limit_up,   feature::F::limit_dn,
-    feature::F::profit_st,  feature::F::revenue_st,
-    feature::F::dividend_st,feature::F::risk_warn,
-    feature::F::trading_st, feature::F::new_list,
+    feature::F::susp,
+    feature::F::is_margin,
+    feature::F::low_p,
+    feature::F::low_mc,
+    feature::F::limit_up,
+    feature::F::limit_dn,
+    feature::F::profit_st,
+    feature::F::revenue_st,
+    feature::F::dividend_st,
+    feature::F::risk_warn,
+    feature::F::trading_st,
+    feature::F::new_list,
     feature::F::pool_b,
     // CS bool (cs_pool / cs_tradable scatter 全行)
-    feature::F::pool,       feature::F::tradable,
+    feature::F::pool,
+    feature::F::tradable,
 }};
 
 } // namespace config

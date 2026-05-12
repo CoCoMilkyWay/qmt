@@ -513,30 +513,6 @@ def _resample_table(daily_ret: np.ndarray, daily_bench: np.ndarray,
     return out
 
 
-def _build_holdings_hover(bt, codes) -> list[str]:
-    """每个 bt 交易日的持仓 hover 文本 (按权重降序; cpp 已排好).
-
-    单格式: "{name} ({code}) {w:.1%}", 多行用 <br> 拼接.
-    """
-    off = bt["holdings_offsets"]
-    hcodes = bt["holdings_codes"]
-    hweights = bt["holdings_weights"]
-    hnames = bt["holdings_names"]
-    n = len(bt["dates"])
-    out = [""] * n
-    for i in range(n):
-        lo, hi = int(off[i]), int(off[i + 1])
-        if hi == lo:
-            out[i] = "(空仓)"
-            continue
-        lines = [
-            f"{hnames[k]} ({codes[int(hcodes[k])]}) {hweights[k] * 100:.1f}%"
-            for k in range(lo, hi)
-        ]
-        out[i] = "<br>".join(lines)
-    return out
-
-
 def _build_trade_markers(bt, codes, side: str, nav_norm: np.ndarray,
                           y_offset: float):
     """聚合同日多笔为一个 marker. side ∈ {'buy','sell'}.
@@ -589,6 +565,95 @@ def _build_trade_markers(bt, codes, side: str, nav_norm: np.ndarray,
     return xs, ys, hovers
 
 
+def _build_strategy_hover(bt, codes) -> list[str]:
+    """每个 bt 交易日的 hover 文本: 持仓 (pos_pct) + 各标的持有天数 +
+    当天买入/卖出 (含买入占 NAV%, 卖出 PnL% / 卖前占 NAV%).
+
+    精确按 bt 索引拼接, 避免 plotly "x unified" 就近匹配把相邻日的
+    marker 合并进 tooltip.
+    """
+    n = len(bt["dates"])
+    off = bt["holdings_offsets"]
+    hcodes = bt["holdings_codes"]
+    hweights = bt["holdings_weights"]
+    hnames = bt["holdings_names"]
+    pos_pct = bt["position_pct"]
+
+    # 1) days held per CSR slot — 维护 a -> 连续持仓起点 (bt index).
+    streak_start: dict[int, int] = {}
+    days_held = [0] * len(hcodes)
+    for i in range(n):
+        lo, hi = int(off[i]), int(off[i + 1])
+        cur: set[int] = set()
+        for k in range(lo, hi):
+            a = int(hcodes[k])
+            cur.add(a)
+            if a not in streak_start:
+                streak_start[a] = i
+            days_held[k] = i - streak_start[a] + 1
+        for a in list(streak_start):
+            if a not in cur:
+                del streak_start[a]
+
+    # 2) (bt_idx, a) -> 当日 (执行后) 持仓权重, 用于查买入/卖前的 NAV 占比.
+    weight_map: dict[tuple[int, int], float] = {}
+    for i in range(n):
+        lo, hi = int(off[i]), int(off[i + 1])
+        for k in range(lo, hi):
+            weight_map[(i, int(hcodes[k]))] = float(hweights[k])
+
+    # 3) 按 bt 日聚合当天买/卖.
+    inst = bt["trades_inst"]
+    open_d = bt["trades_open_d"]; close_d = bt["trades_close_d"]
+    px_open = bt["trades_open_px"]; px_close = bt["trades_close_px"]
+    open_names = bt["trades_open_names"]
+    close_names = bt["trades_close_names"]
+    dates_idx = bt["dates_idx"]
+    d0 = int(dates_idx[0]) if len(dates_idx) > 0 else 0
+
+    buys: dict[int, list[str]] = {}
+    sells: dict[int, list[str]] = {}
+    for k in range(len(inst)):
+        a = int(inst[k])
+        op = float(px_open[k]); cp = float(px_close[k])
+        ob = int(open_d[k]) - d0
+        cb = int(close_d[k]) - d0
+        if 0 <= ob < n:
+            # 买入后该 code 的 holdings_weights == 买入金额/NAV
+            w_buy = weight_map.get((ob, a), 0.0) * 100.0
+            buys.setdefault(ob, []).append(
+                f"{open_names[k]} ({codes[a]}) @ {op:.2f} ({w_buy:.1f}%)")
+        if 0 <= cb < n:
+            pnl = (cp / op - 1.0) * 100.0 if op > 0 else float("nan")
+            # 卖前权重 ≈ close_d-1 那天 (执行后) 的权重
+            w_pre = weight_map.get((cb - 1, a), 0.0) * 100.0
+            sells.setdefault(cb, []).append(
+                f"{close_names[k]} ({codes[a]}) @ {cp:.2f} "
+                f"({pnl:+.2f}%, {w_pre:.1f}%)")
+
+    # 4) 拼接每日 hover.
+    out = [""] * n
+    for i in range(n):
+        lo, hi = int(off[i]), int(off[i + 1])
+        if hi == lo:
+            holding_str = "(空仓)"
+        else:
+            holding_str = "<br>".join(
+                f"{hnames[k]} ({codes[int(hcodes[k])]}) "
+                f"{hweights[k] * 100:.1f}% / {days_held[k]}d"
+                for k in range(lo, hi)
+            )
+        parts = [f"<b>持仓 ({pos_pct[i] * 100:.1f}%)</b><br>{holding_str}"]
+        if i in buys:
+            parts.append(
+                f"<b>买入 ×{len(buys[i])}</b><br>" + "<br>".join(buys[i]))
+        if i in sells:
+            parts.append(
+                f"<b>卖出 ×{len(sells[i])}</b><br>" + "<br>".join(sells[i]))
+        out[i] = "<br><br>".join(parts)
+    return out
+
+
 def fig_tag2(bt, an, meta, codes) -> list[tuple[str, go.Figure]]:
     nav_s = bt["strategy_nav"]
     nav_p = bt["pool_nav"]
@@ -611,7 +676,7 @@ def fig_tag2(bt, an, meta, codes) -> list[tuple[str, go.Figure]]:
     #   - 同日多笔买/卖 聚合为 1 个 marker (▲买 / ▼卖), hover 列明
     nav_s_norm = nav_s / nav_s[0]
     nav_p_norm = nav_p / nav_p[0]
-    holdings_hover = _build_holdings_hover(bt, codes)
+    strat_hover = _build_strategy_hover(bt, codes)
 
     fig1 = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
@@ -621,43 +686,42 @@ def fig_tag2(bt, an, meta, codes) -> list[tuple[str, go.Figure]]:
     fig1.add_trace(go.Scatter(
         x=dates, y=nav_s_norm, mode="lines", name="策略",
         line=dict(color="crimson"),
-        customdata=holdings_hover,
-        hovertemplate=("<b>策略</b> %{y:.4f}<br>"
-                       "<br><b>持仓</b><br>%{customdata}<extra></extra>"),
+        customdata=strat_hover,
+        hovertemplate="%{customdata}<extra></extra>",
     ), row=1, col=1)
     fig1.add_trace(go.Scatter(
         x=dates, y=nav_p_norm, mode="lines", name="pool指数",
         line=dict(color="steelblue"),
-        hovertemplate="<b>pool</b> %{y:.4f}<extra></extra>",
+        hoverinfo="skip",
     ), row=1, col=1)
 
     # marker 纵向偏移: 买曲线下 / 卖曲线上, 偏移 ≈ 整段 y range 的 2%.
+    # marker 仅作视觉提示, hoverinfo='skip' 避免 "x unified" 把相邻日 marker
+    # 合并进策略曲线的 tooltip; 当天买卖明细已嵌入策略 trace 的 customdata.
     y_max = float(max(nav_s_norm.max(), nav_p_norm.max()))
     y_min = float(min(nav_s_norm.min(), nav_p_norm.min()))
     off = (y_max - y_min) * 0.02
 
-    bx, by, bh = _build_trade_markers(bt, codes, "buy",  nav_s_norm, -off)
-    sx, sy, sh = _build_trade_markers(bt, codes, "sell", nav_s_norm, +off)
+    bx, by, _ = _build_trade_markers(bt, codes, "buy",  nav_s_norm, -off)
+    sx, sy, _ = _build_trade_markers(bt, codes, "sell", nav_s_norm, +off)
     if bx:
         fig1.add_trace(go.Scatter(
             x=bx, y=by, mode="markers", name="买入",
             marker=dict(symbol="triangle-up", color="green", size=6),
-            customdata=bh,
-            hovertemplate="%{customdata}<extra></extra>",
+            hoverinfo="skip",
         ), row=1, col=1)
     if sx:
         fig1.add_trace(go.Scatter(
             x=sx, y=sy, mode="markers", name="卖出",
             marker=dict(symbol="triangle-down", color="red", size=6),
-            customdata=sh,
-            hovertemplate="%{customdata}<extra></extra>",
+            hoverinfo="skip",
         ), row=1, col=1)
 
     fig1.add_trace(go.Scatter(
         x=dates, y=bt["position_pct"], mode="lines", name="仓位",
         line=dict(color="seagreen"), fill="tozeroy",
         fillcolor="rgba(46,139,87,0.18)",
-        hovertemplate="<b>仓位</b> %{y:.1%}<extra></extra>",
+        hoverinfo="skip",
     ), row=2, col=1)
 
     fig1.update_yaxes(title_text="净值 (归一)", row=1, col=1)

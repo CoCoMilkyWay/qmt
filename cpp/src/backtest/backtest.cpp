@@ -321,21 +321,77 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
       open_recs.erase(it);
     }
 
-    // buys: 把 sells 后剩余 cash 按 intended_buy 数等分 (与 strategy.py 一致).
-    //   注: 仍持仓的 mv 不动, 只动 cash; 故 per_slot = cash / n_buy_intent.
-    if (n_buy_intent > 0 && cash > 0.0) {
-      double per_slot = cash / static_cast<double>(n_buy_intent);
+    // buys: sells 后再平衡逻辑 (合理降低交易次数).
+    //   1. pv_after = cash + mv_kept (sells 后总组合市值; intended_buy 此时尚未执行).
+    //      target_per_slot = pv_after / HOLD_N (作为含费总支出, 持仓权重 ≈ 1/HOLD_N,
+    //      由 BUY_COST 折损; 可忽略). rebal_thd = BT_REBALANCE_THD × pv_after.
+    //   2. initial buy: 每个 intended_buy 至多花 target_per_slot, 不强行用完 cash.
+    //      原 intended_buy 已在 (4) 过滤 limit_up/dn; close 兜底.
+    //   3. 再平衡: 现有持仓 (kept + 新 buy) 中 deficit ≥ rebal_thd 的, 按 deficit
+    //      降序逐个补到 target. 跳过 susp/limit_up/limit_dn (与 initial buy 同口径).
+    //      加仓不创建 trade record、不更新 open_recs、不计入 n_buy_ok/exec_pct;
+    //      单独累计 n_rebal_add 进 turnover (年换手).
+    int n_rebal_add = 0;
+    {
+      double mv_kept = 0.0;
+      for (auto &kv : holdings) {
+        mv_kept += kv.second * static_cast<double>(last_close[
+            static_cast<std::size_t>(kv.first)]);
+      }
+      double pv_after = cash + mv_kept;
+      double target_per_slot = pv_after / static_cast<double>(hold_n);
+      double rebal_thd =
+          static_cast<double>(::config::BT_REBALANCE_THD) * pv_after;
+
       for (int a : intended_buy) {
+        if (cash <= 0.0) break;
         float c = last_close[static_cast<std::size_t>(a)];
-        if (!is_finite(c) || c <= 0.0f) continue; // 无价无法买
-        double cost_money = per_slot;             // 含费总支出
+        if (!is_finite(c) || c <= 0.0f) continue;
+        double cost_money = std::min(target_per_slot, cash);
         double net = cost_money / (1.0 + ::config::BT_BUY_COST);
         double sh = net / static_cast<double>(c);
         if (sh <= 0.0) continue;
         cash -= cost_money;
-        holdings[a] = holdings.count(a) ? holdings[a] + sh : sh;
-        ++n_buy_ok;
+        holdings[a] = sh; // intended_buy ∉ holdings (见 (4))
         open_recs[a] = OpenRec{d, c};
+        ++n_buy_ok;
+      }
+
+      if (cash > 0.0 && !holdings.empty()) {
+        struct Deficit {
+          double def;
+          int a;
+          float c;
+        };
+        std::vector<Deficit> defs;
+        defs.reserve(holdings.size());
+        for (auto &kv : holdings) {
+          int a = kv.first;
+          float c = last_close[static_cast<std::size_t>(a)];
+          if (!is_finite(c) || c <= 0.0f) continue;
+          if (read_bool(T, F::susp, a, d) ||
+              read_bool(T, F::limit_up, a, d) ||
+              read_bool(T, F::limit_dn, a, d))
+            continue;
+          double cur_mv = kv.second * static_cast<double>(c);
+          double def = target_per_slot - cur_mv;
+          if (def < rebal_thd) continue;
+          defs.push_back({def, a, c});
+        }
+        std::sort(defs.begin(), defs.end(),
+                  [](const Deficit &x, const Deficit &y) {
+                    return x.def > y.def;
+                  });
+        for (const auto &dd : defs) {
+          if (cash <= 0.0) break;
+          double cost_money = std::min(dd.def, cash);
+          double net = cost_money / (1.0 + ::config::BT_BUY_COST);
+          double sh_add = net / static_cast<double>(dd.c);
+          if (sh_add <= 0.0) continue;
+          cash -= cost_money;
+          holdings[dd.a] += sh_add; // 加仓; open_recs 不动
+          ++n_rebal_add;
+        }
       }
     }
 
@@ -382,7 +438,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     // 持仓数 / 仓位 / 换手 / 停牌占比 / 可执行率
     pos_count[i] = static_cast<std::int32_t>(holdings.size());
     pos_pct[i] = static_cast<float>(mv_end / pv_end);
-    int trades_today = n_sell_ok + n_buy_ok;
+    int trades_today = n_sell_ok + n_buy_ok + n_rebal_add;
     turnover[i] = static_cast<float>(trades_today) /
                   static_cast<float>(::config::BT_HOLD_N);
     int n_susp_h = 0;
