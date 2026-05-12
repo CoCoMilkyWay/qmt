@@ -187,8 +187,8 @@ StockMeta load_stock_meta(const Axes &ax) {
   yyjson_doc_free(im_doc);
 
   // ---- namechange: per-A 改名时间线 (按 start_date 升序) ----
-  //   _meta/namechange.json 格式: {ts_code: [{name, start_date, ann_date, change_reason}, ...]}
-  //   refresh_namechange_meta 已保证内层数组按 start_date 升序.
+  //   _meta/namechange.json 格式: {ts_code: [{name, start_date, change_reason}, ...]}
+  //   start_date = 新名生效日 = PIT 可见时点; refresh_namechange_meta 保证内层升序.
   fs::path nc_path = misc::git_root() / "data" / "_meta" / "namechange.json";
   std::string nc_buf = misc::read_file_all(nc_path);
   assert(!nc_buf.empty());

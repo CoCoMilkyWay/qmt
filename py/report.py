@@ -3,16 +3,17 @@
 用法:
     python -m py.report          # 生成 output/report.html 并打开浏览器
 
-布局: 4 个 TAG 板块, 每块用 plotly updatemenu (dropdown) 在子视图间切换.
+布局: 4 个 TAG 板块, 每块用 view-buttons 在子视图间切换.
     TAG 1: 指标卡 (策略 / pool 指数) | 交易统计
-    TAG 2: 收益/回撤曲线 | 收益分布 (年/月/周) | 月换手率分布 | 日仓位分布 |
-            年收益表 | 月收益表 | 交易收益分布
+    TAG 2: 收益曲线+日仓位曲线 (1 张 3:1 叠图, 含买/卖 marker 与持仓 hover)
+           | 回撤曲线 | 收益分布 (年/月/周) | 月换手率分布
+           | 年收益表 | 月收益表 | 交易收益分布
     TAG 3: 每天持仓 | 交易记录
     TAG 4: 排名分析 (分层年收益/累计/聚合IC) | 因子相关性 (单因子IC/汇总表/相关阵)
 
 数据全部来自:
     output/meta.json
-    output/backtest/*.npy
+    output/backtest/*.npy + labels.json   (后者: PIT 名, namechange 切段)
     output/analysis/*.npy
 """
 from __future__ import annotations
@@ -38,7 +39,8 @@ AN_DIR = OUT_DIR / "analysis"
 TRADING_DAYS = 252
 
 # 各 TAG 外层 .view-container 高度 (px); TAG 内所有子图共用, 切换对齐
-_TAG_H = (220, 480, 620, 480)
+# TAG1: header(22) + 3 cell rows(22 each) + margin(16) = 104, +6 余量
+_TAG_H = (110, 480, 620, 480)
 _TAG1_H, _TAG2_H, _TAG3_H, _TAG4_H = _TAG_H
 
 _MARGIN_TBL = dict(t=8, b=8, l=8, r=8)
@@ -82,16 +84,11 @@ def _load() -> dict:
     dates_all = np.array(meta["dates"])
     codes = np.array(meta["codes"])
 
-    basic = json.loads(
-        (ROOT / "data" / "_meta" / "stock_basic.json").read_text(encoding="utf-8")
-    )
-    name_map = {x["ts_code"]: x["name"] for x in basic}
-    for c in codes:
-        assert c in name_map, f"缺中文名: {c}"
-
     bt_d_idx = np.load(BT_DIR / "dates.npy")
     bt_dates_str = dates_all[bt_d_idx]
     bt_dates = pd.to_datetime(bt_dates_str, format="%Y%m%d")
+
+    labels = json.loads((BT_DIR / "labels.json").read_text(encoding="utf-8"))
 
     bt = {
         "dates_idx": bt_d_idx,
@@ -106,14 +103,22 @@ def _load() -> dict:
         "holdings_offsets": np.load(BT_DIR / "holdings_offsets.npy"),
         "holdings_codes": np.load(BT_DIR / "holdings_codes.npy"),
         "holdings_weights": np.load(BT_DIR / "holdings_weights.npy"),
+        "holdings_names": np.asarray(labels["holdings_names"], dtype=object),
         "trades_inst": np.load(BT_DIR / "trades_inst.npy"),
         "trades_open_d": np.load(BT_DIR / "trades_open_d.npy"),
         "trades_close_d": np.load(BT_DIR / "trades_close_d.npy"),
         "trades_open_px": np.load(BT_DIR / "trades_open_px.npy"),
         "trades_close_px": np.load(BT_DIR / "trades_close_px.npy"),
-        "trades_buy_value": np.load(BT_DIR / "trades_buy_value.npy"),
-        "trades_pv_at_open": np.load(BT_DIR / "trades_pv_at_open.npy"),
+        "trades_open_names": np.asarray(labels["trades_open_names"], dtype=object),
+        "trades_close_names": np.asarray(labels["trades_close_names"], dtype=object),
     }
+    # 健全性: labels 长度对齐
+    assert len(bt["holdings_names"]) == len(bt["holdings_codes"]), \
+        "labels.holdings_names 与 holdings_codes 长度不一致"
+    assert len(bt["trades_open_names"]) == len(bt["trades_inst"]), \
+        "labels.trades_open_names 与 trades_inst 长度不一致"
+    assert len(bt["trades_close_names"]) == len(bt["trades_inst"]), \
+        "labels.trades_close_names 与 trades_inst 长度不一致"
 
     an_d_idx = np.load(AN_DIR / "dates.npy")
     assert np.array_equal(an_d_idx, bt_d_idx), "analysis/backtest dates 不一致"
@@ -132,15 +137,9 @@ def _load() -> dict:
         "meta": meta,
         "dates_all": dates_all,
         "codes": codes,
-        "name_map": name_map,
         "bt": bt,
         "an": an,
     }
-
-
-def _label(code: str, name_map: dict) -> str:
-    """标的显示: 中文名在前, 括号注释代码."""
-    return f"{name_map[code]} ({code})"
 
 
 # ============================================================================
@@ -226,7 +225,7 @@ def _longest_no_new_high(nav: np.ndarray) -> int:
 
 
 def _stat_indicators(bt, an, meta) -> dict:
-    """TAG 1 视图1: 策略/pool 指数指标."""
+    """TAG 1 视图1: 策略指标."""
     nav_s = bt["strategy_nav"]
     nav_p = bt["pool_nav"]
     ret_s = np.diff(nav_s) / nav_s[:-1]
@@ -342,6 +341,7 @@ def _fmt_v(v, key=""):
 def _transposed_table(col_headers: list,
                       row_labels: list,
                       row_data: list,
+                      cell_height: int | None = None,
                       ) -> go.Table:
     """列 = 指标, 行 = 实体."""
     n_rows = len(row_labels)
@@ -350,7 +350,7 @@ def _transposed_table(col_headers: list,
     for metric in col_headers:
         cols.append([_fmt_v(row.get(metric, "—"), metric) for row in row_data])
 
-    ch = _fit_cell_h(_TAG1_H, n_rows=n_rows)
+    ch = _fit_cell_h(_TAG1_H, n_rows=n_rows) if cell_height is None else cell_height
 
     return go.Table(
         header=_tbl_header(["指标"] + col_headers, align="center"),
@@ -404,36 +404,42 @@ def _wide_metric_table(index: pd.Index,
 
 
 def _trade_stats_fig(trades: dict) -> go.Figure:
-    """交易统计: 同策略表布局，一行一组（指标列）."""
-    trade_metrics = ["换股次数", "平均持有天数", "平均持仓股票数", "平均持仓仓位",
-                    "调仓指令可执行比例", "持仓停牌股票比例",
-                    "平均交易收益", "正收益平均", "负收益平均",
-                    "交易赢率", "日赢率", "周赢率", "月赢率",
-                    "年换手率", "指数跟踪误差", "创新高最长天数", "CPU时长(秒)", "Tensor内存(GB)"]
+    """交易统计: 单张 Plotly Table (9 列 × 1 header + 3 cell rows).
 
-    trade_row = {k: trades.get(k, "—") for k in trade_metrics}
+    上下两组指标拼成一张表, 中段用表头底色作为第二段视觉表头, 无 subplot 间隙.
+    """
+    trade_metrics = [
+        "换股次数", "平均持有天数", "平均持仓股票数", "平均持仓仓位",
+        "调仓指令可执行比例", "持仓停牌股票比例",
+        "平均交易收益", "正收益平均", "负收益平均",
+        "交易赢率", "日赢率", "周赢率", "月赢率",
+        "年换手率", "指数跟踪误差", "创新高最长天数",
+        "CPU时长(秒)", "Tensor内存(GB)",
+    ]
+    n_cols = 9
+    assert len(trade_metrics) == 2 * n_cols, "需 2*n_cols 个指标"
+    top_metrics = trade_metrics[:n_cols]
+    bot_metrics = trade_metrics[n_cols:]
 
-    top_metrics = trade_metrics[:9]
-    bot_metrics = trade_metrics[9:]
-    top = _transposed_table(
-        col_headers=top_metrics,
-        row_labels=["交易统计"],
-        row_data=[trade_row],
-    )
-    bot = _transposed_table(
-        col_headers=bot_metrics,
-        row_labels=["交易统计"],
-        row_data=[trade_row],
-    )
+    top_vals = [_fmt_v(trades.get(k, "—"), k) for k in top_metrics]
+    bot_vals = [_fmt_v(trades.get(k, "—"), k) for k in bot_metrics]
 
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        vertical_spacing=0.0,
-        specs=[[{"type": "table"}], [{"type": "table"}]],
-    )
-    fig.add_trace(top, row=1, col=1)
-    fig.add_trace(bot, row=2, col=1)
+    cells_values = [
+        [top_vals[i], bot_metrics[i], bot_vals[i]]
+        for i in range(n_cols)
+    ]
+    fill_per_col = [["white", "lightsteelblue", "white"]] * n_cols
+
+    fig = go.Figure(go.Table(
+        header=_tbl_header(top_metrics, align="center"),
+        cells=dict(
+            values=cells_values,
+            fill_color=fill_per_col,
+            align="center",
+            height=_CELL_H,
+            font=dict(size=_FONT_CELL),
+        ),
+    ))
     fig.update_layout(height=_TAG1_H, margin=_MARGIN_TBL, autosize=True)
     return fig
 
@@ -460,7 +466,7 @@ def fig_tag1(bt, an, meta) -> list[tuple[str, go.Figure]]:
         row_labels=["策略", "pool指数", "超额"],
         row_data=[strat, pool, excess],
     ))
-    fig1.update_layout(height=int(_TAG1_H * 0.58), margin=_MARGIN_TBL, autosize=True)
+    fig1.update_layout(height=_TAG1_H, margin=_MARGIN_TBL, autosize=True)
 
     # ── view2: 交易统计 (同风格) ──
     fig2 = _trade_stats_fig(trades)
@@ -507,7 +513,83 @@ def _resample_table(daily_ret: np.ndarray, daily_bench: np.ndarray,
     return out
 
 
-def fig_tag2(bt, an, meta) -> list[tuple[str, go.Figure]]:
+def _build_holdings_hover(bt, codes) -> list[str]:
+    """每个 bt 交易日的持仓 hover 文本 (按权重降序; cpp 已排好).
+
+    单格式: "{name} ({code}) {w:.1%}", 多行用 <br> 拼接.
+    """
+    off = bt["holdings_offsets"]
+    hcodes = bt["holdings_codes"]
+    hweights = bt["holdings_weights"]
+    hnames = bt["holdings_names"]
+    n = len(bt["dates"])
+    out = [""] * n
+    for i in range(n):
+        lo, hi = int(off[i]), int(off[i + 1])
+        if hi == lo:
+            out[i] = "(空仓)"
+            continue
+        lines = [
+            f"{hnames[k]} ({codes[int(hcodes[k])]}) {hweights[k] * 100:.1f}%"
+            for k in range(lo, hi)
+        ]
+        out[i] = "<br>".join(lines)
+    return out
+
+
+def _build_trade_markers(bt, codes, side: str, nav_norm: np.ndarray,
+                          y_offset: float):
+    """聚合同日多笔为一个 marker. side ∈ {'buy','sell'}.
+
+    返回 (xs, ys, hovers).
+    - buy:  x=open_d, name 取 trades_open_names (PIT 开仓日)
+    - sell: x=close_d, name 取 trades_close_names (PIT 平仓日)
+    - y_offset: marker 相对曲线点的纵向偏移 (买<0 下移, 卖>0 上移)
+    """
+    inst = bt["trades_inst"]
+    px_open = bt["trades_open_px"]
+    px_close = bt["trades_close_px"]
+    if side == "buy":
+        ds = bt["trades_open_d"]
+        names = bt["trades_open_names"]
+    else:
+        ds = bt["trades_close_d"]
+        names = bt["trades_close_names"]
+
+    dates_idx = bt["dates_idx"]
+    if len(dates_idx) == 0:
+        return [], [], []
+    d0 = int(dates_idx[0])
+    n_d_bt = len(dates_idx)
+
+    by_d: dict[int, list[str]] = {}
+    for k in range(len(inst)):
+        d = int(ds[k])
+        i_bt = d - d0
+        if i_bt < 0 or i_bt >= n_d_bt:
+            continue
+        a = int(inst[k])
+        op = float(px_open[k]); cp = float(px_close[k])
+        pnl = (cp / op - 1.0) * 100.0 if op > 0 else float("nan")
+        if side == "buy":
+            line = f"{names[k]} ({codes[a]}) @ {op:.2f}"
+        else:
+            line = f"{names[k]} ({codes[a]}) @ {cp:.2f} ({pnl:+.2f}%)"
+        by_d.setdefault(i_bt, []).append(line)
+
+    xs, ys, hovers = [], [], []
+    bt_dates = bt["dates"]
+    label = "买入" if side == "buy" else "卖出"
+    for i_bt in sorted(by_d):
+        xs.append(bt_dates[i_bt])
+        ys.append(float(nav_norm[i_bt]) + y_offset)
+        lines = by_d[i_bt]
+        head = f"<b>{label} ×{len(lines)}</b>"
+        hovers.append(head + "<br>" + "<br>".join(lines))
+    return xs, ys, hovers
+
+
+def fig_tag2(bt, an, meta, codes) -> list[tuple[str, go.Figure]]:
     nav_s = bt["strategy_nav"]
     nav_p = bt["pool_nav"]
     dates = bt["dates"]
@@ -524,12 +606,68 @@ def fig_tag2(bt, an, meta) -> list[tuple[str, go.Figure]]:
                           autosize=True, font=dict(size=_FONT_CELL), **kw)
         return fig
 
-    # view 1: 收益曲线
-    fig1 = _chart(
-        go.Scatter(x=dates, y=nav_s / nav_s[0],
-                   mode="lines", name="策略", line=dict(color="crimson")),
-        go.Scatter(x=dates, y=nav_p / nav_p[0],
-                   mode="lines", name="pool指数", line=dict(color="steelblue")),
+    # view 1: 收益曲线 (3) + 日仓位曲线 (1), shared x.
+    #   - 收益曲线 hover: 当日持仓 (PIT 名 / code / 权重, 权重降序)
+    #   - 同日多笔买/卖 聚合为 1 个 marker (▲买 / ▼卖), hover 列明
+    nav_s_norm = nav_s / nav_s[0]
+    nav_p_norm = nav_p / nav_p[0]
+    holdings_hover = _build_holdings_hover(bt, codes)
+
+    fig1 = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[3, 1], vertical_spacing=0.04,
+    )
+
+    fig1.add_trace(go.Scatter(
+        x=dates, y=nav_s_norm, mode="lines", name="策略",
+        line=dict(color="crimson"),
+        customdata=holdings_hover,
+        hovertemplate=("<b>策略</b> %{y:.4f}<br>"
+                       "<br><b>持仓</b><br>%{customdata}<extra></extra>"),
+    ), row=1, col=1)
+    fig1.add_trace(go.Scatter(
+        x=dates, y=nav_p_norm, mode="lines", name="pool指数",
+        line=dict(color="steelblue"),
+        hovertemplate="<b>pool</b> %{y:.4f}<extra></extra>",
+    ), row=1, col=1)
+
+    # marker 纵向偏移: 买曲线下 / 卖曲线上, 偏移 ≈ 整段 y range 的 2%.
+    y_max = float(max(nav_s_norm.max(), nav_p_norm.max()))
+    y_min = float(min(nav_s_norm.min(), nav_p_norm.min()))
+    off = (y_max - y_min) * 0.02
+
+    bx, by, bh = _build_trade_markers(bt, codes, "buy",  nav_s_norm, -off)
+    sx, sy, sh = _build_trade_markers(bt, codes, "sell", nav_s_norm, +off)
+    if bx:
+        fig1.add_trace(go.Scatter(
+            x=bx, y=by, mode="markers", name="买入",
+            marker=dict(symbol="triangle-up", color="green", size=6),
+            customdata=bh,
+            hovertemplate="%{customdata}<extra></extra>",
+        ), row=1, col=1)
+    if sx:
+        fig1.add_trace(go.Scatter(
+            x=sx, y=sy, mode="markers", name="卖出",
+            marker=dict(symbol="triangle-down", color="red", size=6),
+            customdata=sh,
+            hovertemplate="%{customdata}<extra></extra>",
+        ), row=1, col=1)
+
+    fig1.add_trace(go.Scatter(
+        x=dates, y=bt["position_pct"], mode="lines", name="仓位",
+        line=dict(color="seagreen"), fill="tozeroy",
+        fillcolor="rgba(46,139,87,0.18)",
+        hovertemplate="<b>仓位</b> %{y:.1%}<extra></extra>",
+    ), row=2, col=1)
+
+    fig1.update_yaxes(title_text="净值 (归一)", row=1, col=1)
+    fig1.update_yaxes(title_text="仓位", tickformat=".0%",
+                      range=[0, 1.02], row=2, col=1)
+    fig1.update_layout(
+        height=_TAG2_H, margin=_MARGIN_PLT, autosize=True,
+        font=dict(size=_FONT_CELL),
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.06, x=0),
     )
 
     # view 2: 回撤曲线
@@ -557,35 +695,31 @@ def fig_tag2(bt, an, meta) -> list[tuple[str, go.Figure]]:
     monthly_turn = turn_df.resample("ME").sum()["t"].dropna().values
     fig4 = _chart(go.Histogram(x=monthly_turn, name="月换手率", marker_color="purple"))
 
-    # view 5: 日仓位分布
-    fig5 = _chart(go.Histogram(x=bt["position_pct"], name="日仓位", marker_color="seagreen"))
-
-    # view 6: 年收益表
+    # view 5: 年收益表
     yt = _resample_table(daily_s, daily_p, dates, "YE")
-    fig6 = go.Figure(_wide_metric_table(yt.index, yt))
+    fig5 = go.Figure(_wide_metric_table(yt.index, yt))
+    fig5.update_layout(height=_TAG2_H, margin=_MARGIN_TBL, autosize=True)
+
+    # view 6: 月收益表
+    mt = _resample_table(daily_s, daily_p, dates, "ME")
+    fig6 = go.Figure(_wide_metric_table(mt.index, mt))
     fig6.update_layout(height=_TAG2_H, margin=_MARGIN_TBL, autosize=True)
 
-    # view 7: 月收益表 (长表, 行多时 plotly 自动滚动)
-    mt = _resample_table(daily_s, daily_p, dates, "ME")
-    fig7 = go.Figure(_wide_metric_table(mt.index, mt))
-    fig7.update_layout(height=_TAG2_H, margin=_MARGIN_TBL, autosize=True)
-
-    # view 8: 交易收益分布
+    # view 7: 交易收益分布
     if len(bt["trades_open_px"]) > 0:
         rets = bt["trades_close_px"] / bt["trades_open_px"] - 1.0
-        fig8 = _chart(go.Histogram(x=rets, name="交易收益", nbinsx=80, marker_color="teal"))
+        fig7 = _chart(go.Histogram(x=rets, name="交易收益", nbinsx=80, marker_color="teal"))
     else:
-        fig8 = _chart(go.Scatter(x=[], y=[], name="无交易"))
+        fig7 = _chart(go.Scatter(x=[], y=[], name="无交易"))
 
     return [
-        ("收益曲线", fig1),
+        ("收益曲线 + 仓位曲线", fig1),
         ("回撤曲线", fig2),
         ("年/月/周收益分布", fig3),
         ("月换手率分布", fig4),
-        ("日仓位分布", fig5),
-        ("年收益表", fig6),
-        ("月收益表", fig7),
-        ("交易收益分布", fig8),
+        ("年收益表", fig5),
+        ("月收益表", fig6),
+        ("交易收益分布", fig7),
     ]
 
 
@@ -593,9 +727,12 @@ def fig_tag2(bt, an, meta) -> list[tuple[str, go.Figure]]:
 # TAG 3: 每天持仓 / 交易记录 (table 切换)
 # ============================================================================
 
-def fig_tag3(bt, codes, dates_all, name_map) -> list[tuple[str, go.Figure]]:
-    # view 1: 每天持仓 — 最近优先
+def fig_tag3(bt, codes, dates_all) -> list[tuple[str, go.Figure]]:
+    # view 1: 每天持仓 — 最近优先, 段内权重降序 (cpp 已排好), PIT 名直读
     off = bt["holdings_offsets"]
+    hcodes = bt["holdings_codes"]
+    hweights = bt["holdings_weights"]
+    hnames = bt["holdings_names"]
     rows = []
     n_d_bt = len(bt["dates"])
     for i in range(n_d_bt - 1, -1, -1):
@@ -604,9 +741,10 @@ def fig_tag3(bt, codes, dates_all, name_map) -> list[tuple[str, go.Figure]]:
             continue
         date_str = bt["dates"][i].strftime("%Y-%m-%d")
         for k in range(lo, hi):
-            a = int(bt["holdings_codes"][k])
-            w = float(bt["holdings_weights"][k])
-            rows.append((date_str, _label(codes[a], name_map), w))
+            a = int(hcodes[k])
+            rows.append((date_str,
+                         f"{hnames[k]} ({codes[a]})",
+                         float(hweights[k])))
     if rows:
         df = pd.DataFrame(rows, columns=["日期", "标的", "权重"])
         df = df.head(2000)
@@ -623,7 +761,7 @@ def fig_tag3(bt, codes, dates_all, name_map) -> list[tuple[str, go.Figure]]:
                                   cells=dict(values=[[]])))
     fig1.update_layout(height=_TAG3_H, margin=_MARGIN_TBL, autosize=True)
 
-    # view 2: 交易记录
+    # view 2: 交易记录 (PIT 名取平仓当日, namechange 后名字会动态切换)
     if len(bt["trades_inst"]) > 0:
         order = np.argsort(-bt["trades_close_d"])
         rows = []
@@ -634,7 +772,7 @@ def fig_tag3(bt, codes, dates_all, name_map) -> list[tuple[str, go.Figure]]:
             op = float(bt["trades_open_px"][k])
             cp = float(bt["trades_close_px"][k])
             rows.append((
-                _label(codes[a], name_map),
+                f"{bt['trades_close_names'][k]} ({codes[a]})",
                 str(dates_all[od]),
                 str(dates_all[cd]),
                 cd - od,
@@ -808,13 +946,18 @@ h2 { font-size: 15px; margin: 0 0 10px; color: #444; }
 .view-btn.active { background: steelblue; color: #fff; border-color: steelblue; }
 .view-btn:hover:not(.active) { background: #e0e8f0; }
 .view-container { position: relative; }
-.view-container .view { width: 100%; }
+.view-container .view {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  visibility: hidden;
+}
+.view-container .view.active { visibility: visible; }
 </style>
 <script>
 function showView(tagIdx, viewIdx) {
   var section = document.querySelectorAll('.tag-section')[tagIdx];
   section.querySelectorAll('.view').forEach(function(v, i) {
-    v.style.display = i === viewIdx ? '' : 'none';
+    v.classList.toggle('active', i === viewIdx);
   });
   section.querySelectorAll('.view-btn').forEach(function(b, i) {
     b.classList.toggle('active', i === viewIdx);
@@ -835,12 +978,11 @@ def main():
     meta = data["meta"]
     codes = data["codes"]
     dates_all = data["dates_all"]
-    name_map = data["name_map"]
 
     tag_views = [
         ("TAG 1: 策略指标 / 交易统计", fig_tag1(bt, an, meta)),
-        ("TAG 2: 收益曲线 / 分布 / 表格", fig_tag2(bt, an, meta)),
-        ("TAG 3: 每天持仓 / 交易记录", fig_tag3(bt, codes, dates_all, name_map)),
+        ("TAG 2: 收益曲线 / 分布 / 表格", fig_tag2(bt, an, meta, codes)),
+        ("TAG 3: 每天持仓 / 交易记录", fig_tag3(bt, codes, dates_all)),
         ("TAG 4: 排名分析 / 因子相关性", fig_tag4(an, meta)),
     ]
 
@@ -862,12 +1004,13 @@ def main():
         parts.append('</div>')
         parts.append(f'<div class="view-container" style="height:{h}px">')
         for view_i, (_, fig) in enumerate(views):
-            style = '' if view_i == 0 else ' style="display:none"'
+            cls = "view active" if view_i == 0 else "view"
             div = fig.to_html(full_html=False, include_plotlyjs=False,
                               div_id=f"tag{tag_i+1}_view{view_i+1}",
                               default_width="100%",
+                              default_height="100%",
                               config={"responsive": True})
-            parts.append(f'<div class="view"{style}>{div}</div>')
+            parts.append(f'<div class="{cls}">{div}</div>')
         parts.append('</div>')
         parts.append('</div>')
     parts.append(REPORT_FOOT)

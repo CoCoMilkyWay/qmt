@@ -251,20 +251,6 @@ const std::vector<InterfaceSpec> SPECS = {
      {"trade_date"},
      {"ts_code", "trade_date"},
      std::make_shared<PerDayStrategy>(std::vector<std::string>{"trade_date"})},
-    // 股票曾用名: 历史名称变更记录 (event 流, 实时更新)
-    // - query start_date/end_date 过滤 ann_date 范围 (文档明示「公告开始/结束日期」)
-    //   全市场日均改名 < 1 条, 31 天/段远低于 8000 行限额, 用 RangeStrategy
-    // - visible_date=ann_date: 改名公告发出即可见 (与 forecast/express 同模式)
-    // - PK=(ts_code, start_date): 同一只股每个新名的生效日唯一 (单调, 非 null)
-    // - drop end_date: 该字段在下一次名称变更时由 tushare 回填 = 未来信息
-    //                  (与 disclosure 剥离 actual_date/modify_date 同理)
-    // - 用途: 历史归档 (当前不入张量, 与 st 同)
-    {"namechange",
-     "namechange",
-     {"ann_date"},
-     {"ts_code", "start_date"},
-     std::make_shared<RangeStrategy>(::config::FETCH_MAX_DAYS_PER_CALL),
-     {"end_date"}},
 };
 
 } // namespace tushare

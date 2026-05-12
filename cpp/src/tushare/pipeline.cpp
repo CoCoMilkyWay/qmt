@@ -35,6 +35,14 @@ void update(std::string_view start, std::string_view end,
     mark_api_updated("index_member_all");
   }
 
+  // namechange 单独一次性全量拉 (per-day pipeline 会漏 PIPELINE_START_DATE 之前)
+  if (should_skip_api("namechange", ::config::API_DEDUP_WINDOW_SECONDS)) {
+    std::cout << "\n[namechange] skip (recently updated)" << std::endl;
+  } else {
+    refresh_namechange_meta(http);
+    mark_api_updated("namechange");
+  }
+
   for (const auto &spec : specs) {
     if (should_skip_api(spec.name, ::config::API_DEDUP_WINDOW_SECONDS)) {
       std::cout << "\n[" << spec.name << "] skip (recently updated)"
@@ -77,9 +85,6 @@ void update(std::string_view start, std::string_view end,
     // 整段 (scan + plan + fetch + write) 走完无 assert → 标记成功
     mark_api_updated(spec.name);
   }
-
-  // 全局 namechange meta: 每次 update 末尾无条件重生成 (本地聚合, 不调 API)
-  refresh_namechange_meta();
 
   std::cout << "\n[update] done" << std::endl;
 }

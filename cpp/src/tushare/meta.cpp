@@ -282,74 +282,105 @@ void refresh_index_member_all(Http &http) {
 }
 
 // ============================================================================
-// namechange 全局 meta: 聚合 data/**/namechange.json -> data/_meta/namechange.json
-// 不调 tushare API, 仅扫描本地 day files; PK=(ts_code, start_date) 去重,
-// day file 升序遍历后写覆盖 (lookback 内 tushare 修正自动胜出)
-// 输出 nested: {ts_code: [{name, start_date, ann_date, change_reason}, ...]}
+// namechange 全局 meta: offset 翻页全量拉 (response.data.has_more / 单页 10000 行 cap),
+// 不传 start_date/end_date — 这俩参数 server 端按 ann_date 过滤, SQL NULL 不匹配
+// BETWEEN, 会丢掉所有 ann_date=NaN 的老记录 (2010 年前几乎全是). 无参 + has_more
+// 翻页是唯一拿全的方式 (全市场全历史 ~34000 行, 4 页结束).
+// 直接写 data/_meta/namechange.json, 不走 per-day pipeline.
+// 输出 nested: {ts_code: [{name, start_date, change_reason}, ...]}
+//   - 外层 ts_code 升序; 内层数组按 start_date 升序; PK=(ts_code, start_date) 去重
+//   - start_date = 新名生效日 = PIT 可见时点 (下游 axis.cpp / risk_warn 按此切段)
+//   - drop ann_date (大量为 NULL, 且 PIT 用 start_date 即可, ann_date 多余)
+//   - drop end_date (该字段在下一次名称变更时由 tushare 回填 = 未来信息)
 // ============================================================================
 
-void refresh_namechange_meta() {
+void refresh_namechange_meta(Http &http) {
+  static constexpr const char *FIELDS =
+      "ts_code,name,start_date,change_reason";
+
   std::cout << "\n[namechange] refresh meta ..." << std::flush;
-
-  fs::path data_root = misc::git_root() / "data";
-
-  // 收集 data/YYYY/MM/DD/namechange.json, 按路径升序 (= YYYY/MM/DD 升序)
-  std::vector<fs::path> files;
-  if (fs::exists(data_root)) {
-    for (auto &yyyy_entry : fs::directory_iterator(data_root)) {
-      if (!yyyy_entry.is_directory()) continue;
-      std::string yyyy = yyyy_entry.path().filename().string();
-      if (yyyy.size() != 4) continue;
-      bool all_digit = true;
-      for (char c : yyyy) if (c < '0' || c > '9') { all_digit = false; break; }
-      if (!all_digit) continue;
-      for (auto &mm_entry : fs::directory_iterator(yyyy_entry)) {
-        if (!mm_entry.is_directory()) continue;
-        for (auto &dd_entry : fs::directory_iterator(mm_entry)) {
-          if (!dd_entry.is_directory()) continue;
-          fs::path p = dd_entry.path() / "namechange.json";
-          if (fs::exists(p)) files.push_back(p);
-        }
-      }
-    }
-  }
-  std::sort(files.begin(), files.end());
 
   yyjson_mut_doc *out_doc = yyjson_mut_doc_new(nullptr);
 
-  // {ts_code -> {start_date -> mut_obj}}; map 保证内层 start_date 升序;
-  // 外层 unordered_map 后面再 sort ts_code (避免外层 map 多次 rehash 比较慢)
+  // {ts_code -> {start_date -> mut_obj}}; 内层 std::map 保证 start_date 升序
   std::unordered_map<std::string, std::map<std::string, yyjson_mut_val *>>
       by_code;
 
-  for (auto &p : files) {
-    std::string buf = misc::read_file_all(p);
-    if (buf.empty()) continue;
-    yyjson_doc *doc = yyjson_read(buf.data(), buf.size(), 0);
-    assert(doc);
+  // 翻页期间所有 source doc 必须保活到 mut_write 之后 (add_str 非拷贝, 指针指向 source)
+  std::vector<yyjson_doc *> source_docs;
+  size_t total_in = 0, dropped = 0;
+  int64_t offset = 0;
+
+  while (true) {
+    yyjson_doc *doc = http.call(
+        "namechange", {{"offset", std::to_string(offset)}}, FIELDS);
+    source_docs.push_back(doc);
+
     yyjson_val *root = yyjson_doc_get_root(doc);
-    assert(yyjson_is_arr(root));
+    yyjson_val *data = yyjson_obj_get(root, "data");
+    assert(data);
+    yyjson_val *fields_arr = yyjson_obj_get(data, "fields");
+    yyjson_val *items_arr = yyjson_obj_get(data, "items");
+    yyjson_val *has_more_v = yyjson_obj_get(data, "has_more");
+    assert(fields_arr && items_arr && has_more_v);
+
+    std::vector<std::string> field_names;
+    size_t fn = yyjson_arr_size(fields_arr);
+    field_names.reserve(fn);
+    for (size_t i = 0; i < fn; i++) {
+      yyjson_val *v = yyjson_arr_get(fields_arr, i);
+      assert(yyjson_is_str(v));
+      field_names.emplace_back(yyjson_get_str(v));
+    }
+    auto find_idx = [&](const char *f) -> int {
+      for (size_t i = 0; i < field_names.size(); i++) {
+        if (field_names[i] == f) return static_cast<int>(i);
+      }
+      return -1;
+    };
+    int ts_idx = find_idx("ts_code");
+    int name_idx = find_idx("name");
+    int sd_idx = find_idx("start_date");
+    int reason_idx = find_idx("change_reason");
+    assert(ts_idx >= 0 && name_idx >= 0 && sd_idx >= 0 && reason_idx >= 0);
+
+    size_t page_n = yyjson_arr_size(items_arr);
     size_t i, n;
-    yyjson_val *obj;
-    yyjson_arr_foreach(root, i, n, obj) {
-      yyjson_val *tc = yyjson_obj_get(obj, "ts_code");
-      yyjson_val *sd = yyjson_obj_get(obj, "start_date");
-      assert(yyjson_is_str(tc) && yyjson_is_str(sd));
+    yyjson_val *item;
+    yyjson_arr_foreach(items_arr, i, n, item) {
+      total_in++;
+      yyjson_val *tc = yyjson_arr_get(item, static_cast<size_t>(ts_idx));
+      yyjson_val *sd = yyjson_arr_get(item, static_cast<size_t>(sd_idx));
+      if (!yyjson_is_str(tc) || !yyjson_is_str(sd)) {
+        dropped++;
+        continue;
+      }
       std::string ts_code = yyjson_get_str(tc);
       std::string start_date = yyjson_get_str(sd);
 
-      // 全量拷贝到 out_doc, 然后剥掉 ts_code (外层 key 已承载)
-      yyjson_mut_val *mv = yyjson_val_mut_copy(out_doc, obj);
-      assert(mv);
-      yyjson_mut_obj_remove_str(mv, "ts_code");
+      yyjson_mut_val *obj = yyjson_mut_obj(out_doc);
+      auto add_str = [&](const char *key, yyjson_val *v) {
+        if (!v || !yyjson_is_str(v)) return;
+        const char *s = yyjson_get_str(v);
+        if (!s) return;
+        yyjson_mut_obj_add_str(out_doc, obj, key, s);
+      };
+      add_str("name", yyjson_arr_get(item, static_cast<size_t>(name_idx)));
+      add_str("start_date", sd);
+      add_str("change_reason",
+              yyjson_arr_get(item, static_cast<size_t>(reason_idx)));
 
-      // last-write-wins: day asc 遍历, 新 day 修正覆盖旧记录
-      by_code[ts_code][start_date] = mv;
+      by_code[ts_code][start_date] = obj;
     }
-    yyjson_doc_free(doc);
+
+    std::cout << " p" << (source_docs.size()) << "=" << page_n << std::flush;
+
+    bool has_more = yyjson_is_true(has_more_v);
+    if (!has_more) break;
+    assert(page_n > 0 && "has_more=true but empty page — infinite loop guard");
+    offset += static_cast<int64_t>(page_n);
   }
 
-  // 外层 ts_code 升序输出
   std::vector<std::string> codes;
   codes.reserve(by_code.size());
   for (auto &[k, _] : by_code) codes.push_back(k);
@@ -366,7 +397,6 @@ void refresh_namechange_meta() {
       yyjson_mut_arr_append(arr, mv);
     }
     total_records += records.size();
-    // code.c_str() 生命周期: codes 在本函数内稳定到 mut_write 之后
     yyjson_mut_obj_add_val(out_doc, out_root, code.c_str(), arr);
   }
 
@@ -377,9 +407,12 @@ void refresh_namechange_meta() {
   misc::atomic_write(namechange_meta_path(), json_str, out_len);
   std::free(json_str);
   yyjson_mut_doc_free(out_doc);
+  for (yyjson_doc *d : source_docs) yyjson_doc_free(d);
 
-  std::cout << " -> " << codes.size() << " codes, " << total_records
-            << " records (from " << files.size() << " day files)" << std::endl;
+  std::cout << " -> " << total_in << " rows, " << codes.size() << " codes, "
+            << total_records << " records";
+  if (dropped) std::cout << " (" << dropped << " dropped: missing ts_code/start_date)";
+  std::cout << std::endl;
 }
 
 // ============================================================================

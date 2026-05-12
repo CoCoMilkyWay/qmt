@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -65,6 +67,46 @@ inline void wi(const fs::path &p, const std::vector<std::int32_t> &v) {
                      std::span<const std::size_t>(shape, 1));
 }
 
+// PIT 名 (namechange 切段): 给定 (a, today=YYYYMMDD), 返回当天生效的标的名.
+//   语义: 段 = [start_date_i, start_date_{i+1}), name = hist[i].name; 最大 i 满足
+//        hist[i].start_date <= today; 否则 (今日早于所有 namechange) 退回 meta.name
+//        (stock_basic.name = 最新名; tushare namechange 不含 IPO 原名, 只能 best-effort).
+inline std::string_view name_at(const feature::StockMeta &meta, int a,
+                                std::string_view today) {
+  const auto &hist = meta.name_history[static_cast<std::size_t>(a)];
+  if (hist.empty())
+    return meta.name[static_cast<std::size_t>(a)];
+  auto it = std::upper_bound(
+      hist.begin(), hist.end(), today,
+      [](std::string_view x, const feature::NameChange &nc) {
+        return x < nc.start_date;
+      });
+  if (it == hist.begin())
+    return meta.name[static_cast<std::size_t>(a)];
+  --it;
+  return it->name;
+}
+
+// 最小 JSON 字符串转义: 仅 " 和 \ (其它 UTF-8 字节直通; 名称无控制符).
+inline void json_escape_to(std::string &buf, std::string_view s) {
+  for (char c : s) {
+    if (c == '"' || c == '\\') buf.push_back('\\');
+    buf.push_back(c);
+  }
+}
+
+inline void json_str_arr(std::string &buf,
+                         const std::vector<std::string> &v) {
+  buf.push_back('[');
+  for (std::size_t i = 0; i < v.size(); ++i) {
+    if (i) buf.push_back(',');
+    buf.push_back('"');
+    json_escape_to(buf, v[i]);
+    buf.push_back('"');
+  }
+  buf.push_back(']');
+}
+
 } // namespace
 
 double run(const feature::Axes &axes, const feature::StockMeta &meta,
@@ -97,24 +139,38 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   std::vector<float> pos_pct(n_d_bt), turnover(n_d_bt);
   std::vector<float> susp_pct(n_d_bt), exec_pct(n_d_bt);
 
-  // CSR 持仓 (按 d 顺序; 每 d 一段)
+  // CSR 持仓 (按 d 顺序; 每 d 一段; 段内按权重降序写入 — 便于 py 直接显示)
   std::vector<std::int32_t> hold_off(static_cast<std::size_t>(n_d_bt) + 1, 0);
   std::vector<std::int32_t> hold_codes;
   std::vector<float> hold_weights;
+  std::vector<std::string> hold_names; // 与 hold_codes 同序, PIT 名 (当日 namechange 切段)
   hold_codes.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BT_HOLD_N);
   hold_weights.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BT_HOLD_N);
+  hold_names.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BT_HOLD_N);
 
   // 成交 (open-close 配对)
   struct OpenRec {
     int open_d;
     float open_px;
-    float buy_value;        // 实际买入金额 (含费)
-    float pv_at_open;       // 开仓时组合市值
   };
   std::unordered_map<int, OpenRec> open_recs;
 
   std::vector<std::int32_t> tr_inst, tr_open_d, tr_close_d;
-  std::vector<float> tr_open_px, tr_close_px, tr_buy_value, tr_pv_at_open;
+  std::vector<float> tr_open_px, tr_close_px;
+  std::vector<std::string> tr_open_names, tr_close_names; // PIT 名 (开/平仓当日)
+
+  // 关 trade 公用辅助 (强平 / 正常卖出 共用)
+  auto close_trade = [&](int a, int d, const OpenRec &rec, float close_px) {
+    tr_inst.push_back(static_cast<std::int32_t>(a));
+    tr_open_d.push_back(static_cast<std::int32_t>(rec.open_d));
+    tr_close_d.push_back(static_cast<std::int32_t>(d));
+    tr_open_px.push_back(rec.open_px);
+    tr_close_px.push_back(close_px);
+    tr_open_names.emplace_back(
+        name_at(meta, a, axes.dates[static_cast<std::size_t>(rec.open_d)]));
+    tr_close_names.emplace_back(
+        name_at(meta, a, axes.dates[static_cast<std::size_t>(d)]));
+  };
 
   // pool benchmark NAV
   double pool_nav_d = ::config::BT_CAPITAL_BASE;
@@ -165,13 +221,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
       double proceeds = it->second * static_cast<double>(c) *
                         (1.0 - ::config::BT_SELL_COST);
       cash += proceeds;
-      tr_inst.push_back(static_cast<std::int32_t>(a));
-      tr_open_d.push_back(static_cast<std::int32_t>(rec_it->second.open_d));
-      tr_close_d.push_back(static_cast<std::int32_t>(d));
-      tr_open_px.push_back(rec_it->second.open_px);
-      tr_close_px.push_back(c);
-      tr_buy_value.push_back(rec_it->second.buy_value);
-      tr_pv_at_open.push_back(rec_it->second.pv_at_open);
+      close_trade(a, d, rec_it->second, c);
       open_recs.erase(rec_it);
 
       it = holdings.erase(it);
@@ -265,31 +315,16 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
       holdings.erase(a);
       ++n_sell_ok;
 
-      // 关 trade
       auto it = open_recs.find(a);
       assert(it != open_recs.end() && "sell without open record");
-      tr_inst.push_back(static_cast<std::int32_t>(a));
-      tr_open_d.push_back(static_cast<std::int32_t>(it->second.open_d));
-      tr_close_d.push_back(static_cast<std::int32_t>(d));
-      tr_open_px.push_back(it->second.open_px);
-      tr_close_px.push_back(c);
-      tr_buy_value.push_back(it->second.buy_value);
-      tr_pv_at_open.push_back(it->second.pv_at_open);
+      close_trade(a, d, it->second, c);
       open_recs.erase(it);
     }
 
-    // 重算 mv (sells 后 cash 变了, mv 不变 — 但持仓减少)
-    // buys: 把可用资金按 intended_buy 数等分 (与 strategy.py 一致)
-    double pv_after_sell = cash;
-    for (auto &kv : holdings) {
-      pv_after_sell += kv.second *
-                       static_cast<double>(last_close[
-                           static_cast<std::size_t>(kv.first)]);
-    }
-    double used_value = pv_after_sell - cash; // 仍持仓市值
-    double available = pv_after_sell - used_value;
-    if (n_buy_intent > 0 && available > 0.0) {
-      double per_slot = available / static_cast<double>(n_buy_intent);
+    // buys: 把 sells 后剩余 cash 按 intended_buy 数等分 (与 strategy.py 一致).
+    //   注: 仍持仓的 mv 不动, 只动 cash; 故 per_slot = cash / n_buy_intent.
+    if (n_buy_intent > 0 && cash > 0.0) {
+      double per_slot = cash / static_cast<double>(n_buy_intent);
       for (int a : intended_buy) {
         float c = last_close[static_cast<std::size_t>(a)];
         if (!is_finite(c) || c <= 0.0f) continue; // 无价无法买
@@ -300,13 +335,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
         cash -= cost_money;
         holdings[a] = holdings.count(a) ? holdings[a] + sh : sh;
         ++n_buy_ok;
-
-        OpenRec rec;
-        rec.open_d = d;
-        rec.open_px = c;
-        rec.buy_value = static_cast<float>(cost_money);
-        rec.pv_at_open = static_cast<float>(pv);
-        open_recs[a] = rec;
+        open_recs[a] = OpenRec{d, c};
       }
     }
 
@@ -370,18 +399,21 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
                       : static_cast<float>(n_sell_ok + n_buy_ok) /
                             static_cast<float>(intent);
 
-    // CSR 持仓 (按 d 写一段)
-    std::vector<std::pair<int, double>> sorted_hold(holdings.begin(),
-                                                    holdings.end());
+    // CSR 持仓 (按 d 写一段; 段内权重降序 — 便于 py 直接显示)
+    const std::string &today_str = axes.dates[static_cast<std::size_t>(d)];
+    std::vector<std::pair<int, double>> sorted_hold; // (a, weight)
+    sorted_hold.reserve(holdings.size());
+    for (auto &kv : holdings) {
+      double mv = kv.second * static_cast<double>(last_close[
+                                  static_cast<std::size_t>(kv.first)]);
+      sorted_hold.emplace_back(kv.first, mv / pv_end);
+    }
     std::sort(sorted_hold.begin(), sorted_hold.end(),
-              [](const auto &x, const auto &y) { return x.first < y.first; });
+              [](const auto &x, const auto &y) { return x.second > y.second; });
     for (auto &kv : sorted_hold) {
-      int a = kv.first;
-      double sh = kv.second;
-      double mv = sh * static_cast<double>(last_close[
-                            static_cast<std::size_t>(a)]);
-      hold_codes.push_back(static_cast<std::int32_t>(a));
-      hold_weights.push_back(static_cast<float>(mv / pv_end));
+      hold_codes.push_back(static_cast<std::int32_t>(kv.first));
+      hold_weights.push_back(static_cast<float>(kv.second));
+      hold_names.emplace_back(name_at(meta, kv.first, today_str));
     }
     hold_off[i + 1] = static_cast<std::int32_t>(hold_codes.size());
   }
@@ -408,8 +440,23 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   wi(out / "trades_close_d.npy", tr_close_d);
   wf(out / "trades_open_px.npy", tr_open_px);
   wf(out / "trades_close_px.npy", tr_close_px);
-  wf(out / "trades_buy_value.npy", tr_buy_value);
-  wf(out / "trades_pv_at_open.npy", tr_pv_at_open);
+
+  // labels.json: 3 个 PIT 字符串数组, 与对应 npy 同长 (按 trades / hold_codes 顺序).
+  {
+    std::string buf;
+    buf.reserve(64 +
+                tr_open_names.size() * 32 +
+                tr_close_names.size() * 32 +
+                hold_names.size() * 32);
+    buf += "{\n  \"trades_open_names\": ";
+    json_str_arr(buf, tr_open_names);
+    buf += ",\n  \"trades_close_names\": ";
+    json_str_arr(buf, tr_close_names);
+    buf += ",\n  \"holdings_names\": ";
+    json_str_arr(buf, hold_names);
+    buf += "\n}\n";
+    misc::atomic_write(out / "labels.json", buf.data(), buf.size());
+  }
 
   auto t1 = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> dur = t1 - t0;

@@ -17,14 +17,16 @@ void refresh_stock_basic(Http &http);
 // 与 stock_basic 同套，仅在 update() 入口调一次。
 void refresh_index_member_all(Http &http);
 
-// 聚合所有 data/YYYY/MM/DD/namechange.json 为全局 meta，覆盖
-// data/_meta/namechange.json。不调 tushare API，纯本地扫描。
-// 结构 = nested object {ts_code: [{name, start_date, ann_date, change_reason}, ...]}
-//   - 外层 ts_code 升序; 内层数组按 start_date 升序 (历史正序, 旧 → 新)
-//   - PK=(ts_code, start_date) 去重: 按 day file YYYY/MM/DD 升序遍历, 后写覆盖
-//     (lookback 内 tushare 修正会让较新 ann_date 的记录胜出)
-// 在 update() 末尾无条件调用 (本地操作, 不受 namechange spec dedup 影响)。
-void refresh_namechange_meta();
+// 全量刷新股票曾用名 (namechange) 全局 meta，覆盖 data/_meta/namechange.json。
+// offset 翻页全量拉 (response.data.has_more, 单页 10000 行 cap, ~4 页拿全 34000+ 行)。
+//   - 不传 start_date/end_date: 这俩参数 server 按 ann_date 过滤, SQL NULL 不匹配
+//     BETWEEN, 会丢掉所有 ann_date=NaN 的老记录 (2010 年前几乎全是)
+//   - drop ann_date: PIT 用 start_date (新名生效日) 即可, ann_date 多余
+//   - drop end_date: 该字段在下一次名称变更时由 tushare 回填 = 未来信息
+// 结构 = nested object {ts_code: [{name, start_date, change_reason}, ...]}
+//   - 外层 ts_code 升序; 内层数组按 start_date 升序; PK=(ts_code, start_date) 去重
+// 与 stock_basic / index_member_all 同套, 仅在 update() 入口调一次。
+void refresh_namechange_meta(Http &http);
 
 // ============================================================================
 // 单 itf 去重 (data/_meta/<name>.lastupdate, 内容 = unix epoch seconds)

@@ -26,15 +26,16 @@ namespace backtest {
 //   - susp_pct.npy           [n_d_bt] float32 (持仓中停牌比例)
 //   - executable_pct.npy     [n_d_bt] float32 (可执行订单 / 想下订单)
 //   - holdings_offsets.npy   [n_d_bt+1] int32 (CSR offset)
-//   - holdings_codes.npy     [total]    int32 (a 索引)
+//   - holdings_codes.npy     [total]    int32 (a 索引; per-d 内按权重降序)
 //   - holdings_weights.npy   [total]    float32 (持仓占组合市值)
 //   - trades_inst.npy        [n_trades] int32  (a 索引)
 //   - trades_open_d.npy      [n_trades] int32
 //   - trades_close_d.npy     [n_trades] int32
 //   - trades_open_px.npy     [n_trades] float32
 //   - trades_close_px.npy    [n_trades] float32
-//   - trades_buy_value.npy   [n_trades] float32
-//   - trades_pv_at_open.npy  [n_trades] float32
+//   - labels.json            JSON {trades_open_names[],
+//                                   trades_close_names[],
+//                                   holdings_names[]}  // PIT 名 (namechange 切段)
 //
 // 同时返回 elapsed_seconds (写入 meta.json).
 double run(const feature::Axes &axes, const feature::StockMeta &meta,
