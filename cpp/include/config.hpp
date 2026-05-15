@@ -52,7 +52,7 @@ inline constexpr int TUSHARE_HTTP_RETRY_INTERVAL_SECONDS = 30;
 //     BigQuant: DAI 无明显行限, 单年事件/财务 ~ 几万-几十万行, 1 年安全
 //     Tushare:  单次 8000 行硬限, 按月拉全市场仅几千行, 1 月安全
 // ============================================================================
-inline constexpr const char *PIPELINE_START_DATE = "20150101";
+inline constexpr const char *PIPELINE_START_DATE = "20260510";
 inline constexpr int PIPELINE_LOOKBACK_DAYS = 7;
 inline constexpr int PIPELINE_DEDUP_WINDOW_SECONDS = 60 * 60;
 

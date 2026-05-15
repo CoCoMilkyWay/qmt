@@ -3,14 +3,30 @@
 #include "package/yyjson/yyjson.h"
 
 #include <arrow/array.h>
+#include <arrow/chunked_array.h>
 #include <arrow/table.h>
 
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace bigquant {
+
+// ============================================================================
+// ChunkLoc — row_idx (全表) → (chunk_idx, in_chunk_idx) 二分映射
+//   Arrow ChunkedArray 由若干 chunk 拼成, 单一 row 由 (chunk, offset) 定位.
+//   预先构表 (offsets, 单调递增), 每行 locate O(log num_chunks).
+// 供 parse / store 共用 (table_subset_to_json + write_table_by_visible_date).
+// ============================================================================
+struct ChunkLoc {
+  std::vector<int64_t> offsets; // size = num_chunks + 1
+
+  void build(const arrow::ChunkedArray &c);
+  // 返回 {chunk_idx, in_chunk_offset}
+  std::pair<int, int64_t> locate(int64_t row) const;
+};
 
 // ============================================================================
 // arrow::Array -> yyjson 单值 helpers (供 store 切片用)

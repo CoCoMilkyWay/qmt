@@ -1,7 +1,6 @@
 #include "api/bigquant/store.hpp"
 
 #include "api/bigquant/parse.hpp"
-#include "misc/date.hpp"
 #include "misc/fs.hpp"
 #include "misc/store.hpp"
 
@@ -12,37 +11,12 @@
 
 #include <cassert>
 #include <cstdlib>
-#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace bigquant::store {
-
-namespace fs = std::filesystem;
-
-// ============================================================================
-// scan_missing — Day / MonthFirst 自动分发 (Static 不应走此路径, assert 拦截)
-// ============================================================================
-
-std::vector<std::string> scan_missing(const TableSpec &spec,
-                                      std::string_view start,
-                                      std::string_view end,
-                                      int lookback_days) {
-  assert(spec.kind != FetchKind::Static &&
-         "Static 表不走 per-day scan; 用 write_meta_table");
-  if (spec.freq == FetchFreq::Day) {
-    return misc::store::scan_missing_days(spec.name, start, end, lookback_days);
-  }
-  // MonthFirst: 返回 missing month segments 的首日列表, 调用方按段 fetch.
-  // 这里给的是 segments 而不是 days; pipeline 自己解读. 但本函数签名是 days...
-  // 为统一签名: 给"每月首日"代表月; pipeline 按月调度.
-  // 不过 BigQuant MonthFirst 只有 industry_component 用, pipeline 单独按月调度,
-  // 不走 scan_missing(days) 路径.
-  assert(false && "MonthFirst 走 misc::store::scan_missing_months, pipeline 直调");
-  return {};
-}
 
 // ============================================================================
 // write_meta_table — Static 表全量刷新到 _meta/<name>.json
@@ -78,32 +52,6 @@ int field_index_of(const arrow::Table &t, const std::string &name) {
   assert(false && "bigquant::store: 字段名不在 schema 中");
   return -1;
 }
-
-// row_idx (全表) → 该 row 对应 chunked_array 的 (chunk_idx, in_chunk_idx)
-struct ChunkLoc {
-  std::vector<int64_t> offsets;
-  void build(const arrow::ChunkedArray &c) {
-    offsets.clear();
-    offsets.reserve(c.num_chunks() + 1);
-    int64_t acc = 0;
-    offsets.push_back(0);
-    for (int k = 0; k < c.num_chunks(); ++k) {
-      acc += c.chunk(k)->length();
-      offsets.push_back(acc);
-    }
-  }
-  std::pair<int, int64_t> locate(int64_t row) const {
-    int lo = 0, hi = static_cast<int>(offsets.size()) - 1;
-    while (lo + 1 < hi) {
-      int mid = (lo + hi) / 2;
-      if (offsets[mid] <= row)
-        lo = mid;
-      else
-        hi = mid;
-    }
-    return {lo, row - offsets[lo]};
-  }
-};
 
 // 构造单行 PK key: pk 列值拼接, 字段间 '|' 分隔
 std::string make_pk_key(const arrow::Table &t,
@@ -199,32 +147,9 @@ void write_table_by_visible_date(const std::shared_ptr<arrow::Table> &t,
   }
 
   // ---- 维护 _empty.json ([start, end] 全 days) ----
-  std::unordered_map<std::string, misc::store::EmptyMonth> dirty_months;
-  auto days = misc::iter_days(start, end);
-  for (auto &d : days) {
-    bool has_data = by_day.count(d) > 0;
-    bool day_exists =
-        has_data || fs::exists(misc::store::day_data_path(d, spec.name));
-    std::string yyyy = d.substr(0, 4);
-    std::string mm = d.substr(4, 2);
-    std::string dd = d.substr(6, 2);
-    std::string ym = yyyy + mm;
-    auto mit = dirty_months.find(ym);
-    if (mit == dirty_months.end()) {
-      mit = dirty_months
-                .emplace(ym, misc::store::read_empty_month(yyyy, mm))
-                .first;
-    }
-    misc::store::EmptySet &set = mit->second[spec.name];
-    if (day_exists)
-      set.erase(dd);
-    else
-      set.insert(dd);
-  }
-
-  for (auto &[ym, month] : dirty_months) {
-    misc::store::write_empty_month(ym.substr(0, 4), ym.substr(4, 2), month);
-  }
+  misc::store::update_empty_for_range(
+      spec.name, start, end,
+      [&](const std::string &d) { return by_day.count(d) > 0; });
 }
 
 } // namespace bigquant::store

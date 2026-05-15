@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -49,6 +50,15 @@ EmptyMonth read_empty_month(std::string_view yyyy, std::string_view mm);
 // 月内空标记写回 (atomic_write); 自动按 itf / DD 排序输出, 跳过空 set.
 void write_empty_month(std::string_view yyyy, std::string_view mm,
                        const EmptyMonth &data);
+
+// 在 [start, end] 范围内更新 name 的 _empty.json (按月聚合后单次刷盘).
+//   - has_data(d) → set 中移除 dd
+//   - 否则 → 检查 day_data_path 是否存在; 不存在则加入 set, 存在则移除
+//   - 跨月自动按月分桶, 末端一次性 write_empty_month
+// 调用方在写完所有 day file 后调一次即可.
+void update_empty_for_range(std::string_view name, std::string_view start,
+                            std::string_view end,
+                            const std::function<bool(const std::string &)> &has_data);
 
 // ============================================================================
 // 单 itf lastupdate 去重 (内容 = unix epoch seconds 文本)

@@ -1,6 +1,5 @@
 #include "api/tushare/store.hpp"
 
-#include "misc/date.hpp"
 #include "misc/fs.hpp"
 #include "misc/store.hpp"
 
@@ -13,9 +12,9 @@
 #include <utility>
 #include <vector>
 
-namespace tushare::store {
-
 namespace fs = std::filesystem;
+
+namespace tushare::store {
 
 namespace {
 
@@ -124,15 +123,17 @@ void write_day(const InterfaceSpec &spec, const std::string &day,
 
 } // namespace
 
-std::vector<std::string> scan_missing(const InterfaceSpec &spec,
-                                      std::string_view start,
-                                      std::string_view end,
-                                      int lookback_days) {
-  return misc::store::scan_missing_days(spec.name, start, end, lookback_days);
-}
+void write_by_visible_date(yyjson_doc *doc, const InterfaceSpec &spec,
+                           const FetchTask &task) {
+  // ---- 解 envelope: root.data.fields / root.data.items ----
+  yyjson_val *root = yyjson_doc_get_root(doc);
+  yyjson_val *data = yyjson_obj_get(root, "data");
+  assert(data && "tushare response missing 'data'");
+  yyjson_val *fields_arr = yyjson_obj_get(data, "fields");
+  yyjson_val *items_arr = yyjson_obj_get(data, "items");
+  assert(fields_arr && items_arr && yyjson_is_arr(fields_arr) &&
+         yyjson_is_arr(items_arr));
 
-void write_by_visible_date(yyjson_val *fields_arr, yyjson_val *items_arr,
-                           const InterfaceSpec &spec, const FetchTask &task) {
   // ---- 解析 fields → vd_idxs / pk_idxs / drop_idxs ----
   std::vector<std::string> field_names;
   size_t fn = yyjson_arr_size(fields_arr);
@@ -198,38 +199,19 @@ void write_by_visible_date(yyjson_val *fields_arr, yyjson_val *items_arr,
     by_day[vd].push_back(item);
   }
 
-  // ---- 写 day file + 维护 _empty.json ----
-  // (yyyy_mm → 最终 EmptyMonth) — 末端统一 flush
-  std::unordered_map<std::string, misc::store::EmptyMonth> dirty_months;
-  auto days = misc::iter_days(task.start, task.end);
-  for (auto &d : days) {
-    auto it = by_day.find(d);
-    bool has_data = (it != by_day.end()) && !it->second.empty();
-    if (has_data) {
-      write_day(spec, d, field_names, pk_idxs, drop_idxs, it->second);
-    }
-    bool day_exists =
-        has_data || fs::exists(misc::store::day_data_path(d, spec.name));
-    std::string yyyy = d.substr(0, 4);
-    std::string mm = d.substr(4, 2);
-    std::string dd = d.substr(6, 2);
-    std::string ym = yyyy + mm;
-    auto mit = dirty_months.find(ym);
-    if (mit == dirty_months.end()) {
-      mit = dirty_months
-                .emplace(ym, misc::store::read_empty_month(yyyy, mm))
-                .first;
-    }
-    misc::store::EmptySet &set = mit->second[spec.name];
-    if (day_exists)
-      set.erase(dd);
-    else
-      set.insert(dd);
+  // ---- 写 day file ----
+  for (auto &[d, items_today] : by_day) {
+    if (items_today.empty())
+      continue;
+    write_day(spec, d, field_names, pk_idxs, drop_idxs, items_today);
   }
 
-  for (auto &[ym, month] : dirty_months) {
-    misc::store::write_empty_month(ym.substr(0, 4), ym.substr(4, 2), month);
-  }
+  // ---- 维护 _empty.json ([task.start, task.end] 全 days) ----
+  misc::store::update_empty_for_range(
+      spec.name, task.start, task.end, [&](const std::string &d) {
+        auto it = by_day.find(d);
+        return it != by_day.end() && !it->second.empty();
+      });
 }
 
 } // namespace tushare::store

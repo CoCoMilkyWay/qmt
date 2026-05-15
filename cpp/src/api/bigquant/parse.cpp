@@ -142,36 +142,37 @@ std::string array_value_to_string(const arrow::Array &a, int64_t i) {
 }
 
 // ============================================================================
+// ChunkLoc — 行式定位 (declared in parse.hpp)
+// ============================================================================
+
+void ChunkLoc::build(const arrow::ChunkedArray &c) {
+  offsets.clear();
+  offsets.reserve(c.num_chunks() + 1);
+  int64_t acc = 0;
+  offsets.push_back(0);
+  for (int k = 0; k < c.num_chunks(); ++k) {
+    acc += c.chunk(k)->length();
+    offsets.push_back(acc);
+  }
+}
+
+std::pair<int, int64_t> ChunkLoc::locate(int64_t row) const {
+  int lo = 0, hi = static_cast<int>(offsets.size()) - 1;
+  while (lo + 1 < hi) {
+    int mid = (lo + hi) / 2;
+    if (offsets[mid] <= row)
+      lo = mid;
+    else
+      hi = mid;
+  }
+  return {lo, row - offsets[lo]};
+}
+
+// ============================================================================
 // 行式落盘共用 helpers
 // ============================================================================
 
 namespace {
-
-// row_idx (全表) → 该 row 对应 chunked_array 的 (chunk_idx, in_chunk_idx)
-struct ChunkLoc {
-  std::vector<int64_t> offsets; // size = num_chunks + 1
-  void build(const arrow::ChunkedArray &c) {
-    offsets.clear();
-    offsets.reserve(c.num_chunks() + 1);
-    int64_t acc = 0;
-    offsets.push_back(0);
-    for (int k = 0; k < c.num_chunks(); ++k) {
-      acc += c.chunk(k)->length();
-      offsets.push_back(acc);
-    }
-  }
-  std::pair<int, int64_t> locate(int64_t row) const {
-    int lo = 0, hi = static_cast<int>(offsets.size()) - 1;
-    while (lo + 1 < hi) {
-      int mid = (lo + hi) / 2;
-      if (offsets[mid] <= row)
-        lo = mid;
-      else
-        hi = mid;
-    }
-    return {lo, row - offsets[lo]};
-  }
-};
 
 // 构造单行 obj: 每列调 array_value_to_json + obj_add (key 拷贝, 解耦 table 生命周期)
 yyjson_mut_val *build_row_obj(yyjson_mut_doc *doc,

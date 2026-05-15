@@ -120,6 +120,32 @@ void write_empty_month(std::string_view yyyy, std::string_view mm,
   yyjson_mut_doc_free(doc);
 }
 
+void update_empty_for_range(std::string_view name, std::string_view start,
+                            std::string_view end,
+                            const std::function<bool(const std::string &)> &has_data) {
+  std::unordered_map<std::string, EmptyMonth> dirty_months;
+  std::string name_s(name);
+  for (auto &d : iter_days(start, end)) {
+    bool data = has_data(d);
+    bool day_exists = data || fs::exists(day_data_path(d, name));
+    std::string yyyy = d.substr(0, 4);
+    std::string mm = d.substr(4, 2);
+    std::string dd = d.substr(6, 2);
+    std::string ym = yyyy + mm;
+    auto it = dirty_months.find(ym);
+    if (it == dirty_months.end())
+      it = dirty_months.emplace(ym, read_empty_month(yyyy, mm)).first;
+    EmptySet &set = it->second[name_s];
+    if (day_exists)
+      set.erase(dd);
+    else
+      set.insert(dd);
+  }
+  for (auto &[ym, month] : dirty_months) {
+    write_empty_month(ym.substr(0, 4), ym.substr(4, 2), month);
+  }
+}
+
 // ============================================================================
 // lastupdate 去重
 // ============================================================================
