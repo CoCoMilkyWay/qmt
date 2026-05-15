@@ -41,7 +41,8 @@ Tensor build(Axes &out_axes, StockMeta &out_meta) {
   // ---- 验证: 契约级 bool feature 必须全 finite (raw/factor 列可 NaN, 不校验) ----
   {
     misc::Timer t("[feature] phase 4 assert_finite");
-    for (F f : ::config::NO_NAN_FEATURES) T.assert_finite(f);
+    for (F f : ::config::BUILD_NO_NAN_FEATURES)
+      T.assert_finite(f);
   }
 
   return T;

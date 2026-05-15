@@ -12,10 +12,10 @@ int main() {
   std::string today = misc::today_yyyymmdd();
 
   bigquant::update(::config::PIPELINE_START_DATE, today, bigquant::SPECS,
-                   ::config::LOOKBACK_DAYS);
+                   ::config::PIPELINE_LOOKBACK_DAYS);
 
   tushare::update(::config::PIPELINE_START_DATE, today, tushare::SPECS,
-                  ::config::LOOKBACK_DAYS);
+                  ::config::PIPELINE_LOOKBACK_DAYS);
 
   return 0;
 }

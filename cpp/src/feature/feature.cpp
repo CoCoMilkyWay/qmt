@@ -768,7 +768,8 @@ void ts_pool_b(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
   auto out = T.ts_row(F::pool_b, a);
   bool ex_ok = in_whitelist(meta.exchange[a], ::config::POOL_EXCHANGE_WHITELIST);
   bool mk_ok = in_whitelist(meta.market[a], ::config::POOL_MARKET_WHITELIST);
-  bool ind_ok = in_whitelist(meta.industry_l1[a], ::config::POOL_INDUSTRY_L1_WHITELIST);
+  bool ind_ok =
+      in_whitelist(meta.industry_l1[a], ::config::POOL_INDUSTRY_L1_WHITELIST);
   bool asset_ok = ex_ok && mk_ok && ind_ok;
   constexpr bool incl_margin = ::config::POOL_INCLUDE_MARGIN;
   for (int d = 0; d < n_d; ++d) {
@@ -816,7 +817,7 @@ void cs_dy_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
   factor_pipeline(d, F::dy_raw, F::dy_ttm4, false, T, b.a);
 }
 
-// pool: pool_b ∧ rank(mcap_raw asc within pool_b) ≤ UNIVERSE_SIZE
+// pool: pool_b ∧ rank(mcap_raw asc within pool_b) ≤ POOL_UNIVERSE_SIZE
 void cs_pool(int d, const Axes &, Tensor &T, CsBufs &b) {
   T.gather_cs_row(F::pool_b, d, b.a);
   T.gather_cs_row(F::mcap_raw, d, b.b);
@@ -833,7 +834,7 @@ void cs_pool(int d, const Axes &, Tensor &T, CsBufs &b) {
   }
 
   int n = static_cast<int>(cands.size());
-  int k = std::min(::config::UNIVERSE_SIZE, n);
+  int k = std::min(::config::POOL_UNIVERSE_SIZE, n);
   if (k > 0) {
     std::nth_element(cands.begin(), cands.begin() + k, cands.end(),
                      [](const auto &x, const auto &y) { return x.first < y.first; });
@@ -845,14 +846,14 @@ void cs_pool(int d, const Axes &, Tensor &T, CsBufs &b) {
   T.scatter_cs_row(F::pool, d, std::span<const float>(b.c.data(), b.c.size()));
 }
 
-// tradable: pool ∧ ¬OR(config::ENABLED_FILTERS).
+// tradable: pool ∧ ¬OR(config::STRATEGY_ENABLED_FILTERS).
 //   pool 是 cs (pct_rank / nth-smallest 母集), tradable 是策略实际 top-K 母集.
 //   filter 子集集中在 config.hpp; 删一行即禁用该 filter.
 void cs_tradable(int d, const Axes &, Tensor &T, CsBufs &b) {
   T.gather_cs_row(F::pool, d, b.a);
   std::size_t na = b.a.size();
 
-  for (F src : ::config::ENABLED_FILTERS) {
+  for (F src : ::config::STRATEGY_ENABLED_FILTERS) {
     T.gather_cs_row(src, d, b.b);
     for (std::size_t a = 0; a < na; ++a) {
       if (b.b[a] > 0.5f)
@@ -873,7 +874,7 @@ void cs_factor_score(int d, const Axes &, Tensor &T, CsBufs &b) {
   std::fill(b.a.begin(), b.a.end(), 0.0f);
   std::fill(b.b.begin(), b.b.end(), 0.0f);
 
-  for (const auto &fw : ::config::FACTOR_WEIGHTS) {
+  for (const auto &fw : ::config::STRATEGY_FACTOR_WEIGHTS) {
     T.gather_cs_row(fw.f, d, b.c);
     for (std::size_t a = 0; a < na; ++a) {
       float v = b.c[a];

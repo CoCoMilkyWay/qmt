@@ -75,7 +75,7 @@ float pearson_masked(const float *x, const float *y, int n,
 }
 
 // 当日 top-K (within pool, finite score) 集合 (升序 a 索引数组).
-//   K = BT_HOLD_N; 不足 K 时返回所有可用. score 用于排序.
+//   K = BACKTEST_HOLD_N; 不足 K 时返回所有可用. score 用于排序.
 void compute_top_k(const float *score, const float *pool_mask, int n,
                    int K, std::vector<int> &out) {
   out.clear();
@@ -142,8 +142,8 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
     }
   }
   int n_factor = static_cast<int>(factors.size());
-  int Q = ::config::N_QUANTILES;
-  int K = ::config::BT_HOLD_N;
+  int Q = ::config::ANALYSIS_N_QUANTILES;
+  int K = ::config::BACKTEST_HOLD_N;
 
   // ---- 输出缓冲 ------------------------------------------------------------
   std::vector<std::int32_t> dates_out(n_d_bt);

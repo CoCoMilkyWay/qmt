@@ -64,13 +64,15 @@ Http::call(std::string_view api_name,
       net::io_context ioc;
       tcp::resolver resolver(ioc);
       beast::tcp_stream stream(ioc);
-      stream.expires_after(std::chrono::seconds(::config::HTTP_TIMEOUT_SECONDS));
+      stream.expires_after(
+          std::chrono::seconds(::config::TUSHARE_HTTP_TIMEOUT_SECONDS));
 
-      auto results = resolver.resolve(::config::API_HOST, ::config::API_PORT);
+      auto results = resolver.resolve(::config::TUSHARE_HTTP_HOST,
+                                      ::config::TUSHARE_HTTP_PORT);
       stream.connect(results);
 
       http::request<http::string_body> req{http::verb::post, "/", 11};
-      req.set(http::field::host, ::config::API_HOST);
+      req.set(http::field::host, ::config::TUSHARE_HTTP_HOST);
       req.set(http::field::user_agent, "qmt-tushare/1.0");
       req.set(http::field::content_type, "application/json");
       req.body() = body;
@@ -89,11 +91,11 @@ Http::call(std::string_view api_name,
       res_body = std::move(res.body());
     } catch (const boost::system::system_error &e) {
       std::cerr << "\n[http] transient error (attempt " << (attempt + 1) << "/"
-                << (::config::HTTP_RETRY_MAX + 1) << ") api=" << api_name
+                << (::config::TUSHARE_HTTP_RETRY_MAX + 1) << ") api=" << api_name
                 << ": " << e.what() << std::endl;
-      assert(attempt < ::config::HTTP_RETRY_MAX);
+      assert(attempt < ::config::TUSHARE_HTTP_RETRY_MAX);
       std::this_thread::sleep_for(
-          std::chrono::seconds(::config::HTTP_RETRY_INTERVAL_SECONDS));
+          std::chrono::seconds(::config::TUSHARE_HTTP_RETRY_INTERVAL_SECONDS));
       continue;
     }
 
@@ -118,13 +120,13 @@ Http::call(std::string_view api_name,
     // 40203 = 频率超限 (e.g. "访问接口(income_vip)频率超限(400次/分钟)")，等 1 分钟窗口刷新即可恢复
     if (code == 40203) {
       std::cerr << "\n[http] rate limit (attempt " << (attempt + 1) << "/"
-                << (::config::HTTP_RETRY_MAX + 1) << ") api=" << api_name
+                << (::config::TUSHARE_HTTP_RETRY_MAX + 1) << ") api=" << api_name
                 << ": " << msg << std::endl;
       yyjson_doc_free(doc);
       doc = nullptr;
-      assert(attempt < ::config::HTTP_RETRY_MAX);
+      assert(attempt < ::config::TUSHARE_HTTP_RETRY_MAX);
       std::this_thread::sleep_for(
-          std::chrono::seconds(::config::HTTP_RETRY_INTERVAL_SECONDS));
+          std::chrono::seconds(::config::TUSHARE_HTTP_RETRY_INTERVAL_SECONDS));
       continue;
     }
     std::cerr << "Tushare API error: code=" << code << " msg=" << msg

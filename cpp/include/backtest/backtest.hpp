@@ -13,12 +13,12 @@ namespace backtest {
 //
 // 配置 (来自 config.hpp):
 //   - BACKTEST_START_DATE (右端点固定为 axes 最新日)
-//   - BT_HOLD_N / BT_EXIT_RATIO / BT_CAPITAL_BASE
-//   - BT_BUY_COST / BT_SELL_COST / BT_MIN_COST / BT_PRICE_LIMIT_EPS
+//   - BACKTEST_HOLD_N / BACKTEST_EXIT_RATIO / BACKTEST_CAPITAL_BASE
+//   - BACKTEST_BUY_COST / BACKTEST_SELL_COST / BACKTEST_MIN_COST / BACKTEST_PRICE_LIMIT_EPS
 //
 // 输出 (写到 <git_root>/output/backtest/):
 //   - dates.npy              [n_d_bt] int32  (axes.dates 全局索引)
-//   - strategy_nav.npy       [n_d_bt] float32 (策略净值, 起点 = BT_CAPITAL_BASE)
+//   - strategy_nav.npy       [n_d_bt] float32 (策略净值, 起点 = BACKTEST_CAPITAL_BASE)
 //   - pool_nav.npy           [n_d_bt] float32 (pool 内等权 benchmark, 起点同)
 //   - position_count.npy     [n_d_bt] int32  (持仓股票数)
 //   - position_pct.npy       [n_d_bt] float32 (持仓市值 / 组合市值)

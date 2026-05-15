@@ -35,7 +35,7 @@ using feature::is_finite;
 // ---- helpers ---------------------------------------------------------------
 
 // 读"契约 bool" feature: 必 finite + ∈ {0, 1}. 任一违背 → assert fail (定位污染源).
-//   适用: tradable / pool / susp / limit_up / limit_dn 等 NO_NAN_FEATURES 子集.
+//   适用: tradable / pool / susp / limit_up / limit_dn 等 BUILD_NO_NAN_FEATURES 子集.
 //   raw / factor / daily_return 等可 NaN 列禁用此 helper.
 inline bool read_bool(const feature::Tensor &T, F f, int a, int d) {
   float v = T.at(f, a, d);
@@ -128,7 +128,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
 
   // ---- 状态 ----------------------------------------------------------------
   std::unordered_map<int, double> holdings; // a → shares (float 仓位, 不取整)
-  double cash = ::config::BT_CAPITAL_BASE;
+  double cash = ::config::BACKTEST_CAPITAL_BASE;
   std::vector<float> last_close(static_cast<std::size_t>(n_a),
                                 std::nanf("")); // mark-to-market 兜底
 
@@ -144,9 +144,9 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   std::vector<std::int32_t> hold_codes;
   std::vector<float> hold_weights;
   std::vector<std::string> hold_names; // 与 hold_codes 同序, PIT 名 (当日 namechange 切段)
-  hold_codes.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BT_HOLD_N);
-  hold_weights.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BT_HOLD_N);
-  hold_names.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BT_HOLD_N);
+  hold_codes.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BACKTEST_HOLD_N);
+  hold_weights.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BACKTEST_HOLD_N);
+  hold_names.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BACKTEST_HOLD_N);
 
   // 成交 (open-close 配对)
   struct OpenRec {
@@ -173,7 +173,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   };
 
   // pool benchmark NAV
-  double pool_nav_d = ::config::BT_CAPITAL_BASE;
+  double pool_nav_d = ::config::BACKTEST_CAPITAL_BASE;
 
   // ---- 主循环 --------------------------------------------------------------
   for (int i = 0; i < n_d_bt; ++i) {
@@ -219,7 +219,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
                   axes.dates[static_cast<std::size_t>(rec_it->second.open_d)].c_str(),
                   open_px, c, pnl_pct);
       double proceeds = it->second * static_cast<double>(c) *
-                        (1.0 - ::config::BT_SELL_COST);
+                        (1.0 - ::config::BACKTEST_SELL_COST);
       cash += proceeds;
       close_trade(a, d, rec_it->second, c);
       open_recs.erase(rec_it);
@@ -241,7 +241,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     //   factor_score 在 pool 外是 NaN (按 cs_factor_score 契约), 跳过即可;
     //   pool 内全 factor 缺时也可能 NaN (理论上 pool 已保 mcap_raw finite → 不应触发).
     std::vector<std::pair<float, int>> cands;
-    cands.reserve(::config::UNIVERSE_SIZE);
+    cands.reserve(::config::POOL_UNIVERSE_SIZE);
     for (int a = 0; a < n_a; ++a) {
       if (!read_bool(T, F::tradable, a, d)) continue;
       float s = T.at(F::factor_score, a, d);
@@ -251,11 +251,11 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     std::sort(cands.begin(), cands.end(),
               [](const auto &x, const auto &y) { return x.first > y.first; });
 
-    int hold_n = ::config::BT_HOLD_N;
+    int hold_n = ::config::BACKTEST_HOLD_N;
     int n_top = std::min(hold_n, static_cast<int>(cands.size()));
     int n_top_exit =
         std::min(static_cast<int>(static_cast<float>(hold_n) *
-                                  ::config::BT_EXIT_RATIO),
+                                  ::config::BACKTEST_EXIT_RATIO),
                  static_cast<int>(cands.size()));
     if (n_top_exit > static_cast<int>(cands.size()))
       n_top_exit = static_cast<int>(cands.size());
@@ -310,7 +310,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
       if (susp || !is_finite(c)) continue; // 失败: 停牌或无价
       double sh = holdings[a];
       double proceeds = sh * static_cast<double>(c) *
-                        (1.0 - ::config::BT_SELL_COST);
+                        (1.0 - ::config::BACKTEST_SELL_COST);
       cash += proceeds;
       holdings.erase(a);
       ++n_sell_ok;
@@ -324,7 +324,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     // buys: sells 后再平衡逻辑 (合理降低交易次数).
     //   1. pv_after = cash + mv_kept (sells 后总组合市值; intended_buy 此时尚未执行).
     //      target_per_slot = pv_after / HOLD_N (作为含费总支出, 持仓权重 ≈ 1/HOLD_N,
-    //      由 BUY_COST 折损; 可忽略). rebal_thd = BT_REBALANCE_THD × pv_after.
+    //      由 BUY_COST 折损; 可忽略). rebal_thd = BACKTEST_REBALANCE_THRESHOLD × pv_after.
     //   2. initial buy: 每个 intended_buy 至多花 target_per_slot, 不强行用完 cash.
     //      原 intended_buy 已在 (4) 过滤 limit_up/dn; close 兜底.
     //   3. 再平衡: 现有持仓 (kept + 新 buy) 中 deficit ≥ rebal_thd 的, 按 deficit
@@ -341,14 +341,14 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
       double pv_after = cash + mv_kept;
       double target_per_slot = pv_after / static_cast<double>(hold_n);
       double rebal_thd =
-          static_cast<double>(::config::BT_REBALANCE_THD) * pv_after;
+          static_cast<double>(::config::BACKTEST_REBALANCE_THRESHOLD) * pv_after;
 
       for (int a : intended_buy) {
         if (cash <= 0.0) break;
         float c = last_close[static_cast<std::size_t>(a)];
         if (!is_finite(c) || c <= 0.0f) continue;
         double cost_money = std::min(target_per_slot, cash);
-        double net = cost_money / (1.0 + ::config::BT_BUY_COST);
+        double net = cost_money / (1.0 + ::config::BACKTEST_BUY_COST);
         double sh = net / static_cast<double>(c);
         if (sh <= 0.0) continue;
         cash -= cost_money;
@@ -385,7 +385,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
         for (const auto &dd : defs) {
           if (cash <= 0.0) break;
           double cost_money = std::min(dd.def, cash);
-          double net = cost_money / (1.0 + ::config::BT_BUY_COST);
+          double net = cost_money / (1.0 + ::config::BACKTEST_BUY_COST);
           double sh_add = net / static_cast<double>(dd.c);
           if (sh_add <= 0.0) continue;
           cash -= cost_money;
@@ -440,7 +440,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     pos_pct[i] = static_cast<float>(mv_end / pv_end);
     int trades_today = n_sell_ok + n_buy_ok + n_rebal_add;
     turnover[i] = static_cast<float>(trades_today) /
-                  static_cast<float>(::config::BT_HOLD_N);
+                  static_cast<float>(::config::BACKTEST_HOLD_N);
     int n_susp_h = 0;
     for (auto &kv : holdings) {
       if (read_bool(T, F::susp, kv.first, d)) ++n_susp_h;

@@ -92,13 +92,13 @@ void update(std::string_view start, std::string_view end,
 
   std::cout << "[bigquant.update] " << start << " ~ " << end << " ("
             << specs.size() << " tables, lookback=" << lookback_days
-            << "d, dedup=" << ::config::API_DEDUP_WINDOW_SECONDS
+            << "d, dedup=" << ::config::PIPELINE_DEDUP_WINDOW_SECONDS
             << "s, max_seg=" << ::config::BIGQUANT_FETCH_MAX_DAYS_PER_CALL
             << "d)" << std::endl;
 
   for (const auto &spec : specs) {
     if (misc::store::should_skip_api(spec.name,
-                                     ::config::API_DEDUP_WINDOW_SECONDS)) {
+                                     ::config::PIPELINE_DEDUP_WINDOW_SECONDS)) {
       std::cout << "\n[" << spec.name << "] skip (recently updated)"
                 << std::endl;
       continue;

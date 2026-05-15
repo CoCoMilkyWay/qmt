@@ -23,7 +23,7 @@ qmt/
 │   │   │   │   ├── https.hpp        # boost.beast over OpenSSL (走 443 控制面)
 │   │   │   │   ├── signer.hpp       # HMAC-SHA256 控制面签名
 │   │   │   │   ├── dai.hpp          # DaiClient (whoami / get_datasource_schema / query → arrow::Table)
-│   │   │   │   ├── parse.hpp        # arrow::Table → yyjson 列式 JSON (整表 / 行子集)
+│   │   │   │   ├── parse.hpp        # arrow::Table → yyjson 行式 JSON (整表 / 行子集)
 │   │   │   │   ├── spec.hpp         # 26 张表 TableSpec (Static / Partition / Where × Day / MonthFirst, 内含 PK)
 │   │   │   │   ├── store.hpp        # write_table_by_visible_date (PK upsert + _empty.json) / write_meta_table
 │   │   │   │   └── pipeline.hpp     # scan → plan → fetch (DAI) → write
@@ -61,8 +61,8 @@ qmt/
 │           └── DD/<name>.json       # 仅在该天有数据时存在 (PK 唯一, 路径 = visible_date)
 │                                    # 三态: file 存在 / 在 _empty / 都不在 = 有数据 / 拉过空 / 未拉
 │                                    #
-│                                    # 26 张表 (全 JSON, 内部 layout 按 itf 自定):
-│                                    #   BigQuant 23 (DAI Arrow Flight → arrow::Table → 列式 JSON):
+│                                    # 26 张表 (全 JSON, 统一行式: [{col1:v,col2:v,...}, ...] 一行一记录, 人眼可读):
+│                                    #   BigQuant 23 (DAI Arrow Flight → arrow::Table → 行式 JSON):
 │                                    #     cn_stock_instruments,
 │                                    #     cn_stock_industry_component (★ 月初一份), cn_stock_industry_change,
 │                                    #     cn_stock_industry_bar1d, cn_stock_industry_valuation,
@@ -130,7 +130,7 @@ qmt/
 `<vd>` = `TableSpec::visible_date` — Static 为空, Partition 通常是 `date`, Where 通常是 `publish_date` / `end_date`. Tushare 走 HTTP+JSON, 各表自带 `ann_date` 字段作 visible_date.
 
 **落地** (按 `visible_date` 切日)
-- 路径 `data/YYYY/MM/DD/<name>.json` — 日历日切分 (周末/节假日同样写盘); BigQuant 走 DAI Arrow Flight → `arrow::Table` → 列式 JSON (`parse.hpp::table_to_json`) 序列化落盘, Tushare 走 HTTP+JSON 行式响应直落. 表名互不冲突, 同目录共存.
+- 路径 `data/YYYY/MM/DD/<name>.json` — 日历日切分 (周末/节假日同样写盘); 全表统一**行式**落盘 (`[{col1:v, col2:v, ...}, ...]` 一行一记录, 人眼可读). BigQuant 走 DAI Arrow Flight → `arrow::Table` → `parse.hpp::table_to_json` (按 row 出 obj 序列化), Tushare 走 HTTP+JSON 直落. 表名互不冲突, 同目录共存.
 - axis + 静态 (单文件): `data/_meta/{trading_days, holidays, cn_stock_basic_info}.json` 不走 per-day, 每次 update 覆盖刷新.
 - **完整性设计** (BigQuant / Tushare 完全沿用同一套, `store.hpp` 平行实现):
   - **PK upsert** (同次响应): 同 PK 同次响应末条胜, PK 因 itf 而异 (见 `cpp/src/api/{bigquant,tushare}/spec.cpp`).
@@ -311,9 +311,8 @@ Phase 1 PIT load  (per-(day, itf) 并行; load.cpp 通用 flow + pit.cpp 单点 
   # 形态: 文件级, 任务粒度 = (day, itf). 文件之间无依赖 → 任务池抢占式分发.
   # 关键: cutoff 在此 一次性 落到 row 索引, 写后 pool[a, d] 即 "T 当日合法可见数据"; 下游 0 时间偏移.
   # 并发: 网格 itf 写入完全无锁 (slot 唯一); 事件 itf 仅 per-A mutex 锁 emplace, 争用接近 0.
-  # 编码: 全部走 yyjson_read; BigQuant itf 列式 (obj-of-arrays, 列数组直扫填 PitPool 网格),
-  #       Tushare itf 行式 (array-of-objs, 行迭代 emplace 事件 / 网格).
-  #       itf.parse 在自身 namespace 决定如何解码, 外层 flow 不感知 layout.
+  # 编码: 全部走 yyjson_read, 统一行式 (array-of-objs); 行迭代 emplace 事件 / 网格.
+  #       itf.parse 在自身 namespace 决定字段映射, 外层 flow 不感知 schema.
 
   for itf in pit.cpp::ITFS[]:                # 仅迭代 ITFS[] 表, 不出现具体 itf 名
     itf.prealloc(axes, pool)                 # 网格: 字段 vector A*D NaN/0; 事件: EventStore[A] 空链
@@ -324,7 +323,7 @@ Phase 1 PIT load  (per-(day, itf) 并行; load.cpp 通用 flow + pit.cpp 单点 
     skip if 网格 itf ∧ file's day ∉ axes.date_idx   # 网格 file's day 须为交易日 (data 自身保证)
 
   parallel for task in tasks (n_threads = misc::Affinity::core_count()):
-    rec ← task.itf.read(task.path)           # json → yyjson_val (列式 obj-of-arrays 或 行式 array-of-objs 由 itf 自定)
+    rec ← task.itf.read(task.path)           # json → yyjson_val (行式 array-of-objs, 顶层 yyjson_arr)
     task.itf.parse(rec, v_idx, axes, pool, mu_or_null)
                                              # row = v_idx - itf::CUTOFF
                                              #   (CUTOFF=0 → row=v_idx; CUTOFF=-1 → row=v_idx+1; row≥n_d 越界 skip)
@@ -427,9 +426,9 @@ Phase 3 截面  (per-D 并行; cs.cpp 通用 flow + feature.cpp 单点 feature �
 ## 增减用法 (改计算图 / 字段表)
 
 新增/修改/删除一个 itf:
-1. `cpp/include/api/{bigquant,tushare}/spec.hpp`: 在 `SPECS[]` 末尾追加 spec (BigQuant 的 `TableSpec{name, visible_date, FetchKind, FetchFreq, Category}` / Tushare 的 spec).
+1. `cpp/include/api/{bigquant,tushare}/spec.hpp`: 在 `SPECS[]` 末尾追加 spec (BigQuant 的 `TableSpec{name, visible_date, FetchKind, FetchFreq, Category, pk}` / Tushare 的 `InterfaceSpec`).
 2. `cpp/include/feature/pit.hpp`: 加/改 typed `Grid<…>` / `<…>Ev` struct, 在 `PitPool` 加成员.
-3. `cpp/src/feature/pit.cpp`: 加 `namespace itf_<name> { prealloc, parse, [post_sort, post_ffill] }` 一组 dense block; BigQuant itf 从 `yyjson_val` 列数组读列 (obj-of-arrays), Tushare itf 从 `yyjson_val arr` 读 record (array-of-objs).
+3. `cpp/src/feature/pit.cpp`: 加 `namespace itf_<name> { prealloc, parse, [post_sort, post_ffill] }` 一组 dense block; 统一从 `yyjson_val arr` (行式 array-of-objs) 行迭代读 record.
 4. `cpp/src/feature/pit.cpp`: `ITFS[]` 末尾追加一行.
    外层 `load.cpp` / `build.cpp` 不动.
 

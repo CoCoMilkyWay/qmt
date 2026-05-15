@@ -1,7 +1,7 @@
 #include "api/tushare/spec.hpp"
+#include "api/tushare/http.hpp"
 #include "config.hpp"
 #include "misc/date.hpp"
-#include "api/tushare/http.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -110,12 +110,12 @@ const std::vector<InterfaceSpec> SPECS = {
      "forecast_vip",
      {"ann_date"},
      {"ts_code", "end_date"},
-     std::make_shared<RangeStrategy>(::config::FETCH_MAX_DAYS_PER_CALL)},
+     std::make_shared<RangeStrategy>(::config::TUSHARE_FETCH_MAX_DAYS_PER_CALL)},
     {"express",
      "express_vip",
      {"ann_date"},
      {"ts_code", "end_date"},
-     std::make_shared<RangeStrategy>(::config::FETCH_MAX_DAYS_PER_CALL)},
+     std::make_shared<RangeStrategy>(::config::TUSHARE_FETCH_MAX_DAYS_PER_CALL)},
     {"disclosure",
      "disclosure_date",
      {"ann_date"},

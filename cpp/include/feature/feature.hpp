@@ -91,10 +91,10 @@ enum class F : int {
   dy_ttm4,
 
   // pool (CS) — universe 母集
-  pool,     // pool_b ∧ rank(mcap_raw asc) ≤ UNIVERSE_SIZE
-  tradable, // pool ∧ ¬(filter OR), filter 列表 = config::ENABLED_FILTERS
+  pool,     // pool_b ∧ rank(mcap_raw asc) ≤ POOL_UNIVERSE_SIZE
+  tradable, // pool ∧ ¬(filter OR), filter 列表 = config::STRATEGY_ENABLED_FILTERS
 
-  // 加权合成因子分数 (限定 pool 内输出, 配置见 config::FACTOR_WEIGHTS):
+  // 加权合成因子分数 (限定 pool 内输出, 配置见 config::STRATEGY_FACTOR_WEIGHTS):
   //   factor_score[a, d] = Σ w_f · factor_f[a, d] / Σ w_f · 1{is_finite(factor_f[a, d])}
   //   pool[a, d] != 1 → NaN; 全 factor 缺 → NaN; 范围近似 [0, 1] (各 factor 已 pct_rank)
   factor_score,

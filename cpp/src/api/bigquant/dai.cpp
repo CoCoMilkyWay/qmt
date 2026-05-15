@@ -24,8 +24,6 @@ namespace flight = arrow::flight;
 
 namespace {
 
-inline constexpr const char *kFlightUri = "grpc+tcp://bigquant.com:17010";
-inline constexpr int kGrpcMaxMetadataSize = 16 * 1024 * 1024; // 16 MiB, 与 SDK 一致
 inline constexpr const char *kSchemaPathFmt = "/bigapis/data/v1/spacedatasources/spaces/{space}/datasources/{id}";
 
 // 简化字符串模板 — 仅替换 "{space}" 和 "{id}" 两个占位符.
@@ -109,14 +107,16 @@ void DaiClient::ensure_flight() {
   if (flight_)
     return;
 
-  arrow::Result<flight::Location> loc_r = flight::Location::Parse(kFlightUri);
+  arrow::Result<flight::Location> loc_r =
+      flight::Location::Parse(::config::BIGQUANT_FLIGHT_URI);
   flight::Location loc = unwrap(std::move(loc_r), "Location::Parse");
 
   flight::FlightClientOptions opts = flight::FlightClientOptions::Defaults();
   // grpc.max_metadata_size: 与 SDK 一致 (默认 8KB 会被 JWT + custom headers 撑爆).
   opts.generic_options.emplace_back(
       std::string("grpc.max_metadata_size"),
-      std::variant<int, std::string>(static_cast<int>(kGrpcMaxMetadataSize)));
+      std::variant<int, std::string>(static_cast<int>(
+          ::config::BIGQUANT_FLIGHT_GRPC_MAX_METADATA_SIZE)));
 
   auto client_r = flight::FlightClient::Connect(loc, opts);
   flight_ = unwrap(std::move(client_r), "FlightClient::Connect");

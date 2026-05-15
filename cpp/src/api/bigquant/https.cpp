@@ -1,6 +1,7 @@
 #include "api/bigquant/https.hpp"
 
 #include "api/bigquant/signer.hpp"
+#include "config.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -28,12 +29,6 @@ using tcp = boost::asio::ip::tcp;
 
 namespace {
 
-inline constexpr const char *kHost = "bigquant.com";
-inline constexpr const char *kPort = "443";
-inline constexpr int kTimeoutSec = 30;
-inline constexpr int kRetryMax = 4; // 5 次尝试
-inline constexpr int kRetryIntervalSec = 5;
-
 // 单次请求 (一次性 TLS 握手 + read/write). 不带重试 / 校验, 仅作为 retry 上层的最小单元.
 std::pair<int, std::string> request_once(http::verb verb, std::string_view path,
                                          std::string_view body,
@@ -48,17 +43,20 @@ std::pair<int, std::string> request_once(http::verb verb, std::string_view path,
   beast::ssl_stream<beast::tcp_stream> stream(ioc, ctx);
 
   // SNI — 缺则握手报 SSL: alert handshake failure
-  bool sni_ok = ::SSL_set_tlsext_host_name(stream.native_handle(), kHost);
+  bool sni_ok = ::SSL_set_tlsext_host_name(stream.native_handle(),
+                                           ::config::BIGQUANT_HTTPS_HOST);
   assert(sni_ok && "SSL_set_tlsext_host_name failed");
 
-  auto results = resolver.resolve(kHost, kPort);
-  beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(kTimeoutSec));
+  auto results = resolver.resolve(::config::BIGQUANT_HTTPS_HOST,
+                                  ::config::BIGQUANT_HTTPS_PORT);
+  beast::get_lowest_layer(stream).expires_after(
+      std::chrono::seconds(::config::BIGQUANT_HTTPS_TIMEOUT_SECONDS));
   beast::get_lowest_layer(stream).connect(results);
   stream.handshake(ssl::stream_base::client);
 
   std::string target(path);
   http::request<http::string_body> req{verb, target, 11};
-  req.set(http::field::host, kHost);
+  req.set(http::field::host, ::config::BIGQUANT_HTTPS_HOST);
   req.set(http::field::user_agent, "qmt-bq/1.0");
   req.set("X-BigQuant-Access-Key", h.access_key);
   req.set("X-BigQuant-Timestamp", h.timestamp);
@@ -140,9 +138,12 @@ yyjson_doc *Https::get(std::string_view path) {
     } catch (const boost::system::system_error &e) {
       last_err = e.what();
       std::cerr << "[bigquant.https] transient (attempt " << (attempt + 1) << "/"
-                << (kRetryMax + 1) << ") GET " << path << ": " << last_err << std::endl;
-      assert(attempt < kRetryMax && "exhausted HTTP retries");
-      std::this_thread::sleep_for(std::chrono::seconds(kRetryIntervalSec));
+                << (::config::BIGQUANT_HTTPS_RETRY_MAX + 1) << ") GET " << path
+                << ": " << last_err << std::endl;
+      assert(attempt < ::config::BIGQUANT_HTTPS_RETRY_MAX &&
+             "exhausted HTTP retries");
+      std::this_thread::sleep_for(
+          std::chrono::seconds(::config::BIGQUANT_HTTPS_RETRY_INTERVAL_SECONDS));
     }
   }
 }
@@ -158,9 +159,12 @@ yyjson_doc *Https::post(std::string_view path, std::string_view body) {
     } catch (const boost::system::system_error &e) {
       last_err = e.what();
       std::cerr << "[bigquant.https] transient (attempt " << (attempt + 1) << "/"
-                << (kRetryMax + 1) << ") POST " << path << ": " << last_err << std::endl;
-      assert(attempt < kRetryMax && "exhausted HTTP retries");
-      std::this_thread::sleep_for(std::chrono::seconds(kRetryIntervalSec));
+                << (::config::BIGQUANT_HTTPS_RETRY_MAX + 1) << ") POST " << path
+                << ": " << last_err << std::endl;
+      assert(attempt < ::config::BIGQUANT_HTTPS_RETRY_MAX &&
+             "exhausted HTTP retries");
+      std::this_thread::sleep_for(
+          std::chrono::seconds(::config::BIGQUANT_HTTPS_RETRY_INTERVAL_SECONDS));
     }
   }
 }

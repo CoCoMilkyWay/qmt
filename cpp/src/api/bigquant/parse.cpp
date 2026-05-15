@@ -33,86 +33,70 @@ void format_ts_yyyymmdd(int64_t ns, char out[9]) {
 
 } // namespace
 
-void array_value_append(yyjson_mut_doc *doc, yyjson_mut_val *arr,
-                        const arrow::Array &a, int64_t i) {
-  if (a.IsNull(i)) {
-    yyjson_mut_arr_add_null(doc, arr);
-    return;
-  }
+yyjson_mut_val *array_value_to_json(yyjson_mut_doc *doc, const arrow::Array &a,
+                                    int64_t i) {
+  if (a.IsNull(i))
+    return yyjson_mut_null(doc);
   using T = arrow::Type;
   switch (a.type_id()) {
   case T::TIMESTAMP: {
     char buf[9];
     format_ts_yyyymmdd(static_cast<const arrow::TimestampArray &>(a).Value(i),
                        buf);
-    yyjson_mut_arr_add_strncpy(doc, arr, buf, 8);
-    return;
+    return yyjson_mut_strncpy(doc, buf, 8);
   }
   case T::STRING: {
     auto sv = static_cast<const arrow::StringArray &>(a).GetView(i);
-    yyjson_mut_arr_add_strncpy(doc, arr, sv.data(), sv.size());
-    return;
+    return yyjson_mut_strncpy(doc, sv.data(), sv.size());
   }
   case T::DOUBLE: {
     double v = static_cast<const arrow::DoubleArray &>(a).Value(i);
     if (std::isnan(v) || std::isinf(v))
-      yyjson_mut_arr_add_null(doc, arr);
-    else
-      yyjson_mut_arr_add_real(doc, arr, v);
-    return;
+      return yyjson_mut_null(doc);
+    return yyjson_mut_real(doc, v);
   }
   case T::FLOAT: {
-    double v = static_cast<double>(static_cast<const arrow::FloatArray &>(a).Value(i));
+    double v = static_cast<double>(
+        static_cast<const arrow::FloatArray &>(a).Value(i));
     if (std::isnan(v) || std::isinf(v))
-      yyjson_mut_arr_add_null(doc, arr);
-    else
-      yyjson_mut_arr_add_real(doc, arr, v);
-    return;
+      return yyjson_mut_null(doc);
+    return yyjson_mut_real(doc, v);
   }
   case T::INT8:
-    yyjson_mut_arr_add_int(doc, arr,
-                           static_cast<const arrow::Int8Array &>(a).Value(i));
-    return;
+    return yyjson_mut_int(
+        doc, static_cast<const arrow::Int8Array &>(a).Value(i));
   case T::INT16:
-    yyjson_mut_arr_add_int(doc, arr,
-                           static_cast<const arrow::Int16Array &>(a).Value(i));
-    return;
+    return yyjson_mut_int(
+        doc, static_cast<const arrow::Int16Array &>(a).Value(i));
   case T::INT32:
-    yyjson_mut_arr_add_int(doc, arr,
-                           static_cast<const arrow::Int32Array &>(a).Value(i));
-    return;
+    return yyjson_mut_int(
+        doc, static_cast<const arrow::Int32Array &>(a).Value(i));
   case T::INT64:
-    yyjson_mut_arr_add_int(doc, arr,
-                           static_cast<const arrow::Int64Array &>(a).Value(i));
-    return;
+    return yyjson_mut_int(
+        doc, static_cast<const arrow::Int64Array &>(a).Value(i));
   case T::UINT8:
-    yyjson_mut_arr_add_uint(doc, arr,
-                            static_cast<const arrow::UInt8Array &>(a).Value(i));
-    return;
+    return yyjson_mut_uint(
+        doc, static_cast<const arrow::UInt8Array &>(a).Value(i));
   case T::UINT16:
-    yyjson_mut_arr_add_uint(doc, arr,
-                            static_cast<const arrow::UInt16Array &>(a).Value(i));
-    return;
+    return yyjson_mut_uint(
+        doc, static_cast<const arrow::UInt16Array &>(a).Value(i));
   case T::UINT32:
-    yyjson_mut_arr_add_uint(doc, arr,
-                            static_cast<const arrow::UInt32Array &>(a).Value(i));
-    return;
+    return yyjson_mut_uint(
+        doc, static_cast<const arrow::UInt32Array &>(a).Value(i));
   case T::UINT64:
-    yyjson_mut_arr_add_uint(doc, arr,
-                            static_cast<const arrow::UInt64Array &>(a).Value(i));
-    return;
+    return yyjson_mut_uint(
+        doc, static_cast<const arrow::UInt64Array &>(a).Value(i));
   case T::BOOL:
-    yyjson_mut_arr_add_bool(doc, arr,
-                            static_cast<const arrow::BooleanArray &>(a).Value(i));
-    return;
+    return yyjson_mut_bool(
+        doc, static_cast<const arrow::BooleanArray &>(a).Value(i));
   case T::NA:
-    yyjson_mut_arr_add_null(doc, arr);
-    return;
+    return yyjson_mut_null(doc);
   default:
     std::cerr << "[bigquant.parse] unsupported arrow type: "
               << a.type()->ToString() << " (type_id=" << a.type_id() << ")"
               << std::endl;
     assert(false && "bigquant::parse: unsupported arrow type");
+    return yyjson_mut_null(doc);
   }
 }
 
@@ -158,44 +142,14 @@ std::string array_value_to_string(const arrow::Array &a, int64_t i) {
 }
 
 // ============================================================================
-// table_to_json: 整表
-//   ChunkedArray 在内部 dispatch_chunk 内迭代每 chunk 的所有 row.
-// ============================================================================
-
-yyjson_mut_doc *table_to_json(const std::shared_ptr<arrow::Table> &t) {
-  assert(t);
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
-  yyjson_mut_val *root = yyjson_mut_obj(doc);
-  yyjson_mut_doc_set_root(doc, root);
-
-  const auto &fields = t->schema()->fields();
-  for (int c = 0; c < t->num_columns(); ++c) {
-    yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    const auto &col = t->column(c);
-    for (int k = 0; k < col->num_chunks(); ++k) {
-      const auto &chunk = *col->chunk(k);
-      for (int64_t i = 0; i < chunk.length(); ++i) {
-        array_value_append(doc, arr, chunk, i);
-      }
-    }
-    const std::string &name = fields[c]->name();
-    yyjson_mut_val *key = yyjson_mut_strncpy(doc, name.data(), name.size());
-    yyjson_mut_obj_add(root, key, arr);
-  }
-  return doc;
-}
-
-// ============================================================================
-// table_subset_to_json: 行子集
-//   先 CombineChunks 把每列合成 single chunk, 按 row_idxs 取值.
+// 行式落盘共用 helpers
 // ============================================================================
 
 namespace {
 
-// 找到 row_idx (全表) 落入 chunked array 的 (chunk_idx, in_chunk_idx).
-// 简化: 把所有 chunk length 累加成 offsets 二分查找.
-struct ChunkLocator {
-  std::vector<int64_t> offsets; // size = num_chunks + 1, offsets[k] = chunk k 起始全表 row
+// row_idx (全表) → 该 row 对应 chunked_array 的 (chunk_idx, in_chunk_idx)
+struct ChunkLoc {
+  std::vector<int64_t> offsets; // size = num_chunks + 1
   void build(const arrow::ChunkedArray &c) {
     offsets.clear();
     offsets.reserve(c.num_chunks() + 1);
@@ -206,9 +160,7 @@ struct ChunkLocator {
       offsets.push_back(acc);
     }
   }
-  // 二分定位 row → (chunk_idx, in_chunk_idx).
   std::pair<int, int64_t> locate(int64_t row) const {
-    // upper_bound - 1 = 包含 row 的 chunk
     int lo = 0, hi = static_cast<int>(offsets.size()) - 1;
     while (lo + 1 < hi) {
       int mid = (lo + hi) / 2;
@@ -221,30 +173,81 @@ struct ChunkLocator {
   }
 };
 
+// 构造单行 obj: 每列调 array_value_to_json + obj_add (key 拷贝, 解耦 table 生命周期)
+yyjson_mut_val *build_row_obj(yyjson_mut_doc *doc,
+                              const std::shared_ptr<arrow::Table> &t,
+                              const std::vector<ChunkLoc> &locs,
+                              const std::vector<std::string> &col_names,
+                              int64_t row) {
+  yyjson_mut_val *obj = yyjson_mut_obj(doc);
+  const int n_cols = t->num_columns();
+  for (int c = 0; c < n_cols; ++c) {
+    const auto &col = *t->column(c);
+    auto [ck, ci] = locs[c].locate(row);
+    yyjson_mut_val *key = yyjson_mut_strncpy(doc, col_names[c].data(),
+                                             col_names[c].size());
+    yyjson_mut_val *val = array_value_to_json(doc, *col.chunk(ck), ci);
+    yyjson_mut_obj_add(obj, key, val);
+  }
+  return obj;
+}
+
+void prep_cols(const std::shared_ptr<arrow::Table> &t,
+               std::vector<ChunkLoc> &locs,
+               std::vector<std::string> &col_names) {
+  const int n_cols = t->num_columns();
+  const auto &fields = t->schema()->fields();
+  locs.assign(n_cols, ChunkLoc{});
+  col_names.clear();
+  col_names.reserve(n_cols);
+  for (int c = 0; c < n_cols; ++c) {
+    locs[c].build(*t->column(c));
+    col_names.push_back(fields[c]->name());
+  }
+}
+
 } // namespace
+
+// ============================================================================
+// table_to_json: 整表 → 行式 JSON 数组
+// ============================================================================
+
+yyjson_mut_doc *table_to_json(const std::shared_ptr<arrow::Table> &t) {
+  assert(t);
+  yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
+  yyjson_mut_val *root = yyjson_mut_arr(doc);
+  yyjson_mut_doc_set_root(doc, root);
+
+  std::vector<ChunkLoc> locs;
+  std::vector<std::string> col_names;
+  prep_cols(t, locs, col_names);
+
+  const int64_t n_rows = t->num_rows();
+  for (int64_t row = 0; row < n_rows; ++row) {
+    yyjson_mut_arr_append(root, build_row_obj(doc, t, locs, col_names, row));
+  }
+  return doc;
+}
+
+// ============================================================================
+// table_subset_to_json: 行子集 → 行式 JSON 数组
+// ============================================================================
 
 yyjson_mut_doc *table_subset_to_json(const std::shared_ptr<arrow::Table> &t,
                                      const std::vector<int64_t> &row_idxs) {
   assert(t);
   yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
-  yyjson_mut_val *root = yyjson_mut_obj(doc);
+  yyjson_mut_val *root = yyjson_mut_arr(doc);
   yyjson_mut_doc_set_root(doc, root);
 
-  const auto &fields = t->schema()->fields();
+  std::vector<ChunkLoc> locs;
+  std::vector<std::string> col_names;
+  prep_cols(t, locs, col_names);
+
   const int64_t n_rows = t->num_rows();
-  for (int c = 0; c < t->num_columns(); ++c) {
-    yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    const auto &col = *t->column(c);
-    ChunkLocator loc;
-    loc.build(col);
-    for (int64_t row : row_idxs) {
-      assert(row >= 0 && row < n_rows);
-      auto [ck, ci] = loc.locate(row);
-      array_value_append(doc, arr, *col.chunk(ck), ci);
-    }
-    const std::string &name = fields[c]->name();
-    yyjson_mut_val *key = yyjson_mut_strncpy(doc, name.data(), name.size());
-    yyjson_mut_obj_add(root, key, arr);
+  for (int64_t row : row_idxs) {
+    assert(row >= 0 && row < n_rows);
+    yyjson_mut_arr_append(root, build_row_obj(doc, t, locs, col_names, row));
   }
   return doc;
 }
