@@ -52,12 +52,32 @@ inline constexpr int TUSHARE_HTTP_RETRY_INTERVAL_SECONDS = 30;
 //     BigQuant: DAI 无明显行限, 单年事件/财务 ~ 几万-几十万行, 1 年安全
 //     Tushare:  单次 8000 行硬限, 按月拉全市场仅几千行, 1 月安全
 // ============================================================================
-inline constexpr const char *PIPELINE_START_DATE = "20260510";
+inline constexpr const char *PIPELINE_START_DATE = "20150101";
 inline constexpr int PIPELINE_LOOKBACK_DAYS = 7;
 inline constexpr int PIPELINE_DEDUP_WINDOW_SECONDS = 60 * 60;
 
 inline constexpr int BIGQUANT_FETCH_MAX_DAYS_PER_CALL = 365;
 inline constexpr int TUSHARE_FETCH_MAX_DAYS_PER_CALL = 31;
+
+// ============================================================================
+// C.1 BigQuant parquet 月数据库导入 (独立阶段, 与 DAI 完全解耦)
+//   BIGQUANT_IMPORT          true 时启用 (与 DAI 阶段独立, 不依赖任何 DAI 配置)
+//   BIGQUANT_DATABASE        parquet 月数据库根目录 (相对 git root 或绝对路径)
+//                            预期布局 (与 doc/bigquant/fetch.py 输出一致):
+//                              <root>/<yyyy>-<mm>/<table>.parquet
+//                            静态表 (_meta/<table>.parquet) 不走 import, 留给 DAI.
+//   行为: 扫 <root>/ 下所有 "YYYY-MM" 子目录 (其他名字如 _meta 静默跳过), 按 yyyymm
+//     升序对每个月每张表 (SPECS 中 kind != Static) 执行 "整月替换覆盖":
+//     1. 读 parquet → arrow::Table; 文件不存在 → 静默跳过
+//     2. 走整月事务: stage 到 data/_journal/, atomic 写 manifest (commit point),
+//        apply 把 staged day file rename 到 data/YYYY/MM/DD/<name>.json + 清掉本月
+//        [01, 月末] 内不在 manifest 的残留 target + 更新 data/YYYY/MM/_empty.json,
+//        cleanup
+//     3. 进程启动时优先扫 data/_journal/ 重放残留 manifest (crash recovery)
+//   完整性: 整月原子 (中断不留脏月) + 整月覆盖 (已有月先删后写).
+// ============================================================================
+inline constexpr bool BIGQUANT_IMPORT = false;
+inline constexpr const char *BIGQUANT_DATABASE = "output/parquet";
 
 // ============================================================================
 // D. Pool (basic + universe)

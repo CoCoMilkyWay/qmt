@@ -52,6 +52,17 @@ std::string add_days(std::string_view yyyymmdd, int n) {
   return fmt_yyyymmdd(parse_yyyymmdd(yyyymmdd) + days{n});
 }
 
+std::string month_last_dd(std::string_view yyyymm) {
+  assert(yyyymm.size() == 6);
+  int y = std::stoi(std::string(yyyymm.substr(0, 4)));
+  int m = std::stoi(std::string(yyyymm.substr(4, 2)));
+  year_month_day_last ymdl{year{y} / month{static_cast<unsigned>(m)} / last};
+  char buf[3];
+  std::snprintf(buf, sizeof(buf), "%02u",
+                static_cast<unsigned>(ymdl.day()));
+  return std::string(buf, 2);
+}
+
 std::vector<std::pair<std::string, std::string>>
 split_segments(const std::vector<std::string> &missing, int max_days) {
   assert(max_days > 0);

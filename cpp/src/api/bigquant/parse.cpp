@@ -11,7 +11,10 @@
 #include <cstdio>
 #include <ctime>
 #include <iostream>
+#include <map>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -251,6 +254,103 @@ yyjson_mut_doc *table_subset_to_json(const std::shared_ptr<arrow::Table> &t,
     yyjson_mut_arr_append(root, build_row_obj(doc, t, locs, col_names, row));
   }
   return doc;
+}
+
+// ============================================================================
+// bucket_by_visible_date — 共用桶分逻辑 (store / import 复用)
+// ============================================================================
+
+namespace {
+
+int field_index_of(const arrow::Table &t, const std::string &name) {
+  const auto &fields = t.schema()->fields();
+  for (int i = 0; i < static_cast<int>(fields.size()); ++i) {
+    if (fields[i]->name() == name)
+      return i;
+  }
+  assert(false && "bigquant::parse::bucket: 字段名不在 schema 中");
+  return -1;
+}
+
+std::string make_pk_key(const arrow::Table &t,
+                        const std::vector<int> &pk_idxs,
+                        const std::vector<ChunkLoc> &pk_locs, int64_t row) {
+  std::string key;
+  for (size_t k = 0; k < pk_idxs.size(); ++k) {
+    int col_idx = pk_idxs[k];
+    const auto &col = *t.column(col_idx);
+    auto [ck, ci] = pk_locs[k].locate(row);
+    key += array_value_to_string(*col.chunk(ck), ci);
+    key += '|';
+  }
+  return key;
+}
+
+std::string get_visible_date(const arrow::Table &t, int vd_idx,
+                             const ChunkLoc &vd_loc, int64_t row) {
+  const auto &col = *t.column(vd_idx);
+  auto [ck, ci] = vd_loc.locate(row);
+  return array_value_to_string(*col.chunk(ck), ci);
+}
+
+} // namespace
+
+std::map<std::string, std::vector<int64_t>>
+bucket_by_visible_date(const std::shared_ptr<arrow::Table> &t,
+                       const TableSpec &spec, std::string_view start,
+                       std::string_view end) {
+  assert(t);
+  assert(spec.kind != FetchKind::Static);
+  assert(!spec.visible_date.empty());
+
+  int vd_idx = field_index_of(*t, spec.visible_date);
+  ChunkLoc vd_loc;
+  vd_loc.build(*t->column(vd_idx));
+
+  std::vector<int> pk_idxs;
+  std::vector<ChunkLoc> pk_locs;
+  pk_idxs.reserve(spec.pk.size());
+  pk_locs.resize(spec.pk.size());
+  for (size_t k = 0; k < spec.pk.size(); ++k) {
+    int idx = field_index_of(*t, spec.pk[k]);
+    pk_idxs.push_back(idx);
+    pk_locs[k].build(*t->column(idx));
+  }
+
+  struct DayBucket {
+    std::vector<int64_t> rows;                      // 最终保留的 row_idxs
+    std::unordered_map<std::string, size_t> pk2pos; // pk_key → rows 中的位置
+  };
+  std::map<std::string, DayBucket> by_day; // 按 vd 升序
+
+  const int64_t n_rows = t->num_rows();
+  std::string start_s(start), end_s(end);
+  for (int64_t row = 0; row < n_rows; ++row) {
+    std::string vd = get_visible_date(*t, vd_idx, vd_loc, row);
+    if (vd.size() != 8)
+      continue;
+    if (vd < start_s || vd > end_s)
+      continue;
+    DayBucket &bk = by_day[vd];
+    std::string pk_key = make_pk_key(*t, pk_idxs, pk_locs, row);
+    auto it = bk.pk2pos.find(pk_key);
+    if (it == bk.pk2pos.end()) {
+      bk.pk2pos.emplace(std::move(pk_key), bk.rows.size());
+      bk.rows.push_back(row);
+    } else {
+      assert(false &&
+             "bigquant::parse::bucket: 同 vd 同 PK 多条 (服务端 PIT 异常)");
+      bk.rows[it->second] = row;
+    }
+  }
+
+  std::map<std::string, std::vector<int64_t>> out;
+  for (auto &[vd, bk] : by_day) {
+    if (bk.rows.empty())
+      continue;
+    out.emplace(vd, std::move(bk.rows));
+  }
+  return out;
 }
 
 } // namespace bigquant

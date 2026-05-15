@@ -25,6 +25,9 @@ std::vector<std::string> iter_days(std::string_view start, std::string_view end)
 // "YYYYMMDD" + n 个日历日 (n 可为负)
 std::string add_days(std::string_view yyyymmdd, int n);
 
+// "YYYYMM" -> 该月最后一天 "DD" ("28" / "29" / "30" / "31")
+std::string month_last_dd(std::string_view yyyymm);
+
 // 把升序 YYYYMMDD 列表切成连续段, 每段长度 ≤ max_days. 段为 [start, end] 闭区间.
 //   - 同一段内必须 calendar-day 紧邻 (差 1 天)
 //   - 段超长则进一步按 max_days 切块

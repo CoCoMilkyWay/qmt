@@ -1,5 +1,6 @@
 #pragma once
 
+#include "api/bigquant/spec.hpp"
 #include "package/yyjson/yyjson.h"
 
 #include <arrow/array.h>
@@ -7,8 +8,10 @@
 #include <arrow/table.h>
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -78,5 +81,26 @@ yyjson_mut_doc *table_to_json(const std::shared_ptr<arrow::Table> &t);
 // row_idxs 必须 < t->num_rows(). 用于 store 按 visible_date 分桶后逐 day 输出.
 yyjson_mut_doc *table_subset_to_json(const std::shared_ptr<arrow::Table> &t,
                                      const std::vector<int64_t> &row_idxs);
+
+// ============================================================================
+// 按 spec.visible_date 分桶 [start, end] 闭区间内的行, 同次响应 PK upsert
+// ============================================================================
+//
+// 输入:
+//   t        — DAI fetch / parquet read 出来的 arrow::Table (整段一次响应)
+//   spec     — 表元信息 (必须 kind != Static, visible_date 非空)
+//   [start, end] — YYYYMMDD, 桶 key 必须落在此闭区间内, 范围外行直接丢弃
+//
+// 行为:
+//   - visible_date 列 null / 非 8 字符 → 跳过该行
+//   - vd ∉ [start, end] → 跳过该行
+//   - 同 vd 同 PK 多条 → assert (BigQuant PIT 服务端通常已 dedup, fail-fast 暴露异常)
+//
+// 输出:
+//   map<vd_yyyymmdd, 升序 row_idxs> — vd 升序遍历; 调用方按 vd 取 sub-table 输出.
+std::map<std::string, std::vector<int64_t>>
+bucket_by_visible_date(const std::shared_ptr<arrow::Table> &t,
+                       const TableSpec &spec, std::string_view start,
+                       std::string_view end);
 
 } // namespace bigquant

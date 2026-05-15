@@ -25,8 +25,8 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 # Build Mode Options
 # ============================================================================
 option(PROFILE_MODE "Profile mode: -O2 -g, Tracy instrumentation" OFF)
-option(DEBUG_MODE   "Debug mode: -O0 -g" OFF)
-option(ASSERT_MODE  "Assert mode: -O2 with assertions enabled" OFF)
+option(DEBUG_MODE "Debug mode: -O0 -g" OFF)
+option(ASSERT_MODE "Assert mode: -O2 with assertions enabled" OFF)
 
 set(CMAKE_CXX_FLAGS_RELEASE "")
 set(CMAKE_CXX_FLAGS_DEBUG "")
@@ -41,27 +41,27 @@ if(DEBUG_MODE)
     message(STATUS "Build mode: DEBUG (-O0 -g, core-dump friendly)")
     add_compile_definitions(DEBUG_MODE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g -march=native")
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -O0 -g -march=native")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0 -g -march=native")
 
 elseif(PROFILE_MODE)
     message(STATUS "Build mode: PROFILE (Tracy instrumentation)")
     add_compile_definitions(PROFILE_MODE TRACY_ENABLE TRACY_NO_SYSTEM_TRACING TRACY_NO_SAMPLING)
     # NOTE: -ffast-math 不可加 — 代码全程靠 std::nanf("") 标记缺失值, 与 -ffinite-math-only 冲突会 SIGSEGV
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -g -march=native")
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -O2 -g -march=native")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -g -march=native")
 
 elseif(ASSERT_MODE)
     message(STATUS "Build mode: ASSERT (-O2 + asserts)")
     add_compile_definitions(ASSERT_MODE)
     # NOTE: -ffast-math 不可加 — 代码全程靠 std::nanf("") 标记缺失值, 与 -ffinite-math-only 冲突会 SIGSEGV
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -march=native")
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -O2 -march=native")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -march=native")
 
 else()
     message(STATUS "Build mode: PRODUCTION (-O2 -DNDEBUG)")
     # NOTE: -ffast-math 不可加 — 代码全程靠 std::nanf("") 标记缺失值, 与 -ffinite-math-only 冲突会 SIGSEGV
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -DNDEBUG -march=native")
-    set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -O2 -DNDEBUG -march=native")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -DNDEBUG -march=native")
 endif()
 
 add_compile_options(-fcolor-diagnostics -fansi-escape-codes -Wno-overriding-option)
@@ -69,18 +69,28 @@ add_compile_options(-fcolor-diagnostics -fansi-escape-codes -Wno-overriding-opti
 # ============================================================================
 # Includes — 含 vendored Arrow C++ Flight headers (cpp/include/package/arrow/include)
 # ============================================================================
-set(ARROW_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../../include/package/arrow)
+set(ARROW_VENDOR ${CMAKE_CURRENT_SOURCE_DIR}/../../include/package/arrow)
 set(ARROW_INCLUDE ${ARROW_VENDOR}/include)
-set(ARROW_LIB     ${ARROW_VENDOR}/lib)
+set(ARROW_LIB ${ARROW_VENDOR}/lib)
 
 if(NOT EXISTS ${ARROW_INCLUDE}/arrow/flight/client.h)
     message(FATAL_ERROR
         "Vendored Arrow headers missing: ${ARROW_INCLUDE}/arrow/flight/client.h\n"
         "Run: ${ARROW_VENDOR}/vendor_from_pyarrow.sh")
 endif()
+if(NOT EXISTS ${ARROW_INCLUDE}/parquet/arrow/reader.h)
+    message(FATAL_ERROR
+        "Vendored Parquet headers missing: ${ARROW_INCLUDE}/parquet/arrow/reader.h\n"
+        "Run: ${ARROW_VENDOR}/vendor_from_pyarrow.sh")
+endif()
 if(NOT EXISTS ${ARROW_LIB}/libarrow_flight.so)
     message(FATAL_ERROR
         "Vendored Arrow shared libs missing: ${ARROW_LIB}/libarrow_flight.so\n"
+        "Run: ${ARROW_VENDOR}/vendor_from_pyarrow.sh")
+endif()
+if(NOT EXISTS ${ARROW_LIB}/libparquet.so)
+    message(FATAL_ERROR
+        "Vendored Parquet shared lib missing: ${ARROW_LIB}/libparquet.so\n"
         "Run: ${ARROW_VENDOR}/vendor_from_pyarrow.sh")
 endif()
 
@@ -93,7 +103,7 @@ include_directories(SYSTEM ${ARROW_INCLUDE})
 # Dependency Preflight — 提前检查系统依赖, 缺失时直接给出 install 指令
 # ============================================================================
 find_path(_OPENSSL_SSL_H openssl/ssl.h PATHS /usr/include /usr/local/include)
-find_library(_OPENSSL_SSL_LIB    NAMES ssl)
+find_library(_OPENSSL_SSL_LIB NAMES ssl)
 find_library(_OPENSSL_CRYPTO_LIB NAMES crypto)
 if(NOT _OPENSSL_SSL_H OR NOT _OPENSSL_SSL_LIB OR NOT _OPENSSL_CRYPTO_LIB)
     message(FATAL_ERROR
@@ -114,6 +124,7 @@ set(SOURCES
     ../../src/misc/date.cpp
     ../../src/misc/fs.cpp
     ../../src/misc/store.cpp
+    ../../src/misc/journal.cpp
     ../../src/api/bigquant/signer.cpp
     ../../src/api/bigquant/https.cpp
     ../../src/api/bigquant/dai.cpp
@@ -121,6 +132,7 @@ set(SOURCES
     ../../src/api/bigquant/parse.cpp
     ../../src/api/bigquant/store.cpp
     ../../src/api/bigquant/pipeline.cpp
+    ../../src/api/bigquant/import.cpp
     ../../src/api/tushare/http.cpp
     ../../src/api/tushare/spec.cpp
     ../../src/api/tushare/store.cpp
@@ -148,6 +160,7 @@ set(HEADERS
     ../../include/misc/date.hpp
     ../../include/misc/fs.hpp
     ../../include/misc/store.hpp
+    ../../include/misc/journal.hpp
     ../../include/api/bigquant/signer.hpp
     ../../include/api/bigquant/https.hpp
     ../../include/api/bigquant/dai.hpp
@@ -155,6 +168,7 @@ set(HEADERS
     ../../include/api/bigquant/parse.hpp
     ../../include/api/bigquant/store.hpp
     ../../include/api/bigquant/pipeline.hpp
+    ../../include/api/bigquant/import.hpp
     ../../include/api/tushare/http.hpp
     ../../include/api/tushare/spec.hpp
     ../../include/api/tushare/store.hpp
@@ -183,9 +197,10 @@ set(HEADERS
 
 add_executable(app_main ${SOURCES} ${HEADERS})
 
-# vendored Arrow C++ Flight + 系统 OpenSSL (HTTPS 控制面必需) + pthread
+# vendored Arrow C++ Flight + Parquet + 系统 OpenSSL (HTTPS 控制面必需) + pthread
 target_link_libraries(app_main PRIVATE
     ${ARROW_LIB}/libarrow_flight.so
+    ${ARROW_LIB}/libparquet.so
     ${ARROW_LIB}/libarrow.so
     OpenSSL::SSL
     OpenSSL::Crypto
