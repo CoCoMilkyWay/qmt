@@ -1,7 +1,7 @@
 #pragma once
 
 #include "package/yyjson/yyjson.h"
-#include "tushare/spec.hpp"
+#include "api/tushare/spec.hpp"
 #include <filesystem>
 #include <string>
 #include <string_view>

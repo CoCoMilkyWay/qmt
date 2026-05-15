@@ -1,943 +1,227 @@
-
 ========== trading_days ==========
-   column_name   column_type null   key default extra
-0         date  TIMESTAMP_NS  YES  None    None  None
-1  market_code       VARCHAR  YES  None    None  None
+| date          | market_code |
+|---------------|-------------|
+| timestamp[ns] | string      |
+
 
 ========== holidays ==========
-   column_name   column_type null   key default extra
-0         date  TIMESTAMP_NS  YES  None    None  None
-1  market_code       VARCHAR  YES  None    None  None
+| date          | market_code |
+|---------------|-------------|
+| timestamp[ns] | string      |
+
 
 ========== cn_stock_instruments ==========
-  column_name   column_type null   key default extra
-0        date  TIMESTAMP_NS  YES  None    None  None
-1  instrument       VARCHAR  YES  None    None  None
-2        name       VARCHAR  YES  None    None  None
-3        type       VARCHAR  YES  None    None  None
+| date          | instrument | name   | type   |
+|---------------|------------|--------|--------|
+| timestamp[ns] | string     | string | string |
 
-========== cn_index_instruments ==========
-  column_name   column_type null   key default extra
-0        date  TIMESTAMP_NS  YES  None    None  None
-1  instrument       VARCHAR  YES  None    None  None
-2        name       VARCHAR  YES  None    None  None
-
-========== cn_fund_instruments ==========
-  column_name   column_type null   key default extra
-0        date  TIMESTAMP_NS  YES  None    None  None
-1  instrument       VARCHAR  YES  None    None  None
-2        name       VARCHAR  YES  None    None  None
-
-========== cn_future_instruments ==========
-    column_name   column_type null   key default extra
-0          date  TIMESTAMP_NS  YES  None    None  None
-1    instrument       VARCHAR  YES  None    None  None
-2          name       VARCHAR  YES  None    None  None
-3  trading_code       VARCHAR  YES  None    None  None
-4  product_code       VARCHAR  YES  None    None  None
-
-========== cn_cbond_instruments ==========
-  column_name   column_type null   key default extra
-0        date  TIMESTAMP_NS  YES  None    None  None
-1  instrument       VARCHAR  YES  None    None  None
-2        name       VARCHAR  YES  None    None  None
 
 ========== cn_stock_industry_component ==========
-             column_name   column_type null   key default extra
-0                   date  TIMESTAMP_NS  YES  None    None  None
-1             instrument       VARCHAR  YES  None    None  None
-2               industry       VARCHAR  YES  None    None  None
-3          industry_name       VARCHAR  YES  None    None  None
-4    industry_instrument       VARCHAR  YES  None    None  None
-5   industry_level1_code       VARCHAR  YES  None    None  None
-6   industry_level1_name       VARCHAR  YES  None    None  None
-7   industry_level2_code       VARCHAR  YES  None    None  None
-8   industry_level2_name       VARCHAR  YES  None    None  None
-9   industry_level3_code       VARCHAR  YES  None    None  None
-10  industry_level3_name       VARCHAR  YES  None    None  None
+| date          | instrument | industry | industry_name | industry_instrument | industry_level1_code | industry_level1_name | industry_level2_code | industry_level2_name | industry_level3_code | industry_level3_name |
+|---------------|------------|----------|---------------|---------------------|----------------------|----------------------|----------------------|----------------------|----------------------|----------------------|
+| timestamp[ns] | string     | string   | string        | string              | string               | string               | string               | string               | string               | string               |
+
+
+========== cn_stock_industry_change ==========
+| date          | instrument | industry | industry_level | industry_code | industry_name | change_flag |
+|---------------|------------|----------|----------------|---------------|---------------|-------------|
+| timestamp[ns] | null       | null     | int8           | null          | null          | int8        |
+
 
 ========== cn_stock_industry_bar1d ==========
-     column_name   column_type null   key default extra
-0           date  TIMESTAMP_NS  YES  None    None  None
-1     instrument       VARCHAR  YES  None    None  None
-2         method       TINYINT  YES  None    None  None
-3      pre_close        DOUBLE  YES  None    None  None
-4           open        DOUBLE  YES  None    None  None
-5          close        DOUBLE  YES  None    None  None
-6           high        DOUBLE  YES  None    None  None
-7            low        DOUBLE  YES  None    None  None
-8         volume        BIGINT  YES  None    None  None
-9    deal_number       INTEGER  YES  None    None  None
-10        amount        DOUBLE  YES  None    None  None
-11  change_ratio        DOUBLE  YES  None    None  None
-12          turn        DOUBLE  YES  None    None  None
+| date          | instrument | method | pre_close | open   | close  | high   | low    | volume | deal_number | amount | change_ratio | turn   |
+|---------------|------------|--------|-----------|--------|--------|--------|--------|--------|-------------|--------|--------------|--------|
+| timestamp[ns] | string     | int8   | double    | double | double | double | double | int64  | int32       | double | double       | double |
+
 
 ========== cn_stock_industry_valuation ==========
-      column_name   column_type null   key default extra
-0            date  TIMESTAMP_NS  YES  None    None  None
-1      instrument       VARCHAR  YES  None    None  None
-2        industry       VARCHAR  YES  None    None  None
-3  industry_level       TINYINT  YES  None    None  None
-4   industry_code       VARCHAR  YES  None    None  None
-5   industry_name       VARCHAR  YES  None    None  None
-6  component_nums       TINYINT  YES  None    None  None
-7     pe_trailing        DOUBLE  YES  None    None  None
-8          pe_ttm        DOUBLE  YES  None    None  None
-9              pb        DOUBLE  YES  None    None  None
+| date          | instrument | industry | industry_level | industry_code | industry_name | component_nums | pe_trailing | pe_ttm | pb     |
+|---------------|------------|----------|----------------|---------------|---------------|----------------|-------------|--------|--------|
+| timestamp[ns] | string     | string   | int8           | string        | string        | int8           | double      | double | double |
+
 
 ========== cn_stock_basic_info ==========
-         column_name   column_type null   key default extra
-0         instrument       VARCHAR  YES  None    None  None
-1               name       VARCHAR  YES  None    None  None
-2          full_name       VARCHAR  YES  None    None  None
-3            en_name       VARCHAR  YES  None    None  None
-4          used_name       VARCHAR  YES  None    None  None
-5       instrument_b       VARCHAR  YES  None    None  None
-6             name_b       VARCHAR  YES  None    None  None
-7      instrument_hk       VARCHAR  YES  None    None  None
-8            name_hk       VARCHAR  YES  None    None  None
-9           exchange       VARCHAR  YES  None    None  None
-10       list_sector       TINYINT  YES  None    None  None
-11     security_type       VARCHAR  YES  None    None  None
-12          industry       VARCHAR  YES  None    None  None
-13       office_addr       VARCHAR  YES  None    None  None
-14      regster_addr       VARCHAR  YES  None    None  None
-15  register_captial        DOUBLE  YES  None    None  None
-16    nums_employees        DOUBLE  YES  None    None  None
-17     nums_managers        DOUBLE  YES  None    None  None
-18          law_firm       VARCHAR  YES  None    None  None
-19      account_firm       VARCHAR  YES  None    None  None
-20           profile       VARCHAR  YES  None    None  None
-21        estab_date  TIMESTAMP_NS  YES  None    None  None
-22         list_date  TIMESTAMP_NS  YES  None    None  None
-23       delist_date  TIMESTAMP_NS  YES  None    None  None
-24       online_list  TIMESTAMP_NS  YES  None    None  None
-25         ipo_price        DOUBLE  YES  None    None  None
-26          ipo_nums        DOUBLE  YES  None    None  None
-27            ipo_pe        DOUBLE  YES  None    None  None
-28      ipo_parvalue        DOUBLE  YES  None    None  None
-29  net_amount_funds        DOUBLE  YES  None    None  None
-30      offline_dtor        DOUBLE  YES  None    None  None
-31              dtor        DOUBLE  YES  None    None  None
-32            f_open        DOUBLE  YES  None    None  None
-33            f_high        DOUBLE  YES  None    None  None
-34           f_close        DOUBLE  YES  None    None  None
-35        f_turnover        DOUBLE  YES  None    None  None
-36       corp_nature       VARCHAR  YES  None    None  None
-37        corp_scale       VARCHAR  YES  None    None  None
+| instrument | name   | full_name | en_name | used_name | instrument_b | name_b | instrument_hk | name_hk | exchange | list_sector | security_type | industry | office_addr | regster_addr | register_captial | nums_employees | nums_managers | law_firm | account_firm | profile | estab_date    | list_date     | delist_date   | online_list   | ipo_price | ipo_nums | ipo_pe | ipo_parvalue | net_amount_funds | offline_dtor | dtor   | f_open | f_high | f_close | f_turnover | corp_nature | corp_scale |
+|------------|--------|-----------|---------|-----------|--------------|--------|---------------|---------|----------|-------------|---------------|----------|-------------|--------------|------------------|----------------|---------------|----------|--------------|---------|---------------|---------------|---------------|---------------|-----------|----------|--------|--------------|------------------|--------------|--------|--------|--------|---------|------------|-------------|------------|
+| string     | string | string    | string  | string    | null         | null   | string        | string  | string   | int8        | string        | string   | string      | string       | double           | double         | double        | string   | string       | string  | timestamp[ns] | timestamp[ns] | timestamp[ns] | timestamp[ns] | double    | double   | double | double       | double           | double       | double | double | double | double  | double     | string      | string     |
+
 
 ========== cn_stock_capital ==========
-       column_name   column_type null   key default extra
-0       instrument       VARCHAR  YES  None    None  None
-1     publish_date  TIMESTAMP_NS  YES  None    None  None
-2      change_date  TIMESTAMP_NS  YES  None    None  None
-3           reason       VARCHAR  YES  None    None  None
-4     total_shares        DOUBLE  YES  None    None  None
-5          float_a        DOUBLE  YES  None    None  None
-6          float_b        DOUBLE  YES  None    None  None
-7     restricted_a        DOUBLE  YES  None    None  None
-8     restricted_b        DOUBLE  YES  None    None  None
-9    prefer_shares        DOUBLE  YES  None    None  None
-10       shares_hk        DOUBLE  YES  None    None  None
-11   shares_aboard        DOUBLE  YES  None    None  None
-12  shares_a_total        DOUBLE  YES  None    None  None
-13  shares_b_total        DOUBLE  YES  None    None  None
-14     float_total        DOUBLE  YES  None    None  None
-15      rest_total        DOUBLE  YES  None    None  None
+| instrument | publish_date  | change_date   | reason | total_shares | float_a | float_b | restricted_a | restricted_b | prefer_shares | shares_hk | shares_aboard | shares_a_total | shares_b_total | float_total | rest_total |
+|------------|---------------|---------------|--------|--------------|---------|---------|--------------|--------------|---------------|-----------|---------------|----------------|----------------|-------------|------------|
+| string     | timestamp[ns] | timestamp[ns] | string | double       | double  | double  | double       | double       | double        | double    | double        | double         | double         | double      | double     |
+
 
 ========== cn_stock_dividend ==========
-       column_name   column_type null   key default extra
-0             date  TIMESTAMP_NS  YES  None    None  None
-1       instrument       VARCHAR  YES  None    None  None
-2      report_date  TIMESTAMP_NS  YES  None    None  None
-3     publish_date  TIMESTAMP_NS  YES  None    None  None
-4       bonus_rate        DOUBLE  YES  None    None  None
-5   conversed_rate        DOUBLE  YES  None    None  None
-6  cash_before_tax        DOUBLE  YES  None    None  None
-7   cash_after_tax        DOUBLE  YES  None    None  None
-8    register_date  TIMESTAMP_NS  YES  None    None  None
-9          ex_date  TIMESTAMP_NS  YES  None    None  None
+| date          | instrument | report_date   | publish_date  | bonus_rate | conversed_rate | cash_before_tax | cash_after_tax | register_date | ex_date       |
+|---------------|------------|---------------|---------------|------------|----------------|-----------------|----------------|---------------|---------------|
+| timestamp[ns] | string     | timestamp[ns] | timestamp[ns] | double     | double         | double          | double         | timestamp[ns] | timestamp[ns] |
+
 
 ========== cn_stock_allotment ==========
-        column_name   column_type null   key default extra
-0              date  TIMESTAMP_NS  YES  None    None  None
-1        instrument       VARCHAR  YES  None    None  None
-2      publish_date  TIMESTAMP_NS  YES  None    None  None
-3   allotment_price        DOUBLE  YES  None    None  None
-4    allotment_rate        DOUBLE  YES  None    None  None
-5  allotment_shares        BIGINT  YES  None    None  None
-6     register_date  TIMESTAMP_NS  YES  None    None  None
-7      exright_date  TIMESTAMP_NS  YES  None    None  None
-8    allot_listdate  TIMESTAMP_NS  YES  None    None  None
+| date          | instrument | publish_date  | allotment_price | allotment_rate | allotment_shares | register_date | exright_date  | allot_listdate |
+|---------------|------------|---------------|-----------------|----------------|------------------|---------------|---------------|----------------|
+| timestamp[ns] | string     | timestamp[ns] | double          | double         | int64            | timestamp[ns] | timestamp[ns] | timestamp[ns]  |
+
 
 ========== cn_stock_margin_trading_detail ==========
-                              column_name   column_type null   key default extra
-0                                    date  TIMESTAMP_NS  YES  None    None  None
-1                              instrument       VARCHAR  YES  None    None  None
-2                       financing_balance        DOUBLE  YES  None    None  None
-3                      financing_quantity        DOUBLE  YES  None    None  None
-4                 financing_balance_ratio        DOUBLE  YES  None    None  None
-5                      financing_purchase        DOUBLE  YES  None    None  None
-6             financing_purchase_quantity        DOUBLE  YES  None    None  None
-7                     financing_repayment        DOUBLE  YES  None    None  None
-8            financing_repayment_quantity        DOUBLE  YES  None    None  None
-9                  financing_net_purchase        DOUBLE  YES  None    None  None
-10        financing_net_purchase_quantity        DOUBLE  YES  None    None  None
-11             securities_lending_balance        DOUBLE  YES  None    None  None
-12            securities_lending_quantity        DOUBLE  YES  None    None  None
-13               securities_lending_sales        DOUBLE  YES  None    None  None
-14      securities_lending_sales_quantity        DOUBLE  YES  None    None  None
-15           securities_lending_repayment        DOUBLE  YES  None    None  None
-16  securities_lending_repayment_quantity        DOUBLE  YES  None    None  None
-17           securities_lending_net_sales        DOUBLE  YES  None    None  None
-18  securities_lending_net_sales_quantity        DOUBLE  YES  None    None  None
-19                 margin_trading_balance        DOUBLE  YES  None    None  None
-20                        lendable_shares        DOUBLE  YES  None    None  None
-21                   lending_margin_stock        DOUBLE  YES  None    None  None
+| date          | instrument | financing_balance | financing_quantity | financing_balance_ratio | financing_purchase | financing_purchase_quantity | financing_repayment | financing_repayment_quantity | financing_net_purchase | financing_net_purchase_quantity | securities_lending_balance | securities_lending_quantity | securities_lending_sales | securities_lending_sales_quantity | securities_lending_repayment | securities_lending_repayment_quantity | securities_lending_net_sales | securities_lending_net_sales_quantity | margin_trading_balance | lendable_shares | lending_margin_stock |
+|---------------|------------|-------------------|--------------------|-------------------------|--------------------|-----------------------------|---------------------|------------------------------|------------------------|---------------------------------|----------------------------|-----------------------------|--------------------------|-----------------------------------|------------------------------|---------------------------------------|------------------------------|---------------------------------------|------------------------|-----------------|----------------------|
+| timestamp[ns] | string     | double            | double             | double                  | double             | double                      | double              | double                       | double                 | double                          | double                     | double                      | double                   | double                            | double                       | double                                | double                       | double                                | double                 | double          | double               |
+
 
 ========== cn_stock_margin_trading_market ==========
-                              column_name   column_type null   key default extra
-0                                    date  TIMESTAMP_NS  YES  None    None  None
-1                                  method       VARCHAR  YES  None    None  None
-2                       financing_balance        DOUBLE  YES  None    None  None
-3                      financing_quantity        DOUBLE  YES  None    None  None
-4                 financing_balance_ratio        DOUBLE  YES  None    None  None
-5                      financing_purchase        DOUBLE  YES  None    None  None
-6             financing_purchase_quantity        DOUBLE  YES  None    None  None
-7                     financing_repayment        DOUBLE  YES  None    None  None
-8            financing_repayment_quantity        DOUBLE  YES  None    None  None
-9                  financing_net_purchase        DOUBLE  YES  None    None  None
-10        financing_net_purchase_quantity        DOUBLE  YES  None    None  None
-11             securities_lending_balance        DOUBLE  YES  None    None  None
-12            securities_lending_quantity        DOUBLE  YES  None    None  None
-13               securities_lending_sales        DOUBLE  YES  None    None  None
-14      securities_lending_sales_quantity        DOUBLE  YES  None    None  None
-15           securities_lending_repayment        DOUBLE  YES  None    None  None
-16  securities_lending_repayment_quantity        DOUBLE  YES  None    None  None
-17           securities_lending_net_sales        DOUBLE  YES  None    None  None
-18  securities_lending_net_sales_quantity        DOUBLE  YES  None    None  None
-19                 margin_trading_balance        DOUBLE  YES  None    None  None
+| date          | method | financing_balance | financing_quantity | financing_balance_ratio | financing_purchase | financing_purchase_quantity | financing_repayment | financing_repayment_quantity | financing_net_purchase | financing_net_purchase_quantity | securities_lending_balance | securities_lending_quantity | securities_lending_sales | securities_lending_sales_quantity | securities_lending_repayment | securities_lending_repayment_quantity | securities_lending_net_sales | securities_lending_net_sales_quantity | margin_trading_balance |
+|---------------|--------|-------------------|--------------------|-------------------------|--------------------|-----------------------------|---------------------|------------------------------|------------------------|---------------------------------|----------------------------|-----------------------------|--------------------------|-----------------------------------|------------------------------|---------------------------------------|------------------------------|---------------------------------------|------------------------|
+| timestamp[ns] | string | double            | double             | double                  | double             | double                      | double              | double                       | double                 | double                          | double                     | double                      | double                   | double                            | double                       | double                                | double                       | double                                | double                 |
+
 
 ========== cn_stock_shareholder ==========
-                              column_name   column_type null   key default extra
-0                            publish_date  TIMESTAMP_NS  YES  None    None  None
-1                              instrument       VARCHAR  YES  None    None  None
-2                                end_date  TIMESTAMP_NS  YES  None    None  None
-3                       total_shareholder        DOUBLE  YES  None    None  None
-4                   total_shareholder_chg        DOUBLE  YES  None    None  None
-5                           a_shareholder        DOUBLE  YES  None    None  None
-6                       a_shareholder_chg        DOUBLE  YES  None    None  None
-7             avg_share_per_account_total        DOUBLE  YES  None    None  None
-8         avg_share_per_account_total_chg        DOUBLE  YES  None    None  None
-9       avg_share_ratio_per_account_total        DOUBLE  YES  None    None  None
-10  avg_share_ratio_per_account_total_chg        DOUBLE  YES  None    None  None
-11            avg_share_per_account_float        DOUBLE  YES  None    None  None
-12        avg_share_per_account_float_chg        DOUBLE  YES  None    None  None
-13      avg_share_ratio_per_account_float        DOUBLE  YES  None    None  None
-14  avg_share_ratio_per_account_float_chg        DOUBLE  YES  None    None  None
+| publish_date  | instrument | end_date      | total_shareholder | total_shareholder_chg | a_shareholder | a_shareholder_chg | avg_share_per_account_total | avg_share_per_account_total_chg | avg_share_ratio_per_account_total | avg_share_ratio_per_account_total_chg | avg_share_per_account_float | avg_share_per_account_float_chg | avg_share_ratio_per_account_float | avg_share_ratio_per_account_float_chg |
+|---------------|------------|---------------|-------------------|-----------------------|---------------|-------------------|-----------------------------|---------------------------------|-----------------------------------|---------------------------------------|-----------------------------|---------------------------------|-----------------------------------|---------------------------------------|
+| timestamp[ns] | string     | timestamp[ns] | double            | double                | double        | double            | double                      | double                          | double                            | double                                | double                      | double                          | double                            | double                                |
+
 
 ========== cn_stock_shares ==========
-          column_name   column_type null   key default extra
-0                date  TIMESTAMP_NS  YES  None    None  None
-1          instrument       VARCHAR  YES  None    None  None
-2        total_shares        DOUBLE  YES  None    None  None
-3      a_float_shares        DOUBLE  YES  None    None  None
-4   free_float_shares        DOUBLE  YES  None    None  None
-5  total_float_shares        DOUBLE  YES  None    None  None
+| date          | instrument | total_shares | a_float_shares | free_float_shares | total_float_shares |
+|---------------|------------|--------------|----------------|-------------------|--------------------|
+| timestamp[ns] | string     | double       | double         | double            | double             |
+
 
 ========== cn_stock_status ==========
-          column_name   column_type null   key default extra
-0                date  TIMESTAMP_NS  YES  None    None  None
-1          instrument       VARCHAR  YES  None    None  None
-2           st_status       TINYINT  YES  None    None  None
-3     is_risk_warning       TINYINT  YES  None    None  None
-4           suspended       TINYINT  YES  None    None  None
-5  price_limit_status       TINYINT  YES  None    None  None
-6                exdr       TINYINT  YES  None    None  None
+| date          | instrument | st_status | is_risk_warning | suspended | price_limit_status | exdr |
+|---------------|------------|-----------|-----------------|-----------|--------------------|------|
+| timestamp[ns] | string     | int8      | int8            | int8      | int8               | int8 |
+
 
 ========== cn_stock_suspend ==========
-      column_name   column_type null   key default extra
-0            date  TIMESTAMP_NS  YES  None    None  None
-1      instrument       VARCHAR  YES  None    None  None
-2  suspend_period        BIGINT  YES  None    None  None
-3  suspend_reason       VARCHAR  YES  None    None  None
+| date          | instrument | suspend_period | suspend_reason |
+|---------------|------------|----------------|----------------|
+| timestamp[ns] | string     | int64          | string         |
+
 
 ========== cn_stock_name_change ==========
-  column_name   column_type null   key default extra
-0  instrument       VARCHAR  YES  None    None  None
-1  start_date  TIMESTAMP_NS  YES  None    None  None
-2    end_date  TIMESTAMP_NS  YES  None    None  None
-3        name       VARCHAR  YES  None    None  None
+| instrument | start_date    | end_date      | name   |
+|------------|---------------|---------------|--------|
+| string     | timestamp[ns] | timestamp[ns] | string |
+
 
 ========== cn_stock_dragon_list ==========
-          column_name   column_type null   key default extra
-0                date  TIMESTAMP_NS  YES  None    None  None
-1          instrument       VARCHAR  YES  None    None  None
-2              reason       VARCHAR  YES  None    None  None
-3               close        DOUBLE  YES  None    None  None
-4        price_change        DOUBLE  YES  None    None  None
-5      net_buy_amount        DOUBLE  YES  None    None  None
-6          buy_amount        DOUBLE  YES  None    None  None
-7         sell_amount        DOUBLE  YES  None    None  None
-8         deal_amount        DOUBLE  YES  None    None  None
-9   total_deal_amount        DOUBLE  YES  None    None  None
-10      net_buy_ratio        DOUBLE  YES  None    None  None
-11  deal_amount_ratio        DOUBLE  YES  None    None  None
-12               turn        DOUBLE  YES  None    None  None
-13   float_market_cap        DOUBLE  YES  None    None  None
-14    price_change_1d        DOUBLE  YES  None    None  None
-15    price_change_2d        DOUBLE  YES  None    None  None
-16    price_change_5d        DOUBLE  YES  None    None  None
+| date          | instrument | reason | close  | price_change | net_buy_amount | buy_amount | sell_amount | deal_amount | total_deal_amount | net_buy_ratio | deal_amount_ratio | turn   | float_market_cap | price_change_1d | price_change_2d | price_change_5d |
+|---------------|------------|--------|--------|--------------|----------------|------------|-------------|-------------|-------------------|---------------|-------------------|--------|------------------|-----------------|-----------------|-----------------|
+| timestamp[ns] | string     | string | double | double       | double         | double     | double      | double      | double            | double        | double            | double | double           | double          | double          | double          |
+
 
 ========== cn_stock_bar1d ==========
-      column_name   column_type null   key default extra
-0            date  TIMESTAMP_NS  YES  None    None  None
-1      instrument       VARCHAR  YES  None    None  None
-2            name       VARCHAR  YES  None    None  None
-3   adjust_factor        DOUBLE  YES  None    None  None
-4       pre_close        DOUBLE  YES  None    None  None
-5            open        DOUBLE  YES  None    None  None
-6           close        DOUBLE  YES  None    None  None
-7            high        DOUBLE  YES  None    None  None
-8             low        DOUBLE  YES  None    None  None
-9          volume        BIGINT  YES  None    None  None
-10    deal_number       INTEGER  YES  None    None  None
-11         amount        DOUBLE  YES  None    None  None
-12   change_ratio        DOUBLE  YES  None    None  None
-13           turn        DOUBLE  YES  None    None  None
-14    upper_limit        DOUBLE  YES  None    None  None
-15    lower_limit        DOUBLE  YES  None    None  None
+| date          | instrument | name   | adjust_factor | pre_close | open   | close  | high   | low    | volume | deal_number | amount | change_ratio | turn   | upper_limit | lower_limit |
+|---------------|------------|--------|---------------|-----------|--------|--------|--------|--------|--------|-------------|--------|--------------|--------|-------------|-------------|
+| timestamp[ns] | string     | string | double        | double    | double | double | double | double | int64  | int32       | double | double       | double | double      | double      |
+
 
 ========== cn_stock_limit_price ==========
-   column_name   column_type null   key default extra
-0         date  TIMESTAMP_NS  YES  None    None  None
-1   instrument       VARCHAR  YES  None    None  None
-2  upper_limit        DOUBLE  YES  None    None  None
-3  lower_limit        DOUBLE  YES  None    None  None
+| date          | instrument | upper_limit | lower_limit |
+|---------------|------------|-------------|-------------|
+| timestamp[ns] | string     | double      | double      |
 
-========== cn_stock_financial_changedate ==========
-      column_name   column_type null   key default extra
-0      instrument       VARCHAR  YES  None    None  None
-1     report_date  TIMESTAMP_NS  YES  None    None  None
-2      changedate       VARCHAR  YES  None    None  None
-3  statement_type       VARCHAR  YES  None    None  None
 
 ========== cn_stock_financial_income_general_pit ==========
-                                             column_name   column_type null   key default extra
-0                                                   date  TIMESTAMP_NS  YES  None    None  None
-1                                             instrument       VARCHAR  YES  None    None  None
-2                                            report_date  TIMESTAMP_NS  YES  None    None  None
-3                                       fs_quarter_index       TINYINT  YES  None    None  None
-4                                            change_type       TINYINT  YES  None    None  None
-5                        continuing_operation_net_profit        DOUBLE  YES  None    None  None
-6                      discontinued_operation_net_profit        DOUBLE  YES  None    None  None
-7                            othcom_income_cannt_reclass        DOUBLE  YES  None    None  None
-8                                  othcom_income_reclass        DOUBLE  YES  None    None  None
-9   income_derecognition_of_fin_assets_at_amortized_cost        DOUBLE  YES  None    None  None
-10                        own_credit_risk_fair_value_chg        DOUBLE  YES  None    None  None
-11                           expense_on_policy_dividends        DOUBLE  YES  None    None  None
-12                                credit_impairment_loss        DOUBLE  YES  None    None  None
-13                                   fair_value_chg_gain        DOUBLE  YES  None    None  None
-14                                   other_cannt_reclass        DOUBLE  YES  None    None  None
-15                                         other_reclass        DOUBLE  YES  None    None  None
-16           credit_impairment_of_other_debt_investments        DOUBLE  YES  None    None  None
-17                 other_debt_investments_fair_value_chg        DOUBLE  YES  None    None  None
-18                                          other_income        DOUBLE  YES  None    None  None
-19               other_equity_instruments_fair_value_chg        DOUBLE  YES  None    None  None
-20                                  income_othcom_income        DOUBLE  YES  None    None  None
-21                                            net_profit        DOUBLE  YES  None    None  None
-22                             totbal_diff_of_net_profit        DOUBLE  YES  None    None  None
-23                               spec_diff_of_net_profit        DOUBLE  YES  None    None  None
-24                              net_income_of_open_hedge        DOUBLE  YES  None    None  None
-25                           reinsurance_premium_expense        DOUBLE  YES  None    None  None
-26                                        interest_costs        DOUBLE  YES  None    None  None
-27                                       interest_income        DOUBLE  YES  None    None  None
-28                                          total_profit        DOUBLE  YES  None    None  None
-29                           totbal_diff_of_total_profit        DOUBLE  YES  None    None  None
-30                             spec_diff_of_total_profit        DOUBLE  YES  None    None  None
-31          available_for_sale_fin_assets_fair_value_chg        DOUBLE  YES  None    None  None
-32                                             eps_basic        DOUBLE  YES  None    None  None
-33           income_translation_diff_of_foreign_currency        DOUBLE  YES  None    None  None
-34                    invest_income_of_jv_and_associates        DOUBLE  YES  None    None  None
-35                                net_profit_to_minority        DOUBLE  YES  None    None  None
-36                              insurance_premium_income        DOUBLE  YES  None    None  None
-37                             othcom_income_to_minority        DOUBLE  YES  None    None  None
-38                     net_profit_to_parent_shareholders        DOUBLE  YES  None    None  None
-39     total_comprehensive_income_to_parent_shareholders        DOUBLE  YES  None    None  None
-40                  othcom_income_to_parent_shareholders        DOUBLE  YES  None    None  None
-41                                    income_tax_expense        DOUBLE  YES  None    None  None
-42                              fee_and_commission_costs        DOUBLE  YES  None    None  None
-43                             fee_and_commission_income        DOUBLE  YES  None    None  None
-44                                         invest_income        DOUBLE  YES  None    None  None
-45                       gains_or_losses_from_htm_to_afs        DOUBLE  YES  None    None  None
-46                       net_amount_of_insurance_reserve        DOUBLE  YES  None    None  None
-47       othcom_income_cannt_reclass_under_equity_method        DOUBLE  YES  None    None  None
-48             othcom_income_reclass_under_equity_method        DOUBLE  YES  None    None  None
-49                                         exchange_gain        DOUBLE  YES  None    None  None
-50                                cashflow_hedge_reserve        DOUBLE  YES  None    None  None
-51        effective_of_gains_or_losses_on_cashflow_hedge        DOUBLE  YES  None    None  None
-52                      research_and_development_expense        DOUBLE  YES  None    None  None
-53                                           eps_diluted        DOUBLE  YES  None    None  None
-54                                      taxes_and_levies        DOUBLE  YES  None    None  None
-55                                administrative_expense        DOUBLE  YES  None    None  None
-56                            total_comprehensive_income        DOUBLE  YES  None    None  None
-57                                      operating_profit        DOUBLE  YES  None    None  None
-58                       totbal_diff_of_operating_profit        DOUBLE  YES  None    None  None
-59                         spec_diff_of_operating_profit        DOUBLE  YES  None    None  None
-60                                    nonoperating_costs        DOUBLE  YES  None    None  None
-61                                   nonoperating_income        DOUBLE  YES  None    None  None
-62                                 total_operating_costs        DOUBLE  YES  None    None  None
-63                        totbal_diff_of_operating_costs        DOUBLE  YES  None    None  None
-64                          spec_diff_of_operating_costs        DOUBLE  YES  None    None  None
-65                               total_operating_revenue        DOUBLE  YES  None    None  None
-66                      totbal_diff_of_operating_revenue        DOUBLE  YES  None    None  None
-67                        spec_diff_of_operating_revenue        DOUBLE  YES  None    None  None
-68                                       operating_costs        DOUBLE  YES  None    None  None
-69                                     operating_revenue        DOUBLE  YES  None    None  None
-70                                       finance_expense        DOUBLE  YES  None    None  None
-71                                   fin_interest_income        DOUBLE  YES  None    None  None
-72                                  fin_interest_expense        DOUBLE  YES  None    None  None
-73                                 asset_impairment_loss        DOUBLE  YES  None    None  None
-74                                 asset_disposal_income        DOUBLE  YES  None    None  None
-75                             net_insurance_claims_paid        DOUBLE  YES  None    None  None
-76                                            surrenders        DOUBLE  YES  None    None  None
-77                                 chg_by_remeasurements        DOUBLE  YES  None    None  None
-78              othcom_income_from_reclass_of_fin_assets        DOUBLE  YES  None    None  None
-79                                        selling_epense        DOUBLE  YES  None    None  None
-80                           noncurr_assets_dispose_gain        DOUBLE  YES  None    None  None
-81                           noncurr_assets_dispose_loss        DOUBLE  YES  None    None  None
+| date          | instrument | report_date   | fs_quarter_index | change_type | continuing_operation_net_profit | discontinued_operation_net_profit | othcom_income_cannt_reclass | othcom_income_reclass | income_derecognition_of_fin_assets_at_amortized_cost | own_credit_risk_fair_value_chg | expense_on_policy_dividends | credit_impairment_loss | fair_value_chg_gain | other_cannt_reclass | other_reclass | credit_impairment_of_other_debt_investments | other_debt_investments_fair_value_chg | other_income | other_equity_instruments_fair_value_chg | income_othcom_income | net_profit | totbal_diff_of_net_profit | spec_diff_of_net_profit | net_income_of_open_hedge | reinsurance_premium_expense | interest_costs | interest_income | total_profit | totbal_diff_of_total_profit | spec_diff_of_total_profit | available_for_sale_fin_assets_fair_value_chg | eps_basic | income_translation_diff_of_foreign_currency | invest_income_of_jv_and_associates | net_profit_to_minority | insurance_premium_income | othcom_income_to_minority | net_profit_to_parent_shareholders | total_comprehensive_income_to_parent_shareholders | othcom_income_to_parent_shareholders | income_tax_expense | fee_and_commission_costs | fee_and_commission_income | invest_income | gains_or_losses_from_htm_to_afs | net_amount_of_insurance_reserve | othcom_income_cannt_reclass_under_equity_method | othcom_income_reclass_under_equity_method | exchange_gain | cashflow_hedge_reserve | effective_of_gains_or_losses_on_cashflow_hedge | research_and_development_expense | eps_diluted | taxes_and_levies | administrative_expense | total_comprehensive_income | operating_profit | totbal_diff_of_operating_profit | spec_diff_of_operating_profit | nonoperating_costs | nonoperating_income | total_operating_costs | totbal_diff_of_operating_costs | spec_diff_of_operating_costs | total_operating_revenue | totbal_diff_of_operating_revenue | spec_diff_of_operating_revenue | operating_costs | operating_revenue | finance_expense | fin_interest_income | fin_interest_expense | asset_impairment_loss | asset_disposal_income | net_insurance_claims_paid | surrenders | chg_by_remeasurements | othcom_income_from_reclass_of_fin_assets | selling_epense | noncurr_assets_dispose_gain | noncurr_assets_dispose_loss |
+|---------------|------------|---------------|------------------|-------------|---------------------------------|-----------------------------------|-----------------------------|-----------------------|------------------------------------------------------|--------------------------------|-----------------------------|------------------------|---------------------|---------------------|---------------|---------------------------------------------|---------------------------------------|--------------|-----------------------------------------|----------------------|------------|---------------------------|-------------------------|--------------------------|-----------------------------|----------------|-----------------|--------------|-----------------------------|---------------------------|----------------------------------------------|-----------|---------------------------------------------|------------------------------------|------------------------|--------------------------|---------------------------|-----------------------------------|---------------------------------------------------|--------------------------------------|--------------------|--------------------------|---------------------------|---------------|---------------------------------|---------------------------------|-------------------------------------------------|-------------------------------------------|---------------|------------------------|------------------------------------------------|----------------------------------|-------------|------------------|------------------------|----------------------------|------------------|---------------------------------|-------------------------------|--------------------|---------------------|-----------------------|--------------------------------|------------------------------|-------------------------|----------------------------------|--------------------------------|-----------------|-------------------|-----------------|---------------------|----------------------|-----------------------|-----------------------|---------------------------|------------|-----------------------|------------------------------------------|----------------|-----------------------------|-----------------------------|
+| timestamp[ns] | string     | timestamp[ns] | int8             | int8        | double                          | double                            | double                      | double                | double                                               | double                         | double                      | double                 | double              | double              | double        | double                                      | double                                | double       | double                                  | double               | double     | double                    | double                  | double                   | double                      | double         | double          | double       | double                      | double                    | double                                       | double    | double                                      | double                             | double                 | double                   | double                    | double                            | double                                            | double                               | double             | double                   | double                    | double        | double                          | double                          | double                                          | double                                    | double        | double                 | double                                         | double                           | double      | double           | double                 | double                     | double           | double                          | double                        | double             | double              | double                | double                         | double                       | double                  | double                           | double                         | double          | double            | double          | double              | double               | double                | double                | double                    | double     | double                | double                                   | double         | double                      | double                      |
+
 
 ========== cn_stock_financial_cashflow_general_pit ==========
-                                           column_name   column_type null   key default extra
-0                                                 date  TIMESTAMP_NS  YES  None    None  None
-1                                           instrument       VARCHAR  YES  None    None  None
-2                                          report_date  TIMESTAMP_NS  YES  None    None  None
-3                                     fs_quarter_index       TINYINT  YES  None    None  None
-4                                          change_type       TINYINT  YES  None    None  None
-5                            conv_corp_bonds_within_1y        DOUBLE  YES  None    None  None
-6              netinc_in_insurance_deposits_and_invest        DOUBLE  YES  None    None  None
-7             credit_impairment_loss_in_cashflow_sheet        DOUBLE  YES  None    None  None
-8                             debt_transfer_to_capital        DOUBLE  YES  None    None  None
-9                         cash_paid_for_debt_repayment        DOUBLE  YES  None    None  None
-10                            loss_from_fair_value_chg        DOUBLE  YES  None    None  None
-11                            others_in_cashflow_sheet        DOUBLE  YES  None    None  None
-12           cash_paid_for_dividends_profits_interests        DOUBLE  YES  None    None  None
-13                       cash_received_from_bond_issue        DOUBLE  YES  None    None  None
-14                       cash_received_from_borrowings        DOUBLE  YES  None    None  None
-15                 cash_paid_by_acquiring_subsidiaries        DOUBLE  YES  None    None  None
-16                                return_on_investment        DOUBLE  YES  None    None  None
-17              netinc_in_borrowings_from_central_bank        DOUBLE  YES  None    None  None
-18         netinc_in_loans_from_other_fin_institutions        DOUBLE  YES  None    None  None
-19                      capital_contributions_received        DOUBLE  YES  None    None  None
-20                   netinc_in_repurchase_transactions        DOUBLE  YES  None    None  None
-21                          depreciation_of_fa_oga_pba        DOUBLE  YES  None    None  None
-22                  loss_from_scraping_of_fixed_assets        DOUBLE  YES  None    None  None
-23                       netinc_in_disposal_fin_assets        DOUBLE  YES  None    None  None
-24         net_cash_received_from_disposal_filt_assets        DOUBLE  YES  None    None  None
-25                     loss_from_disposal_of_fa_ia_lta        DOUBLE  YES  None    None  None
-26        net_cash_received_from_disposal_subsidiaries        DOUBLE  YES  None    None  None
-27         cash_received_by_subsidiaries_from_minority        DOUBLE  YES  None    None  None
-28               cash_paid_by_subsidiaries_to_minority        DOUBLE  YES  None    None  None
-29              netinc_deposits_central_bank_interbank        DOUBLE  YES  None    None  None
-30                             decrease_in_inventories        DOUBLE  YES  None    None  None
-31                                  netinc_in_deposits        DOUBLE  YES  None    None  None
-32                        netinc_in_loans_and_advances        DOUBLE  YES  None    None  None
-33                                         invest_loss        DOUBLE  YES  None    None  None
-34                           cash_paid_for_investments        DOUBLE  YES  None    None  None
-35                                           net_cffia        DOUBLE  YES  None    None  None
-36                            totbal_diff_of_net_cffia        DOUBLE  YES  None    None  None
-37                              spec_diff_of_net_cffia        DOUBLE  YES  None    None  None
-38                                      subtotal_cifia        DOUBLE  YES  None    None  None
-39                                totbal_diff_of_cifia        DOUBLE  YES  None    None  None
-40                                  spec_diff_of_cifia        DOUBLE  YES  None    None  None
-41                                   subtotal_of_cofia        DOUBLE  YES  None    None  None
-42                                totbal_diff_of_cofia        DOUBLE  YES  None    None  None
-43                                  spec_diff_of_cofia        DOUBLE  YES  None    None  None
-44     netinc_in_loans_from_banks_and_fin_institutions        DOUBLE  YES  None    None  None
-45                      cash_paid_for_policy_dividends        DOUBLE  YES  None    None  None
-46                       cash_paid_for_other_investing        DOUBLE  YES  None    None  None
-47                       cash_paid_for_other_financing        DOUBLE  YES  None    None  None
-48                                         other_cofoa        DOUBLE  YES  None    None  None
-49        cash_paid_for_interests_fees_and_commissions        DOUBLE  YES  None    None  None
-50                                cash_paid_for_claims        DOUBLE  YES  None    None  None
-51                      cash_paid_for_taxes_and_levies        DOUBLE  YES  None    None  None
-52                             cash_paid_for_employees        DOUBLE  YES  None    None  None
-53                  cash_received_from_other_investing        DOUBLE  YES  None    None  None
-54                  cash_received_from_other_financing        DOUBLE  YES  None    None  None
-55                  cash_received_from_other_operating        DOUBLE  YES  None    None  None
-56                  net_cash_received_from_reinsurance        DOUBLE  YES  None    None  None
-57                         cash_received_from_premiums        DOUBLE  YES  None    None  None
-58                            taxes_and_levies_rebates        DOUBLE  YES  None    None  None
-59   cash_received_from_interests_fess_and_commissions        DOUBLE  YES  None    None  None
-60             cash_received_from_disposal_investments        DOUBLE  YES  None    None  None
-61                    amorization_of_intangible_assets        DOUBLE  YES  None    None  None
-62                                       cce_beginning        DOUBLE  YES  None    None  None
-63                                          cce_ending        DOUBLE  YES  None    None  None
-64                       effect_of_exchange_chg_on_cce        DOUBLE  YES  None    None  None
-65                                       netinc_in_cce        DOUBLE  YES  None    None  None
-66                        net_profit_in_cashflow_sheet        DOUBLE  YES  None    None  None
-67                  finance_expenses_in_cashflow_sheet        DOUBLE  YES  None    None  None
-68                              cash_balance_beginning        DOUBLE  YES  None    None  None
-69                                 cash_balance_ending        DOUBLE  YES  None    None  None
-70                               cce_balance_beginning        DOUBLE  YES  None    None  None
-71                                  cce_balance_ending        DOUBLE  YES  None    None  None
-72                        totbal_diff_of_netinc_in_cce        DOUBLE  YES  None    None  None
-73                          spec_diff_of_netinc_in_cce        DOUBLE  YES  None    None  None
-74                                           net_cfffa        DOUBLE  YES  None    None  None
-75                            totbal_diff_of_net_cfffa        DOUBLE  YES  None    None  None
-76                              spec_diff_of_net_cfffa        DOUBLE  YES  None    None  None
-77                                      subtotal_ciffa        DOUBLE  YES  None    None  None
-78                                totbal_diff_of_ciffa        DOUBLE  YES  None    None  None
-79                                  spec_diff_of_ciffa        DOUBLE  YES  None    None  None
-80                                   subtotal_of_coffa        DOUBLE  YES  None    None  None
-81                                totbal_diff_of_coffa        DOUBLE  YES  None    None  None
-82                                  spec_diff_of_coffa        DOUBLE  YES  None    None  None
-83                      increase_in_operating_payables        DOUBLE  YES  None    None  None
-84                   decrease_in_operating_receivables        DOUBLE  YES  None    None  None
-85                                           net_cffoa        DOUBLE  YES  None    None  None
-86                            totbal_diff_of_net_cffoa        DOUBLE  YES  None    None  None
-87                              spec_diff_of_net_cffoa        DOUBLE  YES  None    None  None
-88                                      subtotal_cifoa        DOUBLE  YES  None    None  None
-89                                totbal_diff_of_cifoa        DOUBLE  YES  None    None  None
-90                                  spec_diff_of_cifoa        DOUBLE  YES  None    None  None
-91                                      subtotal_cofoa        DOUBLE  YES  None    None  None
-92                                totbal_diff_of_cofoa        DOUBLE  YES  None    None  None
-93                                  spec_diff_of_cofoa        DOUBLE  YES  None    None  None
-94                              fin_lease_fixed_assets        DOUBLE  YES  None    None  None
-95                              netinc_in_pledge_loans        DOUBLE  YES  None    None  None
-96                    cash_paid_for_goods_and_services        DOUBLE  YES  None    None  None
-97                           cash_paid_for_filt_assets        DOUBLE  YES  None    None  None
-98                            asset_impairment_reserve        DOUBLE  YES  None    None  None
-99                increase_in_deferred_tax_liabilities        DOUBLE  YES  None    None  None
-100                    decrease_in_deferred_tax_assets        DOUBLE  YES  None    None  None
-101              cash_received_from_sales_and_services        DOUBLE  YES  None    None  None
-102         amortization_of_longterm_deferred_expenses        DOUBLE  YES  None    None  None
-103                             netinc_in_cce_indirect        DOUBLE  YES  None    None  None
-104              totbal_diff_of_netinc_in_cce_indirect        DOUBLE  YES  None    None  None
-105                spec_diff_of_netinc_in_cce_indirect        DOUBLE  YES  None    None  None
-106                                 net_cffoa_indirect        DOUBLE  YES  None    None  None
-107                  totbal_diff_of_net_cffoa_indirect        DOUBLE  YES  None    None  None
-108                    spec_diff_of_net_cffoa_indirect        DOUBLE  YES  None    None  None
+| date          | instrument | report_date   | fs_quarter_index | change_type | conv_corp_bonds_within_1y | netinc_in_insurance_deposits_and_invest | credit_impairment_loss_in_cashflow_sheet | debt_transfer_to_capital | cash_paid_for_debt_repayment | loss_from_fair_value_chg | others_in_cashflow_sheet | cash_paid_for_dividends_profits_interests | cash_received_from_bond_issue | cash_received_from_borrowings | cash_paid_by_acquiring_subsidiaries | return_on_investment | netinc_in_borrowings_from_central_bank | netinc_in_loans_from_other_fin_institutions | capital_contributions_received | netinc_in_repurchase_transactions | depreciation_of_fa_oga_pba | loss_from_scraping_of_fixed_assets | netinc_in_disposal_fin_assets | net_cash_received_from_disposal_filt_assets | loss_from_disposal_of_fa_ia_lta | net_cash_received_from_disposal_subsidiaries | cash_received_by_subsidiaries_from_minority | cash_paid_by_subsidiaries_to_minority | netinc_deposits_central_bank_interbank | decrease_in_inventories | netinc_in_deposits | netinc_in_loans_and_advances | invest_loss | cash_paid_for_investments | net_cffia | totbal_diff_of_net_cffia | spec_diff_of_net_cffia | subtotal_cifia | totbal_diff_of_cifia | spec_diff_of_cifia | subtotal_of_cofia | totbal_diff_of_cofia | spec_diff_of_cofia | netinc_in_loans_from_banks_and_fin_institutions | cash_paid_for_policy_dividends | cash_paid_for_other_investing | cash_paid_for_other_financing | other_cofoa | cash_paid_for_interests_fees_and_commissions | cash_paid_for_claims | cash_paid_for_taxes_and_levies | cash_paid_for_employees | cash_received_from_other_investing | cash_received_from_other_financing | cash_received_from_other_operating | net_cash_received_from_reinsurance | cash_received_from_premiums | taxes_and_levies_rebates | cash_received_from_interests_fess_and_commissions | cash_received_from_disposal_investments | amorization_of_intangible_assets | cce_beginning | cce_ending | effect_of_exchange_chg_on_cce | netinc_in_cce | net_profit_in_cashflow_sheet | finance_expenses_in_cashflow_sheet | cash_balance_beginning | cash_balance_ending | cce_balance_beginning | cce_balance_ending | totbal_diff_of_netinc_in_cce | spec_diff_of_netinc_in_cce | net_cfffa | totbal_diff_of_net_cfffa | spec_diff_of_net_cfffa | subtotal_ciffa | totbal_diff_of_ciffa | spec_diff_of_ciffa | subtotal_of_coffa | totbal_diff_of_coffa | spec_diff_of_coffa | increase_in_operating_payables | decrease_in_operating_receivables | net_cffoa | totbal_diff_of_net_cffoa | spec_diff_of_net_cffoa | subtotal_cifoa | totbal_diff_of_cifoa | spec_diff_of_cifoa | subtotal_cofoa | totbal_diff_of_cofoa | spec_diff_of_cofoa | fin_lease_fixed_assets | netinc_in_pledge_loans | cash_paid_for_goods_and_services | cash_paid_for_filt_assets | asset_impairment_reserve | increase_in_deferred_tax_liabilities | decrease_in_deferred_tax_assets | cash_received_from_sales_and_services | amortization_of_longterm_deferred_expenses | netinc_in_cce_indirect | totbal_diff_of_netinc_in_cce_indirect | spec_diff_of_netinc_in_cce_indirect | net_cffoa_indirect | totbal_diff_of_net_cffoa_indirect | spec_diff_of_net_cffoa_indirect |
+|---------------|------------|---------------|------------------|-------------|---------------------------|-----------------------------------------|------------------------------------------|--------------------------|------------------------------|--------------------------|--------------------------|-------------------------------------------|-------------------------------|-------------------------------|-------------------------------------|----------------------|----------------------------------------|---------------------------------------------|--------------------------------|-----------------------------------|----------------------------|------------------------------------|-------------------------------|---------------------------------------------|---------------------------------|----------------------------------------------|---------------------------------------------|---------------------------------------|----------------------------------------|-------------------------|--------------------|------------------------------|-------------|---------------------------|-----------|--------------------------|------------------------|----------------|----------------------|--------------------|-------------------|----------------------|--------------------|-------------------------------------------------|--------------------------------|-------------------------------|-------------------------------|-------------|----------------------------------------------|----------------------|--------------------------------|-------------------------|------------------------------------|------------------------------------|------------------------------------|------------------------------------|-----------------------------|--------------------------|---------------------------------------------------|-----------------------------------------|----------------------------------|---------------|------------|-------------------------------|---------------|------------------------------|------------------------------------|------------------------|---------------------|-----------------------|--------------------|------------------------------|----------------------------|-----------|--------------------------|------------------------|----------------|----------------------|--------------------|-------------------|----------------------|--------------------|--------------------------------|-----------------------------------|-----------|--------------------------|------------------------|----------------|----------------------|--------------------|----------------|----------------------|--------------------|------------------------|------------------------|----------------------------------|---------------------------|--------------------------|--------------------------------------|---------------------------------|---------------------------------------|--------------------------------------------|------------------------|---------------------------------------|-------------------------------------|--------------------|-----------------------------------|---------------------------------|
+| timestamp[ns] | string     | timestamp[ns] | int8             | int8        | double                    | double                                  | double                                   | double                   | double                       | double                   | double                   | double                                    | double                        | double                        | double                              | double               | double                                 | double                                      | double                         | double                            | double                     | double                             | double                        | double                                      | double                          | double                                       | double                                      | double                                | double                                 | double                  | double             | double                       | double      | double                    | double    | double                   | double                 | double         | double               | double             | double            | double               | double             | double                                          | double                         | double                        | double                        | double      | double                                       | double               | double                         | double                  | double                             | double                             | double                             | double                             | double                      | double                   | double                                            | double                                  | double                           | double        | double     | double                        | double        | double                       | double                             | double                 | double              | double                | double             | double                       | double                     | double    | double                   | double                 | double         | double               | double             | double            | double               | double             | double                         | double                            | double    | double                   | double                 | double         | double               | double             | double         | double               | double             | double                 | double                 | double                           | double                    | double                   | double                               | double                          | double                                | double                                     | double                 | double                                | double                              | double             | double                            | double                          |
+
 
 ========== cn_stock_financial_balance_general_pit ==========
-                                           column_name   column_type null   key default extra
-0                                                 date  TIMESTAMP_NS  YES  None    None  None
-1                                           instrument       VARCHAR  YES  None    None  None
-2                                          report_date  TIMESTAMP_NS  YES  None    None  None
-3                                     fs_quarter_index       TINYINT  YES  None    None  None
-4                                          change_type       TINYINT  YES  None    None  None
-5                    noncurr_liabilities_due_within_1y        DOUBLE  YES  None    None  None
-6                         noncurr_assets_due_within_1y        DOUBLE  YES  None    None  None
-7                                      general_reserve        DOUBLE  YES  None    None  None
-8                                     specific_reserve        DOUBLE  YES  None    None  None
-9                                    specific_payables        DOUBLE  YES  None    None  None
-10                   fin_assets_purchased_under_resale        DOUBLE  YES  None    None  None
-11                            tradable_fin_liabilities        DOUBLE  YES  None    None  None
-12                                 tradable_fin_assets        DOUBLE  YES  None    None  None
-13                             acting_trading_payables        DOUBLE  YES  None    None  None
-14                               underwriting_payables        DOUBLE  YES  None    None  None
-15                            fin_assets_by_fair_value        DOUBLE  YES  None    None  None
-16                        fin_assets_by_amortized_cost        DOUBLE  YES  None    None  None
-17                                   preference_shares        DOUBLE  YES  None    None  None
-18                                 right_of_use_assets        DOUBLE  YES  None    None  None
-19                         insurance_contract_reserves        DOUBLE  YES  None    None  None
-20                                    debt_investments        DOUBLE  YES  None    None  None
-21              preference_of_other_equity_instruments        DOUBLE  YES  None    None  None
-22                              other_debt_investments        DOUBLE  YES  None    None  None
-23                                      other_payables        DOUBLE  YES  None    None  None
-24                                  other_payables_sum        DOUBLE  YES  None    None  None
-25                                   other_receivables        DOUBLE  YES  None    None  None
-26                               other_receivables_sum        DOUBLE  YES  None    None  None
-27                            other_equity_instruments        DOUBLE  YES  None    None  None
-28                            other_equity_investments        DOUBLE  YES  None    None  None
-29                           other_current_liabilities        DOUBLE  YES  None    None  None
-30                                other_current_assets        DOUBLE  YES  None    None  None
-31                               balance_othcom_income        DOUBLE  YES  None    None  None
-32                           other_noncurr_liabilities        DOUBLE  YES  None    None  None
-33                                other_noncurr_assets        DOUBLE  YES  None    None  None
-34                            other_noncurr_fin_assets        DOUBLE  YES  None    None  None
-35                        fin_assets_sold_under_resale        DOUBLE  YES  None    None  None
-36                                  loans_and_advances        DOUBLE  YES  None    None  None
-37                       available_for_sale_fin_assets        DOUBLE  YES  None    None  None
-38                                contract_liabilities        DOUBLE  YES  None    None  None
-39                                     contract_assets        DOUBLE  YES  None    None  None
-40                         borrowing_from_central_bank        DOUBLE  YES  None    None  None
-41             deposits_from_banks_and_fin_instiutions        DOUBLE  YES  None    None  None
-42                                            goodwill        DOUBLE  YES  None    None  None
-43                                        fixed_assets        DOUBLE  YES  None    None  None
-44                                    fixed_assets_sum        DOUBLE  YES  None    None  None
-45                               fixed_assets_disposal        DOUBLE  YES  None    None  None
-46                            construction_in_progress        DOUBLE  YES  None    None  None
-47                        construction_in_progress_sum        DOUBLE  YES  None    None  None
-48        balance_translation_diff_of_foreign_currency        DOUBLE  YES  None    None  None
-49                                         inventories        DOUBLE  YES  None    None  None
-50                                       share_capital        DOUBLE  YES  None    None  None
-51                                  minority_interests        DOUBLE  YES  None    None  None
-52                                   project_materials        DOUBLE  YES  None    None  None
-53                                     treasury_shares        DOUBLE  YES  None    None  None
-54                            taxes_and_levies_payable        DOUBLE  YES  None    None  None
-55                                       bonds_payable        DOUBLE  YES  None    None  None
-56                                reinsurance_payables        DOUBLE  YES  None    None  None
-57                                    interest_payable        DOUBLE  YES  None    None  None
-58                        fees_and_commissions_payable        DOUBLE  YES  None    None  None
-59                             shortterm_bonds_payable        DOUBLE  YES  None    None  None
-60                                       notes_payable        DOUBLE  YES  None    None  None
-61                          notes_and_accounts_payable        DOUBLE  YES  None    None  None
-62                           employee_benefits_payable        DOUBLE  YES  None    None  None
-63                                   dividends_payable        DOUBLE  YES  None    None  None
-64                                    accounts_payable        DOUBLE  YES  None    None  None
-65                                 premiums_receivable        DOUBLE  YES  None    None  None
-66             receivable_reinsurance_contract_reserve        DOUBLE  YES  None    None  None
-67                             reinsurance_receivables        DOUBLE  YES  None    None  None
-68                                 interest_receivable        DOUBLE  YES  None    None  None
-69                               receivables_financing        DOUBLE  YES  None    None  None
-70                                    notes_receivable        DOUBLE  YES  None    None  None
-71                       notes_and_accounts_receivable        DOUBLE  YES  None    None  None
-72                                dividends_receivable        DOUBLE  YES  None    None  None
-73                                 accounts_receivable        DOUBLE  YES  None    None  None
-74                                   development_costs        DOUBLE  YES  None    None  None
-75                 total_equity_to_parent_shareholders        DOUBLE  YES  None    None  None
-76                                  total_owner_equity        DOUBLE  YES  None    None  None
-77                                 investment_property        DOUBLE  YES  None    None  None
-78               loans_from_banks_and_fin_institutions        DOUBLE  YES  None    None  None
-79                 loans_to_banks_and_fin_institutions        DOUBLE  YES  None    None  None
-80                           liabilities_held_for_sale        DOUBLE  YES  None    None  None
-81                                assets_held_for_sale        DOUBLE  YES  None    None  None
-82                         held_to_maturity_invesments        DOUBLE  YES  None    None  None
-83                                   intangible_assets        DOUBLE  YES  None    None  None
-84                                undistributed_profit        DOUBLE  YES  None    None  None
-85                                     perpetual_bonds        DOUBLE  YES  None    None  None
-86                                  oil_and_gas_assets        DOUBLE  YES  None    None  None
-87                           total_current_liabilities        DOUBLE  YES  None    None  None
-88                  totbal_diff_of_current_liabilities        DOUBLE  YES  None    None  None
-89                    spec_diff_of_current_liabilities        DOUBLE  YES  None    None  None
-90                                total_current_assets        DOUBLE  YES  None    None  None
-91                       totbal_diff_of_current_assets        DOUBLE  YES  None    None  None
-92                         spec_diff_of_current_assets        DOUBLE  YES  None    None  None
-93                        productive_biological_assets        DOUBLE  YES  None    None  None
-94                                     surplus_reserve        DOUBLE  YES  None    None  None
-95                                shortterm_borrowings        DOUBLE  YES  None    None  None
-96                                   lease_liabilities        DOUBLE  YES  None    None  None
-97                                  settlment_reserves        DOUBLE  YES  None    None  None
-98                    spec_diff_of_shareholders_equity        DOUBLE  YES  None    None  None
-99                  totbal_diff_of_shareholders_equity        DOUBLE  YES  None    None  None
-100                        derivatives_fin_liabilities        DOUBLE  YES  None    None  None
-101                             derivatives_fin_assets        DOUBLE  YES  None    None  None
-102  totbal_diff_of_liabilities_and_shareholder_equity        DOUBLE  YES  None    None  None
-103    spec_diff_of_liabilities_and_shareholder_equity        DOUBLE  YES  None    None  None
-104                                  total_liabilities        DOUBLE  YES  None    None  None
-105                 total_liabilities_and_owner_equity        DOUBLE  YES  None    None  None
-106                   totbal_diff_of_total_liabilities        DOUBLE  YES  None    None  None
-107                     spec_diff_of_total_liabilities        DOUBLE  YES  None    None  None
-108                                   moneytary_assets        DOUBLE  YES  None    None  None
-109                        totbal_diff_of_total_assets        DOUBLE  YES  None    None  None
-110                          spec_diff_of_total_assets        DOUBLE  YES  None    None  None
-111                                       total_assets        DOUBLE  YES  None    None  None
-112                                   capital_reserves        DOUBLE  YES  None    None  None
-113                           deferred_tax_liabilities        DOUBLE  YES  None    None  None
-114                                deferred_tax_assets        DOUBLE  YES  None    None  None
-115                deferred_income_current_liabilities        DOUBLE  YES  None    None  None
-116                deferred_income_noncurr_liabilities        DOUBLE  YES  None    None  None
-117                                longterm_borrowings        DOUBLE  YES  None    None  None
-118                                  longterm_payables        DOUBLE  YES  None    None  None
-119                              longterm_payables_sum        DOUBLE  YES  None    None  None
-120                         longterm_employee_benefits        DOUBLE  YES  None    None  None
-121                               longterm_receivables        DOUBLE  YES  None    None  None
-122                           longterm_prepaid_expense        DOUBLE  YES  None    None  None
-123                        longterm_equity_investments        DOUBLE  YES  None    None  None
-124                          total_noncurr_liabilities        DOUBLE  YES  None    None  None
-125                 totbal_diff_of_noncurr_liabilities        DOUBLE  YES  None    None  None
-126                   spec_diff_of_noncurr_liabilities        DOUBLE  YES  None    None  None
-127                               total_noncurr_assets        DOUBLE  YES  None    None  None
-128                      totbal_diff_of_noncurr_assets        DOUBLE  YES  None    None  None
-129                        spec_diff_of_noncurr_assets        DOUBLE  YES  None    None  None
-130                                        prepayments        DOUBLE  YES  None    None  None
-131                                           advances        DOUBLE  YES  None    None  None
-132                                         provisions        DOUBLE  YES  None    None  None
+| date          | instrument | report_date   | fs_quarter_index | change_type | noncurr_liabilities_due_within_1y | noncurr_assets_due_within_1y | general_reserve | specific_reserve | specific_payables | fin_assets_purchased_under_resale | tradable_fin_liabilities | tradable_fin_assets | acting_trading_payables | underwriting_payables | fin_assets_by_fair_value | fin_assets_by_amortized_cost | preference_shares | right_of_use_assets | insurance_contract_reserves | debt_investments | preference_of_other_equity_instruments | other_debt_investments | other_payables | other_payables_sum | other_receivables | other_receivables_sum | other_equity_instruments | other_equity_investments | other_current_liabilities | other_current_assets | balance_othcom_income | other_noncurr_liabilities | other_noncurr_assets | other_noncurr_fin_assets | fin_assets_sold_under_resale | loans_and_advances | available_for_sale_fin_assets | contract_liabilities | contract_assets | borrowing_from_central_bank | deposits_from_banks_and_fin_instiutions | goodwill | fixed_assets | fixed_assets_sum | fixed_assets_disposal | construction_in_progress | construction_in_progress_sum | balance_translation_diff_of_foreign_currency | inventories | share_capital | minority_interests | project_materials | treasury_shares | taxes_and_levies_payable | bonds_payable | reinsurance_payables | interest_payable | fees_and_commissions_payable | shortterm_bonds_payable | notes_payable | notes_and_accounts_payable | employee_benefits_payable | dividends_payable | accounts_payable | premiums_receivable | receivable_reinsurance_contract_reserve | reinsurance_receivables | interest_receivable | receivables_financing | notes_receivable | notes_and_accounts_receivable | dividends_receivable | accounts_receivable | development_costs | total_equity_to_parent_shareholders | total_owner_equity | investment_property | loans_from_banks_and_fin_institutions | loans_to_banks_and_fin_institutions | liabilities_held_for_sale | assets_held_for_sale | held_to_maturity_invesments | intangible_assets | undistributed_profit | perpetual_bonds | oil_and_gas_assets | total_current_liabilities | totbal_diff_of_current_liabilities | spec_diff_of_current_liabilities | total_current_assets | totbal_diff_of_current_assets | spec_diff_of_current_assets | productive_biological_assets | surplus_reserve | shortterm_borrowings | lease_liabilities | settlment_reserves | spec_diff_of_shareholders_equity | totbal_diff_of_shareholders_equity | derivatives_fin_liabilities | derivatives_fin_assets | totbal_diff_of_liabilities_and_shareholder_equity | spec_diff_of_liabilities_and_shareholder_equity | total_liabilities | total_liabilities_and_owner_equity | totbal_diff_of_total_liabilities | spec_diff_of_total_liabilities | moneytary_assets | totbal_diff_of_total_assets | spec_diff_of_total_assets | total_assets | capital_reserves | deferred_tax_liabilities | deferred_tax_assets | deferred_income_current_liabilities | deferred_income_noncurr_liabilities | longterm_borrowings | longterm_payables | longterm_payables_sum | longterm_employee_benefits | longterm_receivables | longterm_prepaid_expense | longterm_equity_investments | total_noncurr_liabilities | totbal_diff_of_noncurr_liabilities | spec_diff_of_noncurr_liabilities | total_noncurr_assets | totbal_diff_of_noncurr_assets | spec_diff_of_noncurr_assets | prepayments | advances | provisions |
+|---------------|------------|---------------|------------------|-------------|-----------------------------------|------------------------------|-----------------|------------------|-------------------|-----------------------------------|--------------------------|---------------------|-------------------------|-----------------------|--------------------------|------------------------------|-------------------|---------------------|-----------------------------|------------------|----------------------------------------|------------------------|----------------|--------------------|-------------------|-----------------------|--------------------------|--------------------------|---------------------------|----------------------|-----------------------|---------------------------|----------------------|--------------------------|------------------------------|--------------------|-------------------------------|----------------------|-----------------|-----------------------------|-----------------------------------------|----------|--------------|------------------|-----------------------|--------------------------|------------------------------|----------------------------------------------|-------------|---------------|--------------------|-------------------|-----------------|--------------------------|---------------|----------------------|------------------|------------------------------|-------------------------|---------------|----------------------------|---------------------------|-------------------|------------------|---------------------|-----------------------------------------|-------------------------|---------------------|-----------------------|------------------|-------------------------------|----------------------|---------------------|-------------------|-------------------------------------|--------------------|---------------------|---------------------------------------|-------------------------------------|---------------------------|----------------------|-----------------------------|-------------------|----------------------|-----------------|--------------------|---------------------------|------------------------------------|----------------------------------|----------------------|-------------------------------|-----------------------------|------------------------------|-----------------|----------------------|-------------------|--------------------|----------------------------------|------------------------------------|-----------------------------|------------------------|---------------------------------------------------|-------------------------------------------------|-------------------|------------------------------------|----------------------------------|--------------------------------|------------------|-----------------------------|---------------------------|--------------|------------------|--------------------------|---------------------|-------------------------------------|-------------------------------------|---------------------|-------------------|-----------------------|----------------------------|----------------------|--------------------------|-----------------------------|---------------------------|------------------------------------|----------------------------------|----------------------|-------------------------------|-----------------------------|-------------|----------|------------|
+| timestamp[ns] | string     | timestamp[ns] | int8             | int8        | double                            | double                       | double          | double           | double            | double                            | double                   | double              | double                  | double                | double                   | double                       | double            | double              | double                      | double           | double                                 | double                 | double         | double             | double            | double                | double                   | double                   | double                    | double               | double                | double                    | double               | double                   | double                       | double             | double                        | double               | double          | double                      | double                                  | double   | double       | double           | double                | double                   | double                       | double                                       | double      | double        | double             | double            | double          | double                   | double        | double               | double           | double                       | double                  | double        | double                     | double                    | double            | double           | double              | double                                  | double                  | double              | double                | double           | double                        | double               | double              | double            | double                              | double             | double              | double                                | double                              | double                    | double               | double                      | double            | double               | double          | double             | double                    | double                             | double                           | double               | double                        | double                      | double                       | double          | double               | double            | double             | double                           | double                             | double                      | double                 | double                                            | double                                          | double            | double                             | double                           | double                         | double           | double                      | double                    | double       | double           | double                   | double              | double                              | double                              | double              | double            | double                | double                     | double               | double                   | double                      | double                    | double                             | double                           | double               | double                        | double                      | double      | double   | double     |
+
 
 ========== cn_stock_financial_ttm_shift ==========
-                                                  column_name   column_type null   key default extra
-0                                                        date  TIMESTAMP_NS  YES  None    None  None
-1                                                  instrument       VARCHAR  YES  None    None  None
-2                                                 report_date  TIMESTAMP_NS  YES  None    None  None
-3                                                       shift       TINYINT  YES  None    None  None
-4                                 total_operating_revenue_ttm        DOUBLE  YES  None    None  None
-5                                       operating_revenue_ttm        DOUBLE  YES  None    None  None
-6                                         interest_income_ttm        DOUBLE  YES  None    None  None
-7                                insurance_premium_income_ttm        DOUBLE  YES  None    None  None
-8                               fee_and_commission_income_ttm        DOUBLE  YES  None    None  None
-9                          spec_diff_of_operating_revenue_ttm        DOUBLE  YES  None    None  None
-10                       totbal_diff_of_operating_revenue_ttm        DOUBLE  YES  None    None  None
-11                                  total_operating_costs_ttm        DOUBLE  YES  None    None  None
-12                                        operating_costs_ttm        DOUBLE  YES  None    None  None
-13                                         interest_costs_ttm        DOUBLE  YES  None    None  None
-14                               fee_and_commission_costs_ttm        DOUBLE  YES  None    None  None
-15                                             surrenders_ttm        DOUBLE  YES  None    None  None
-16                              net_insurance_claims_paid_ttm        DOUBLE  YES  None    None  None
-17                        net_amount_of_insurance_reserve_ttm        DOUBLE  YES  None    None  None
-18                            expense_on_policy_dividends_ttm        DOUBLE  YES  None    None  None
-19                            reinsurance_premium_expense_ttm        DOUBLE  YES  None    None  None
-20                                       taxes_and_levies_ttm        DOUBLE  YES  None    None  None
-21                                         selling_epense_ttm        DOUBLE  YES  None    None  None
-22                                 administrative_expense_ttm        DOUBLE  YES  None    None  None
-23                       research_and_development_expense_ttm        DOUBLE  YES  None    None  None
-24                                        finance_expense_ttm        DOUBLE  YES  None    None  None
-25                                   fin_interest_expense_ttm        DOUBLE  YES  None    None  None
-26                                    fin_interest_income_ttm        DOUBLE  YES  None    None  None
-27                                  asset_impairment_loss_ttm        DOUBLE  YES  None    None  None
-28                                 credit_impairment_loss_ttm        DOUBLE  YES  None    None  None
-29                           spec_diff_of_operating_costs_ttm        DOUBLE  YES  None    None  None
-30                         totbal_diff_of_operating_costs_ttm        DOUBLE  YES  None    None  None
-31                                    fair_value_chg_gain_ttm        DOUBLE  YES  None    None  None
-32                                          invest_income_ttm        DOUBLE  YES  None    None  None
-33                     invest_income_of_jv_and_associates_ttm        DOUBLE  YES  None    None  None
-34   income_derecognition_of_fin_assets_at_amortized_cost_ttm        DOUBLE  YES  None    None  None
-35                               net_income_of_open_hedge_ttm        DOUBLE  YES  None    None  None
-36                                          exchange_gain_ttm        DOUBLE  YES  None    None  None
-37                                  asset_disposal_income_ttm        DOUBLE  YES  None    None  None
-38                                           other_income_ttm        DOUBLE  YES  None    None  None
-39                          spec_diff_of_operating_profit_ttm        DOUBLE  YES  None    None  None
-40                        totbal_diff_of_operating_profit_ttm        DOUBLE  YES  None    None  None
-41                                       operating_profit_ttm        DOUBLE  YES  None    None  None
-42                                    nonoperating_income_ttm        DOUBLE  YES  None    None  None
-43                            noncurr_assets_dispose_gain_ttm        DOUBLE  YES  None    None  None
-44                                     nonoperating_costs_ttm        DOUBLE  YES  None    None  None
-45                            noncurr_assets_dispose_loss_ttm        DOUBLE  YES  None    None  None
-46                              spec_diff_of_total_profit_ttm        DOUBLE  YES  None    None  None
-47                            totbal_diff_of_total_profit_ttm        DOUBLE  YES  None    None  None
-48                                           total_profit_ttm        DOUBLE  YES  None    None  None
-49                                     income_tax_expense_ttm        DOUBLE  YES  None    None  None
-50                                spec_diff_of_net_profit_ttm        DOUBLE  YES  None    None  None
-51                              totbal_diff_of_net_profit_ttm        DOUBLE  YES  None    None  None
-52                                             net_profit_ttm        DOUBLE  YES  None    None  None
-53                        continuing_operation_net_profit_ttm        DOUBLE  YES  None    None  None
-54                      discontinued_operation_net_profit_ttm        DOUBLE  YES  None    None  None
-55                      net_profit_to_parent_shareholders_ttm        DOUBLE  YES  None    None  None
-56                                 net_profit_to_minority_ttm        DOUBLE  YES  None    None  None
-57                                              eps_basic_ttm        DOUBLE  YES  None    None  None
-58                                            eps_diluted_ttm        DOUBLE  YES  None    None  None
-59                                   income_othcom_income_ttm        DOUBLE  YES  None    None  None
-60                   othcom_income_to_parent_shareholders_ttm        DOUBLE  YES  None    None  None
-61                            othcom_income_cannt_reclass_ttm        DOUBLE  YES  None    None  None
-62                                  chg_by_remeasurements_ttm        DOUBLE  YES  None    None  None
-63        othcom_income_cannt_reclass_under_equity_method_ttm        DOUBLE  YES  None    None  None
-64                                    other_cannt_reclass_ttm        DOUBLE  YES  None    None  None
-65                other_equity_instruments_fair_value_chg_ttm        DOUBLE  YES  None    None  None
-66                         own_credit_risk_fair_value_chg_ttm        DOUBLE  YES  None    None  None
-67                                  othcom_income_reclass_ttm        DOUBLE  YES  None    None  None
-68              othcom_income_reclass_under_equity_method_ttm        DOUBLE  YES  None    None  None
-69           available_for_sale_fin_assets_fair_value_chg_ttm        DOUBLE  YES  None    None  None
-70                        gains_or_losses_from_htm_to_afs_ttm        DOUBLE  YES  None    None  None
-71         effective_of_gains_or_losses_on_cashflow_hedge_ttm        DOUBLE  YES  None    None  None
-72            income_translation_diff_of_foreign_currency_ttm        DOUBLE  YES  None    None  None
-73                                          other_reclass_ttm        DOUBLE  YES  None    None  None
-74                  other_debt_investments_fair_value_chg_ttm        DOUBLE  YES  None    None  None
-75               othcom_income_from_reclass_of_fin_assets_ttm        DOUBLE  YES  None    None  None
-76            credit_impairment_of_other_debt_investments_ttm        DOUBLE  YES  None    None  None
-77                                 cashflow_hedge_reserve_ttm        DOUBLE  YES  None    None  None
-78                              othcom_income_to_minority_ttm        DOUBLE  YES  None    None  None
-79                             total_comprehensive_income_ttm        DOUBLE  YES  None    None  None
-80      total_comprehensive_income_to_parent_shareholders_ttm        DOUBLE  YES  None    None  None
-81                  cash_received_from_sales_and_services_ttm        DOUBLE  YES  None    None  None
-82                                     netinc_in_deposits_ttm        DOUBLE  YES  None    None  None
-83                 netinc_in_borrowings_from_central_bank_ttm        DOUBLE  YES  None    None  None
-84            netinc_in_loans_from_other_fin_institutions_ttm        DOUBLE  YES  None    None  None
-85                            cash_received_from_premiums_ttm        DOUBLE  YES  None    None  None
-86                     net_cash_received_from_reinsurance_ttm        DOUBLE  YES  None    None  None
-87                netinc_in_insurance_deposits_and_invest_ttm        DOUBLE  YES  None    None  None
-88                          netinc_in_disposal_fin_assets_ttm        DOUBLE  YES  None    None  None
-89      cash_received_from_interests_fess_and_commissions_ttm        DOUBLE  YES  None    None  None
-90        netinc_in_loans_from_banks_and_fin_institutions_ttm        DOUBLE  YES  None    None  None
-91                      netinc_in_repurchase_transactions_ttm        DOUBLE  YES  None    None  None
-92                               taxes_and_levies_rebates_ttm        DOUBLE  YES  None    None  None
-93                     cash_received_from_other_operating_ttm        DOUBLE  YES  None    None  None
-94                                     spec_diff_of_cifoa_ttm        DOUBLE  YES  None    None  None
-95                                   totbal_diff_of_cifoa_ttm        DOUBLE  YES  None    None  None
-96                                         subtotal_cifoa_ttm        DOUBLE  YES  None    None  None
-97                       cash_paid_for_goods_and_services_ttm        DOUBLE  YES  None    None  None
-98                           netinc_in_loans_and_advances_ttm        DOUBLE  YES  None    None  None
-99                 netinc_deposits_central_bank_interbank_ttm        DOUBLE  YES  None    None  None
-100                                  cash_paid_for_claims_ttm        DOUBLE  YES  None    None  None
-101          cash_paid_for_interests_fees_and_commissions_ttm        DOUBLE  YES  None    None  None
-102                        cash_paid_for_policy_dividends_ttm        DOUBLE  YES  None    None  None
-103                               cash_paid_for_employees_ttm        DOUBLE  YES  None    None  None
-104                        cash_paid_for_taxes_and_levies_ttm        DOUBLE  YES  None    None  None
-105                                           other_cofoa_ttm        DOUBLE  YES  None    None  None
-106                                    spec_diff_of_cofoa_ttm        DOUBLE  YES  None    None  None
-107                                  totbal_diff_of_cofoa_ttm        DOUBLE  YES  None    None  None
-108                                        subtotal_cofoa_ttm        DOUBLE  YES  None    None  None
-109                                spec_diff_of_net_cffoa_ttm        DOUBLE  YES  None    None  None
-110                              totbal_diff_of_net_cffoa_ttm        DOUBLE  YES  None    None  None
-111                                             net_cffoa_ttm        DOUBLE  YES  None    None  None
-112               cash_received_from_disposal_investments_ttm        DOUBLE  YES  None    None  None
-113                                  return_on_investment_ttm        DOUBLE  YES  None    None  None
-114           net_cash_received_from_disposal_filt_assets_ttm        DOUBLE  YES  None    None  None
-115          net_cash_received_from_disposal_subsidiaries_ttm        DOUBLE  YES  None    None  None
-116                    cash_received_from_other_investing_ttm        DOUBLE  YES  None    None  None
-117                                    spec_diff_of_cifia_ttm        DOUBLE  YES  None    None  None
-118                                  totbal_diff_of_cifia_ttm        DOUBLE  YES  None    None  None
-119                                        subtotal_cifia_ttm        DOUBLE  YES  None    None  None
-120                             cash_paid_for_filt_assets_ttm        DOUBLE  YES  None    None  None
-121                             cash_paid_for_investments_ttm        DOUBLE  YES  None    None  None
-122                                netinc_in_pledge_loans_ttm        DOUBLE  YES  None    None  None
-123                   cash_paid_by_acquiring_subsidiaries_ttm        DOUBLE  YES  None    None  None
-124                         cash_paid_for_other_investing_ttm        DOUBLE  YES  None    None  None
-125                                    spec_diff_of_cofia_ttm        DOUBLE  YES  None    None  None
-126                                  totbal_diff_of_cofia_ttm        DOUBLE  YES  None    None  None
-127                                     subtotal_of_cofia_ttm        DOUBLE  YES  None    None  None
-128                                spec_diff_of_net_cffia_ttm        DOUBLE  YES  None    None  None
-129                              totbal_diff_of_net_cffia_ttm        DOUBLE  YES  None    None  None
-130                                             net_cffia_ttm        DOUBLE  YES  None    None  None
-131                        capital_contributions_received_ttm        DOUBLE  YES  None    None  None
-132           cash_received_by_subsidiaries_from_minority_ttm        DOUBLE  YES  None    None  None
-133                         cash_received_from_borrowings_ttm        DOUBLE  YES  None    None  None
-134                         cash_received_from_bond_issue_ttm        DOUBLE  YES  None    None  None
-135                    cash_received_from_other_financing_ttm        DOUBLE  YES  None    None  None
-136                                    spec_diff_of_ciffa_ttm        DOUBLE  YES  None    None  None
-137                                  totbal_diff_of_ciffa_ttm        DOUBLE  YES  None    None  None
-138                                        subtotal_ciffa_ttm        DOUBLE  YES  None    None  None
-139                          cash_paid_for_debt_repayment_ttm        DOUBLE  YES  None    None  None
-140             cash_paid_for_dividends_profits_interests_ttm        DOUBLE  YES  None    None  None
-141                 cash_paid_by_subsidiaries_to_minority_ttm        DOUBLE  YES  None    None  None
-142                         cash_paid_for_other_financing_ttm        DOUBLE  YES  None    None  None
-143                                    spec_diff_of_coffa_ttm        DOUBLE  YES  None    None  None
-144                                  totbal_diff_of_coffa_ttm        DOUBLE  YES  None    None  None
-145                                     subtotal_of_coffa_ttm        DOUBLE  YES  None    None  None
-146                                spec_diff_of_net_cfffa_ttm        DOUBLE  YES  None    None  None
-147                              totbal_diff_of_net_cfffa_ttm        DOUBLE  YES  None    None  None
-148                                             net_cfffa_ttm        DOUBLE  YES  None    None  None
-149                         effect_of_exchange_chg_on_cce_ttm        DOUBLE  YES  None    None  None
-150                            spec_diff_of_netinc_in_cce_ttm        DOUBLE  YES  None    None  None
-151                          totbal_diff_of_netinc_in_cce_ttm        DOUBLE  YES  None    None  None
-152                                         netinc_in_cce_ttm        DOUBLE  YES  None    None  None
-153                                         cce_beginning_ttm        DOUBLE  YES  None    None  None
-154                                            cce_ending_ttm        DOUBLE  YES  None    None  None
-155                          net_profit_in_cashflow_sheet_ttm        DOUBLE  YES  None    None  None
-156                              asset_impairment_reserve_ttm        DOUBLE  YES  None    None  None
-157                            depreciation_of_fa_oga_pba_ttm        DOUBLE  YES  None    None  None
-158                      amorization_of_intangible_assets_ttm        DOUBLE  YES  None    None  None
-159            amortization_of_longterm_deferred_expenses_ttm        DOUBLE  YES  None    None  None
-160                       loss_from_disposal_of_fa_ia_lta_ttm        DOUBLE  YES  None    None  None
-161                    loss_from_scraping_of_fixed_assets_ttm        DOUBLE  YES  None    None  None
-162                              loss_from_fair_value_chg_ttm        DOUBLE  YES  None    None  None
-163                    finance_expenses_in_cashflow_sheet_ttm        DOUBLE  YES  None    None  None
-164                                           invest_loss_ttm        DOUBLE  YES  None    None  None
-165                       decrease_in_deferred_tax_assets_ttm        DOUBLE  YES  None    None  None
-166                  increase_in_deferred_tax_liabilities_ttm        DOUBLE  YES  None    None  None
-167                               decrease_in_inventories_ttm        DOUBLE  YES  None    None  None
-168                     decrease_in_operating_receivables_ttm        DOUBLE  YES  None    None  None
-169                        increase_in_operating_payables_ttm        DOUBLE  YES  None    None  None
-170                              others_in_cashflow_sheet_ttm        DOUBLE  YES  None    None  None
-171                       spec_diff_of_net_cffoa_indirect_ttm        DOUBLE  YES  None    None  None
-172                     totbal_diff_of_net_cffoa_indirect_ttm        DOUBLE  YES  None    None  None
-173                                    net_cffoa_indirect_ttm        DOUBLE  YES  None    None  None
-174                              debt_transfer_to_capital_ttm        DOUBLE  YES  None    None  None
-175                             conv_corp_bonds_within_1y_ttm        DOUBLE  YES  None    None  None
-176                                fin_lease_fixed_assets_ttm        DOUBLE  YES  None    None  None
-177                                   cash_balance_ending_ttm        DOUBLE  YES  None    None  None
-178                                cash_balance_beginning_ttm        DOUBLE  YES  None    None  None
-179                                    cce_balance_ending_ttm        DOUBLE  YES  None    None  None
-180                                 cce_balance_beginning_ttm        DOUBLE  YES  None    None  None
-181                   spec_diff_of_netinc_in_cce_indirect_ttm        DOUBLE  YES  None    None  None
-182                 totbal_diff_of_netinc_in_cce_indirect_ttm        DOUBLE  YES  None    None  None
-183                                netinc_in_cce_indirect_ttm        DOUBLE  YES  None    None  None
-184              credit_impairment_loss_in_cashflow_sheet_ttm        DOUBLE  YES  None    None  None
+| date          | instrument | report_date   | shift | total_operating_revenue_ttm | operating_revenue_ttm | interest_income_ttm | insurance_premium_income_ttm | fee_and_commission_income_ttm | spec_diff_of_operating_revenue_ttm | totbal_diff_of_operating_revenue_ttm | total_operating_costs_ttm | operating_costs_ttm | interest_costs_ttm | fee_and_commission_costs_ttm | surrenders_ttm | net_insurance_claims_paid_ttm | net_amount_of_insurance_reserve_ttm | expense_on_policy_dividends_ttm | reinsurance_premium_expense_ttm | taxes_and_levies_ttm | selling_epense_ttm | administrative_expense_ttm | research_and_development_expense_ttm | finance_expense_ttm | fin_interest_expense_ttm | fin_interest_income_ttm | asset_impairment_loss_ttm | credit_impairment_loss_ttm | spec_diff_of_operating_costs_ttm | totbal_diff_of_operating_costs_ttm | fair_value_chg_gain_ttm | invest_income_ttm | invest_income_of_jv_and_associates_ttm | income_derecognition_of_fin_assets_at_amortized_cost_ttm | net_income_of_open_hedge_ttm | exchange_gain_ttm | asset_disposal_income_ttm | other_income_ttm | spec_diff_of_operating_profit_ttm | totbal_diff_of_operating_profit_ttm | operating_profit_ttm | nonoperating_income_ttm | noncurr_assets_dispose_gain_ttm | nonoperating_costs_ttm | noncurr_assets_dispose_loss_ttm | spec_diff_of_total_profit_ttm | totbal_diff_of_total_profit_ttm | total_profit_ttm | income_tax_expense_ttm | spec_diff_of_net_profit_ttm | totbal_diff_of_net_profit_ttm | net_profit_ttm | continuing_operation_net_profit_ttm | discontinued_operation_net_profit_ttm | net_profit_to_parent_shareholders_ttm | net_profit_to_minority_ttm | eps_basic_ttm | eps_diluted_ttm | income_othcom_income_ttm | othcom_income_to_parent_shareholders_ttm | othcom_income_cannt_reclass_ttm | chg_by_remeasurements_ttm | othcom_income_cannt_reclass_under_equity_method_ttm | other_cannt_reclass_ttm | other_equity_instruments_fair_value_chg_ttm | own_credit_risk_fair_value_chg_ttm | othcom_income_reclass_ttm | othcom_income_reclass_under_equity_method_ttm | available_for_sale_fin_assets_fair_value_chg_ttm | gains_or_losses_from_htm_to_afs_ttm | effective_of_gains_or_losses_on_cashflow_hedge_ttm | income_translation_diff_of_foreign_currency_ttm | other_reclass_ttm | other_debt_investments_fair_value_chg_ttm | othcom_income_from_reclass_of_fin_assets_ttm | credit_impairment_of_other_debt_investments_ttm | cashflow_hedge_reserve_ttm | othcom_income_to_minority_ttm | total_comprehensive_income_ttm | total_comprehensive_income_to_parent_shareholders_ttm | cash_received_from_sales_and_services_ttm | netinc_in_deposits_ttm | netinc_in_borrowings_from_central_bank_ttm | netinc_in_loans_from_other_fin_institutions_ttm | cash_received_from_premiums_ttm | net_cash_received_from_reinsurance_ttm | netinc_in_insurance_deposits_and_invest_ttm | netinc_in_disposal_fin_assets_ttm | cash_received_from_interests_fess_and_commissions_ttm | netinc_in_loans_from_banks_and_fin_institutions_ttm | netinc_in_repurchase_transactions_ttm | taxes_and_levies_rebates_ttm | cash_received_from_other_operating_ttm | spec_diff_of_cifoa_ttm | totbal_diff_of_cifoa_ttm | subtotal_cifoa_ttm | cash_paid_for_goods_and_services_ttm | netinc_in_loans_and_advances_ttm | netinc_deposits_central_bank_interbank_ttm | cash_paid_for_claims_ttm | cash_paid_for_interests_fees_and_commissions_ttm | cash_paid_for_policy_dividends_ttm | cash_paid_for_employees_ttm | cash_paid_for_taxes_and_levies_ttm | other_cofoa_ttm | spec_diff_of_cofoa_ttm | totbal_diff_of_cofoa_ttm | subtotal_cofoa_ttm | spec_diff_of_net_cffoa_ttm | totbal_diff_of_net_cffoa_ttm | net_cffoa_ttm | cash_received_from_disposal_investments_ttm | return_on_investment_ttm | net_cash_received_from_disposal_filt_assets_ttm | net_cash_received_from_disposal_subsidiaries_ttm | cash_received_from_other_investing_ttm | spec_diff_of_cifia_ttm | totbal_diff_of_cifia_ttm | subtotal_cifia_ttm | cash_paid_for_filt_assets_ttm | cash_paid_for_investments_ttm | netinc_in_pledge_loans_ttm | cash_paid_by_acquiring_subsidiaries_ttm | cash_paid_for_other_investing_ttm | spec_diff_of_cofia_ttm | totbal_diff_of_cofia_ttm | subtotal_of_cofia_ttm | spec_diff_of_net_cffia_ttm | totbal_diff_of_net_cffia_ttm | net_cffia_ttm | capital_contributions_received_ttm | cash_received_by_subsidiaries_from_minority_ttm | cash_received_from_borrowings_ttm | cash_received_from_bond_issue_ttm | cash_received_from_other_financing_ttm | spec_diff_of_ciffa_ttm | totbal_diff_of_ciffa_ttm | subtotal_ciffa_ttm | cash_paid_for_debt_repayment_ttm | cash_paid_for_dividends_profits_interests_ttm | cash_paid_by_subsidiaries_to_minority_ttm | cash_paid_for_other_financing_ttm | spec_diff_of_coffa_ttm | totbal_diff_of_coffa_ttm | subtotal_of_coffa_ttm | spec_diff_of_net_cfffa_ttm | totbal_diff_of_net_cfffa_ttm | net_cfffa_ttm | effect_of_exchange_chg_on_cce_ttm | spec_diff_of_netinc_in_cce_ttm | totbal_diff_of_netinc_in_cce_ttm | netinc_in_cce_ttm | cce_beginning_ttm | cce_ending_ttm | net_profit_in_cashflow_sheet_ttm | asset_impairment_reserve_ttm | depreciation_of_fa_oga_pba_ttm | amorization_of_intangible_assets_ttm | amortization_of_longterm_deferred_expenses_ttm | loss_from_disposal_of_fa_ia_lta_ttm | loss_from_scraping_of_fixed_assets_ttm | loss_from_fair_value_chg_ttm | finance_expenses_in_cashflow_sheet_ttm | invest_loss_ttm | decrease_in_deferred_tax_assets_ttm | increase_in_deferred_tax_liabilities_ttm | decrease_in_inventories_ttm | decrease_in_operating_receivables_ttm | increase_in_operating_payables_ttm | others_in_cashflow_sheet_ttm | spec_diff_of_net_cffoa_indirect_ttm | totbal_diff_of_net_cffoa_indirect_ttm | net_cffoa_indirect_ttm | debt_transfer_to_capital_ttm | conv_corp_bonds_within_1y_ttm | fin_lease_fixed_assets_ttm | cash_balance_ending_ttm | cash_balance_beginning_ttm | cce_balance_ending_ttm | cce_balance_beginning_ttm | spec_diff_of_netinc_in_cce_indirect_ttm | totbal_diff_of_netinc_in_cce_indirect_ttm | netinc_in_cce_indirect_ttm | credit_impairment_loss_in_cashflow_sheet_ttm |
+|---------------|------------|---------------|-------|-----------------------------|-----------------------|---------------------|------------------------------|-------------------------------|------------------------------------|--------------------------------------|---------------------------|---------------------|--------------------|------------------------------|----------------|-------------------------------|-------------------------------------|---------------------------------|---------------------------------|----------------------|--------------------|----------------------------|--------------------------------------|---------------------|--------------------------|-------------------------|---------------------------|----------------------------|----------------------------------|------------------------------------|-------------------------|-------------------|----------------------------------------|----------------------------------------------------------|------------------------------|-------------------|---------------------------|------------------|-----------------------------------|-------------------------------------|----------------------|-------------------------|---------------------------------|------------------------|---------------------------------|-------------------------------|---------------------------------|------------------|------------------------|-----------------------------|-------------------------------|----------------|-------------------------------------|---------------------------------------|---------------------------------------|----------------------------|---------------|-----------------|--------------------------|------------------------------------------|---------------------------------|---------------------------|-----------------------------------------------------|-------------------------|---------------------------------------------|------------------------------------|---------------------------|-----------------------------------------------|--------------------------------------------------|-------------------------------------|----------------------------------------------------|-------------------------------------------------|-------------------|-------------------------------------------|----------------------------------------------|-------------------------------------------------|----------------------------|-------------------------------|--------------------------------|-------------------------------------------------------|-------------------------------------------|------------------------|--------------------------------------------|-------------------------------------------------|---------------------------------|----------------------------------------|---------------------------------------------|-----------------------------------|-------------------------------------------------------|-----------------------------------------------------|---------------------------------------|------------------------------|----------------------------------------|------------------------|--------------------------|--------------------|--------------------------------------|----------------------------------|--------------------------------------------|--------------------------|--------------------------------------------------|------------------------------------|-----------------------------|------------------------------------|-----------------|------------------------|--------------------------|--------------------|----------------------------|------------------------------|---------------|---------------------------------------------|--------------------------|-------------------------------------------------|--------------------------------------------------|----------------------------------------|------------------------|--------------------------|--------------------|-------------------------------|-------------------------------|----------------------------|-----------------------------------------|-----------------------------------|------------------------|--------------------------|-----------------------|----------------------------|------------------------------|---------------|------------------------------------|-------------------------------------------------|-----------------------------------|-----------------------------------|----------------------------------------|------------------------|--------------------------|--------------------|----------------------------------|-----------------------------------------------|-------------------------------------------|-----------------------------------|------------------------|--------------------------|-----------------------|----------------------------|------------------------------|---------------|-----------------------------------|--------------------------------|----------------------------------|-------------------|-------------------|----------------|----------------------------------|------------------------------|--------------------------------|--------------------------------------|------------------------------------------------|-------------------------------------|----------------------------------------|------------------------------|----------------------------------------|-----------------|-------------------------------------|------------------------------------------|-----------------------------|---------------------------------------|------------------------------------|------------------------------|-------------------------------------|---------------------------------------|------------------------|------------------------------|-------------------------------|----------------------------|-------------------------|----------------------------|------------------------|---------------------------|-----------------------------------------|-------------------------------------------|----------------------------|----------------------------------------------|
+| timestamp[ns] | string     | timestamp[ns] | int8  | double                      | double                | double              | double                       | double                        | double                             | double                               | double                    | double              | double             | double                       | double         | double                        | double                              | double                          | double                          | double               | double             | double                     | double                               | double              | double                   | double                  | double                    | double                     | double                           | double                             | double                  | double            | double                                 | double                                                   | double                       | double            | double                    | double           | double                            | double                              | double               | double                  | double                          | double                 | double                          | double                        | double                          | double           | double                 | double                      | double                        | double         | double                              | double                                | double                                | double                     | double        | double          | double                   | double                                   | double                          | double                    | double                                              | double                  | double                                      | double                             | double                    | double                                        | double                                           | double                              | double                                             | double                                          | double            | double                                    | double                                       | double                                          | double                     | double                        | double                         | double                                                | double                                    | double                 | double                                     | double                                          | double                          | double                                 | double                                      | double                            | double                                                | double                                              | double                                | double                       | double                                 | double                 | double                   | double             | double                               | double                           | double                                     | double                   | double                                           | double                             | double                      | double                             | double          | double                 | double                   | double             | double                     | double                       | double        | double                                      | double                   | double                                          | double                                           | double                                 | double                 | double                   | double             | double                        | double                        | double                     | double                                  | double                            | double                 | double                   | double                | double                     | double                       | double        | double                             | double                                          | double                            | double                            | double                                 | double                 | double                   | double             | double                           | double                                        | double                                    | double                            | double                 | double                   | double                | double                     | double                       | double        | double                            | double                         | double                           | double            | double            | double         | double                           | double                       | double                         | double                               | double                                         | double                              | double                                 | double                       | double                                 | double          | double                              | double                                   | double                      | double                                | double                             | double                       | double                              | double                                | double                 | double                       | double                        | double                     | double                  | double                     | double                 | double                    | double                                  | double                                    | double                     | double                                       |
+
 
 ========== cn_stock_financial_notes_shift ==========
-                                  column_name   column_type null   key default extra
-0                                        date  TIMESTAMP_NS  YES  None    None  None
-1                                  instrument       VARCHAR  YES  None    None  None
-2                                 report_date  TIMESTAMP_NS  YES  None    None  None
-3                                       shift       TINYINT  YES  None    None  None
-4                          illiquid_assets_lf        DOUBLE  YES  None    None  None
-5                                  taxfree_lf        DOUBLE  YES  None    None  None
-6                        government_grants_lf        DOUBLE  YES  None    None  None
-7                            occupancy_fee_lf        DOUBLE  YES  None    None  None
-8                    fair_value_investment_lf        DOUBLE  YES  None    None  None
-9              non_monetary_asset_exchange_lf        DOUBLE  YES  None    None  None
-10                       manage_investment_lf        DOUBLE  YES  None    None  None
-11                     debt_reorganization_lf        DOUBLE  YES  None    None  None
-12               enterprise_reorganization_lf        DOUBLE  YES  None    None  None
-13                      fair_value_trading_lf        DOUBLE  YES  None    None  None
-14                                   merge_lf        DOUBLE  YES  None    None  None
-15                     bussiness_unrelated_lf        DOUBLE  YES  None    None  None
-16                  other_financial_income_lf        DOUBLE  YES  None    None  None
-17          reversal_of_impairment_reserve_lf        DOUBLE  YES  None    None  None
-18                  external_entruste_loan_lf        DOUBLE  YES  None    None  None
-19   invested_realestate_fair_value_change_lf        DOUBLE  YES  None    None  None
-20              influence_after_adjustment_lf        DOUBLE  YES  None    None  None
-21                             trustee_fee_lf        DOUBLE  YES  None    None  None
-22               other_nonoperating_income_lf        DOUBLE  YES  None    None  None
-23                other_nonrecurring_items_lf        DOUBLE  YES  None    None  None
-24                       income_tax_impact_lf        DOUBLE  YES  None    None  None
-25            nonrecurring_income_to_owner_lf        DOUBLE  YES  None    None  None
-26         nonrecurring_income_to_minority_lf        DOUBLE  YES  None    None  None
-27                 nonrecurring_income_sum_lf        DOUBLE  YES  None    None  None
-28                        illiquid_assets_mrq        DOUBLE  YES  None    None  None
-29                                taxfree_mrq        DOUBLE  YES  None    None  None
-30                      government_grants_mrq        DOUBLE  YES  None    None  None
-31                          occupancy_fee_mrq        DOUBLE  YES  None    None  None
-32                  fair_value_investment_mrq        DOUBLE  YES  None    None  None
-33            non_monetary_asset_exchange_mrq        DOUBLE  YES  None    None  None
-34                      manage_investment_mrq        DOUBLE  YES  None    None  None
-35                    debt_reorganization_mrq        DOUBLE  YES  None    None  None
-36              enterprise_reorganization_mrq        DOUBLE  YES  None    None  None
-37                     fair_value_trading_mrq        DOUBLE  YES  None    None  None
-38                                  merge_mrq        DOUBLE  YES  None    None  None
-39                    bussiness_unrelated_mrq        DOUBLE  YES  None    None  None
-40                 other_financial_income_mrq        DOUBLE  YES  None    None  None
-41         reversal_of_impairment_reserve_mrq        DOUBLE  YES  None    None  None
-42                 external_entruste_loan_mrq        DOUBLE  YES  None    None  None
-43  invested_realestate_fair_value_change_mrq        DOUBLE  YES  None    None  None
-44             influence_after_adjustment_mrq        DOUBLE  YES  None    None  None
-45                            trustee_fee_mrq        DOUBLE  YES  None    None  None
-46              other_nonoperating_income_mrq        DOUBLE  YES  None    None  None
-47               other_nonrecurring_items_mrq        DOUBLE  YES  None    None  None
-48                      income_tax_impact_mrq        DOUBLE  YES  None    None  None
-49           nonrecurring_income_to_owner_mrq        DOUBLE  YES  None    None  None
-50        nonrecurring_income_to_minority_mrq        DOUBLE  YES  None    None  None
-51                nonrecurring_income_sum_mrq        DOUBLE  YES  None    None  None
-52                        illiquid_assets_ttm        DOUBLE  YES  None    None  None
-53                                taxfree_ttm        DOUBLE  YES  None    None  None
-54                      government_grants_ttm        DOUBLE  YES  None    None  None
-55                          occupancy_fee_ttm        DOUBLE  YES  None    None  None
-56                  fair_value_investment_ttm        DOUBLE  YES  None    None  None
-57            non_monetary_asset_exchange_ttm        DOUBLE  YES  None    None  None
-58                      manage_investment_ttm        DOUBLE  YES  None    None  None
-59                    debt_reorganization_ttm        DOUBLE  YES  None    None  None
-60              enterprise_reorganization_ttm        DOUBLE  YES  None    None  None
-61                     fair_value_trading_ttm        DOUBLE  YES  None    None  None
-62                                  merge_ttm        DOUBLE  YES  None    None  None
-63                    bussiness_unrelated_ttm        DOUBLE  YES  None    None  None
-64                 other_financial_income_ttm        DOUBLE  YES  None    None  None
-65         reversal_of_impairment_reserve_ttm        DOUBLE  YES  None    None  None
-66                 external_entruste_loan_ttm        DOUBLE  YES  None    None  None
-67  invested_realestate_fair_value_change_ttm        DOUBLE  YES  None    None  None
-68             influence_after_adjustment_ttm        DOUBLE  YES  None    None  None
-69                            trustee_fee_ttm        DOUBLE  YES  None    None  None
-70              other_nonoperating_income_ttm        DOUBLE  YES  None    None  None
-71               other_nonrecurring_items_ttm        DOUBLE  YES  None    None  None
-72                      income_tax_impact_ttm        DOUBLE  YES  None    None  None
-73           nonrecurring_income_to_owner_ttm        DOUBLE  YES  None    None  None
-74        nonrecurring_income_to_minority_ttm        DOUBLE  YES  None    None  None
-75                nonrecurring_income_sum_ttm        DOUBLE  YES  None    None  None
+| date          | instrument | report_date   | shift | illiquid_assets_lf | taxfree_lf | government_grants_lf | occupancy_fee_lf | fair_value_investment_lf | non_monetary_asset_exchange_lf | manage_investment_lf | debt_reorganization_lf | enterprise_reorganization_lf | fair_value_trading_lf | merge_lf | bussiness_unrelated_lf | other_financial_income_lf | reversal_of_impairment_reserve_lf | external_entruste_loan_lf | invested_realestate_fair_value_change_lf | influence_after_adjustment_lf | trustee_fee_lf | other_nonoperating_income_lf | other_nonrecurring_items_lf | income_tax_impact_lf | nonrecurring_income_to_owner_lf | nonrecurring_income_to_minority_lf | nonrecurring_income_sum_lf | illiquid_assets_mrq | taxfree_mrq | government_grants_mrq | occupancy_fee_mrq | fair_value_investment_mrq | non_monetary_asset_exchange_mrq | manage_investment_mrq | debt_reorganization_mrq | enterprise_reorganization_mrq | fair_value_trading_mrq | merge_mrq | bussiness_unrelated_mrq | other_financial_income_mrq | reversal_of_impairment_reserve_mrq | external_entruste_loan_mrq | invested_realestate_fair_value_change_mrq | influence_after_adjustment_mrq | trustee_fee_mrq | other_nonoperating_income_mrq | other_nonrecurring_items_mrq | income_tax_impact_mrq | nonrecurring_income_to_owner_mrq | nonrecurring_income_to_minority_mrq | nonrecurring_income_sum_mrq | illiquid_assets_ttm | taxfree_ttm | government_grants_ttm | occupancy_fee_ttm | fair_value_investment_ttm | non_monetary_asset_exchange_ttm | manage_investment_ttm | debt_reorganization_ttm | enterprise_reorganization_ttm | fair_value_trading_ttm | merge_ttm | bussiness_unrelated_ttm | other_financial_income_ttm | reversal_of_impairment_reserve_ttm | external_entruste_loan_ttm | invested_realestate_fair_value_change_ttm | influence_after_adjustment_ttm | trustee_fee_ttm | other_nonoperating_income_ttm | other_nonrecurring_items_ttm | income_tax_impact_ttm | nonrecurring_income_to_owner_ttm | nonrecurring_income_to_minority_ttm | nonrecurring_income_sum_ttm |
+|---------------|------------|---------------|-------|--------------------|------------|----------------------|------------------|--------------------------|--------------------------------|----------------------|------------------------|------------------------------|-----------------------|----------|------------------------|---------------------------|-----------------------------------|---------------------------|------------------------------------------|-------------------------------|----------------|------------------------------|-----------------------------|----------------------|---------------------------------|------------------------------------|----------------------------|---------------------|-------------|-----------------------|-------------------|---------------------------|---------------------------------|-----------------------|-------------------------|-------------------------------|------------------------|-----------|-------------------------|----------------------------|------------------------------------|----------------------------|-------------------------------------------|--------------------------------|-----------------|-------------------------------|------------------------------|-----------------------|----------------------------------|-------------------------------------|-----------------------------|---------------------|-------------|-----------------------|-------------------|---------------------------|---------------------------------|-----------------------|-------------------------|-------------------------------|------------------------|-----------|-------------------------|----------------------------|------------------------------------|----------------------------|-------------------------------------------|--------------------------------|-----------------|-------------------------------|------------------------------|-----------------------|----------------------------------|-------------------------------------|-----------------------------|
+| timestamp[ns] | string     | timestamp[ns] | int8  | double             | double     | double               | double           | double                   | double                         | double               | double                 | double                       | double                | double   | double                 | double                    | double                            | double                    | double                                   | double                        | double         | double                       | double                      | double               | double                          | double                             | double                     | double              | double      | double                | double            | double                    | double                          | double                | double                  | double                        | double                 | double    | double                  | double                     | double                             | double                     | double                                    | double                         | double          | double                        | double                       | double                | double                           | double                              | double                      | double              | double      | double                | double            | double                    | double                          | double                | double                  | double                        | double                 | double    | double                  | double                     | double                             | double                     | double                                    | double                         | double          | double                        | double                       | double                | double                           | double                              | double                      |
+
+
+========== cn_stock_financial_changedate ==========
+| instrument | report_date   | changedate | statement_type |
+|------------|---------------|------------|----------------|
+| string     | timestamp[ns] | string     | string         |
+
+
+========== cn_stock_real_bar1d ==========
+| date          | instrument | name   | adjust_factor | pre_close | open   | close  | high   | low    | volume | deal_number | amount | change_ratio | turn   | upper_limit | lower_limit |
+|---------------|------------|--------|---------------|-----------|--------|--------|--------|--------|--------|-------------|--------|--------------|--------|-------------|-------------|
+| timestamp[ns] | string     | string | double        | double    | double | double | double | double | int64  | int32       | double | double       | double | double      | double      |
+
+
+========== cn_stock_static_data ==========
+| date          | instrument | name   | trading_day | pre_close | upper_limit | lower_limit | adjust_factor | security_status | suspended | st_status | exchange | exdr | in_delist | price_tick | crd_buy_flag | crd_sell_flag | public_float_share | day_trading |
+|---------------|------------|--------|-------------|-----------|-------------|-------------|---------------|-----------------|-----------|-----------|----------|------|-----------|------------|--------------|---------------|--------------------|-------------|
+| timestamp[ns] | string     | string | int32       | double    | double      | double      | double        | int32           | int8      | int8      | string   | int8 | int8      | double     | int8         | int8          | int64              | int8        |
+
+
+========== cn_stock_valuation ==========
+Error (rc=1):
+Error: 没有权限读取数据源 cn_stock_valuation
+
 
 ========== cn_stock_profit_estimate ==========
-        column_name   column_type null   key default extra
-0              date  TIMESTAMP_NS  YES  None    None  None
-1        instrument       VARCHAR  YES  None    None  None
-2        begin_date  TIMESTAMP_NS  YES  None    None  None
-3          end_date  TIMESTAMP_NS  YES  None    None  None
-4   fore_profit_min        DOUBLE  YES  None    None  None
-5   fore_profit_max        DOUBLE  YES  None    None  None
-6         fore_type       TINYINT  YES  None    None  None
-7     pct_range_min        DOUBLE  YES  None    None  None
-8     pct_range_max        DOUBLE  YES  None    None  None
-9           news_id         FLOAT  YES  None    None  None
-10     fore_eps_min        DOUBLE  YES  None    None  None
-11     fore_eps_max        DOUBLE  YES  None    None  None
-12     fore_eps_avg        DOUBLE  YES  None    None  None
-13      fore_profit        DOUBLE  YES  None    None  None
-14          ex_date  TIMESTAMP_NS  YES  None    None  None
-15           remark       VARCHAR  YES  None    None  None
+| date          | instrument | begin_date    | end_date      | fore_profit_min | fore_profit_max | fore_type | pct_range_min | pct_range_max | news_id | fore_eps_min | fore_eps_max | fore_eps_avg | fore_profit | ex_date       | remark |
+|---------------|------------|---------------|---------------|-----------------|-----------------|-----------|---------------|---------------|---------|--------------|--------------|--------------|-------------|---------------|--------|
+| timestamp[ns] | null       | timestamp[ns] | timestamp[ns] | double          | double          | int8      | double        | double        | float   | double       | double       | double       | double      | timestamp[ns] | null   |
+
+
+========== cn_stock_profit_exceed_appraisal ==========
+| date          | instrument | report_date   | publish_date  | report_type | fore_profit_min | fore_profit_max | fore_profit | adjust_conexpect_profit | appraisal_date | appraisal_standard | appraisal_result | conexpect_date | conexpect_profit | profit_exceed_rate |
+|---------------|------------|---------------|---------------|-------------|-----------------|-----------------|-------------|-------------------------|----------------|--------------------|------------------|----------------|------------------|--------------------|
+| timestamp[ns] | string     | timestamp[ns] | timestamp[ns] | int8        | double          | double          | double      | double                  | timestamp[ns]  | int8               | int8             | timestamp[ns]  | double           | double             |
+
+
+========== cn_stock_profit_exceed_expect ==========
+| date          | instrument | report_date   | below_type | below_desc | organization_name | author | report_title | estimate_profit | last_report_date | last_report_title | last_estimate_profit | financial_report_date | financial_report_type | fore_profit_max | fore_profit_min | profit | profit_mrq | fore_profit_min_yoy | profit_yoy | fore_profit_min_mrq_yoy | profit_mrq_yoy | last_financial_report_date | last_financial_report_type | last_fore_profit_max | last_fore_profit_min | last_profit | conexpect_date | conexpect_profit | last_conexpect_date | last_conexpect_profit | last_conexpect_profit_mrq | last_conexpect_profit_yoy | last_conexpect_profit_mrq_yoy | profit_below_rate |
+|---------------|------------|---------------|------------|------------|-------------------|--------|--------------|-----------------|------------------|-------------------|----------------------|-----------------------|-----------------------|-----------------|-----------------|--------|------------|---------------------|------------|-------------------------|----------------|----------------------------|----------------------------|----------------------|----------------------|-------------|----------------|------------------|---------------------|-----------------------|---------------------------|---------------------------|-------------------------------|-------------------|
+| timestamp[ns] | string     | timestamp[ns] | int8       | string     | string            | string | string       | double          | timestamp[ns]    | string            | double               | timestamp[ns]         | int8                  | double          | double          | double | double     | double              | double     | double                  | double         | timestamp[ns]              | int8                       | double               | double               | double      | timestamp[ns]  | double           | timestamp[ns]       | double                | double                    | double                    | double                        | double            |
+
+
+========== cn_stock_profit_below_expect ==========
+| date          | instrument | report_date   | below_type | below_desc | organization_name | author | report_title | estimate_profit | last_report_date | last_report_title | last_estimate_profit | financial_report_date | financial_report_type | fore_profit_max | fore_profit_min | profit | profit_mrq | fore_profit_max_yoy | profit_yoy | fore_profit_max_mrq_yoy | profit_mrq_yoy | last_financial_report_date | last_financial_report_type | last_fore_profit_max | last_fore_profit_min | last_profit | conexpect_date | conexpect_profit | last_conexpect_date | last_conexpect_profit | last_conexpect_profit_mrq | last_conexpect_profit_yoy | last_conexpect_profit_mrq_yoy | profit_below_rate |
+|---------------|------------|---------------|------------|------------|-------------------|--------|--------------|-----------------|------------------|-------------------|----------------------|-----------------------|-----------------------|-----------------|-----------------|--------|------------|---------------------|------------|-------------------------|----------------|----------------------------|----------------------------|----------------------|----------------------|-------------|----------------|------------------|---------------------|-----------------------|---------------------------|---------------------------|-------------------------------|-------------------|
+| timestamp[ns] | string     | timestamp[ns] | int8       | string     | string            | string | string       | double          | timestamp[ns]    | string            | double               | timestamp[ns]         | int8                  | double          | double          | double | double     | double              | double     | double                  | double         | timestamp[ns]              | int8                       | double               | double               | double      | timestamp[ns]  | double           | timestamp[ns]       | double                | double                    | double                    | double                        | double            |
+
+
+========== cn_stock_financial_changedate ==========
+| instrument | report_date   | changedate | statement_type |
+|------------|---------------|------------|----------------|
+| string     | timestamp[ns] | string     | string         |
+
+
+========== cn_stock_financial_forecast_consensus_rolling ==========
+| date          | instrument | forecast_eps_fy1 | forecast_eps_fy2 | forecast_eps_fy3 | forecast_eps_12m | forecast_np_fy1 | forecast_np_fy2 | forecast_np_fy3 | forecast_np_12m | forecast_np_yoy | forecast_np_yoy_fy2to1 | forecast_np_cagr_2 | forecast_revenue_fy1 | forecast_revenue_fy2 | forecast_revenue_fy3 | forecast_revenue_12m | forecast_revenue_yoy | forecast_revenue_yoy_fy2to1 | forecast_revenue_cagr_2 | forecast_dividend_ps_fy1 | forecast_dividend_ps_fy2 | forecast_dividend_ps_fy3 |
+|---------------|------------|------------------|------------------|------------------|------------------|-----------------|-----------------|-----------------|-----------------|-----------------|------------------------|--------------------|----------------------|----------------------|----------------------|----------------------|----------------------|-----------------------------|-------------------------|--------------------------|--------------------------|--------------------------|
+| timestamp[ns] | string     | double           | double           | double           | double           | double          | double          | double          | double          | double          | double                 | double             | double               | double               | double               | double               | double               | double                      | double                  | double                   | double                   | double                   |
+
+
+========== cn_stock_financial_profitability ==========
+| date          | instrument | report_date   | shift | roe_avg_lf | roe_avg_mrq | roe_avg_ttm | roe_period_lf | roe_period_mrq | roe_period_ttm | roe_avg_deduct_lf | roe_avg_deduct_mrq | roe_avg_deduct_ttm | roe_period_deduct_lf | roe_period_deduct_mrq | roe_period_deduct_ttm | roa2_avg_lf | roa2_avg_mrq | roa2_avg_ttm | roa2_period_lf | roa2_period_mrq | roa2_period_ttm | roa_avg_lf | roa_avg_mrq | roa_avg_ttm | roa_period_lf | roa_period_mrq | roa_period_ttm | roic_lf | roic_mrq | roic_ttm | net_profit_rate_lf | net_profit_rate_mrq | net_profit_rate_ttm | gross_profit_rate_lf | gross_profit_rate_mrq | gross_profit_rate_ttm | cogs_lf | cogs_mrq | cogs_ttm | period_expense_rate_lf | period_expense_rate_mrq | period_expense_rate_ttm | profit_rate_to_expense_lf | profit_rate_to_expense_mrq | profit_rate_to_expense_ttm | prime_operating_rate_lf | prime_operating_rate_mrq | prime_operating_rate_ttm | profit_of_parent_to_total_revenue_lf | profit_of_parent_to_total_revenue_mrq | profit_of_parent_to_total_revenue_ttm | ebit_to_total_revenue_lf | ebit_to_total_revenue_mrq | ebit_to_total_revenue_ttm | ebit_to_total_assets_lf | ebit_to_total_assets_mrq | ebit_to_total_assets_ttm | ebitda_to_total_revenue_lf | ebitda_to_total_revenue_mrq | ebitda_to_total_revenue_ttm | sales_to_total_revenue_lf | sales_to_total_revenue_mrq | sales_to_total_revenue_ttm | admin_to_total_revenue_lf | admin_to_total_revenue_mrq | admin_to_total_revenue_ttm | research_develop_to_total_revenue_lf | research_develop_to_total_revenue_mrq | research_develop_to_total_revenue_ttm | finance_to_total_revenue_lf | finance_to_total_revenue_mrq | finance_to_total_revenue_ttm | asset_impair_to_total_revenue_lf | asset_impair_to_total_revenue_mrq | asset_impair_to_total_revenue_ttm | asset_impair_to_operating_profit_lf | asset_impair_to_operating_profit_mrq | asset_impair_to_operating_profit_ttm | credit_impair_to_total_revenue_lf | credit_impair_to_total_revenue_mrq | credit_impair_to_total_revenue_ttm | credit_impair_to_operating_profit_lf | credit_impair_to_operating_profit_mrq | credit_impair_to_operating_profit_ttm |
+|---------------|------------|---------------|-------|------------|-------------|-------------|---------------|----------------|----------------|-------------------|--------------------|--------------------|----------------------|-----------------------|-----------------------|-------------|--------------|--------------|----------------|-----------------|-----------------|------------|-------------|-------------|---------------|----------------|----------------|---------|----------|----------|--------------------|---------------------|---------------------|----------------------|-----------------------|-----------------------|---------|----------|----------|------------------------|-------------------------|-------------------------|---------------------------|----------------------------|----------------------------|-------------------------|--------------------------|--------------------------|--------------------------------------|---------------------------------------|---------------------------------------|--------------------------|---------------------------|---------------------------|-------------------------|--------------------------|--------------------------|----------------------------|-----------------------------|-----------------------------|---------------------------|----------------------------|----------------------------|---------------------------|----------------------------|----------------------------|--------------------------------------|---------------------------------------|---------------------------------------|-----------------------------|------------------------------|------------------------------|----------------------------------|-----------------------------------|-----------------------------------|-------------------------------------|--------------------------------------|--------------------------------------|-----------------------------------|------------------------------------|------------------------------------|--------------------------------------|---------------------------------------|---------------------------------------|
+| timestamp[ns] | string     | timestamp[ns] | int8  | double     | double      | double      | double        | double         | double         | double            | double             | double             | double               | double                | double                | double      | double       | double       | double         | double          | double          | double     | double      | double      | double        | double         | double         | double  | double   | double   | double             | double              | double              | double               | double                | double                | double  | double   | double   | double                 | double                  | double                  | double                    | double                     | double                     | double                  | double                   | double                   | double                               | double                                | double                                | double                   | double                    | double                    | double                  | double                   | double                   | double                     | double                      | double                      | double                    | double                     | double                     | double                    | double                     | double                     | double                               | double                                | double                                | double                      | double                       | double                       | double                           | double                            | double                            | double                              | double                               | double                               | double                            | double                             | double                             | double                               | double                                | double                                |
+
+
+========== cn_stock_financial_lf_shift ==========
+| date          | instrument | report_date   | shift | moneytary_assets_lf | settlment_reserves_lf | loans_to_banks_and_fin_institutions_lf | tradable_fin_assets_lf | derivatives_fin_assets_lf | notes_receivable_lf | accounts_receivable_lf | notes_and_accounts_receivable_lf | receivables_financing_lf | prepayments_lf | premiums_receivable_lf | reinsurance_receivables_lf | receivable_reinsurance_contract_reserve_lf | interest_receivable_lf | dividends_receivable_lf | other_receivables_lf | other_receivables_sum_lf | fin_assets_purchased_under_resale_lf | inventories_lf | contract_assets_lf | assets_held_for_sale_lf | noncurr_assets_due_within_1y_lf | other_current_assets_lf | spec_diff_of_current_assets_lf | totbal_diff_of_current_assets_lf | total_current_assets_lf | loans_and_advances_lf | fin_assets_by_amortized_cost_lf | fin_assets_by_fair_value_lf | available_for_sale_fin_assets_lf | held_to_maturity_invesments_lf | debt_investments_lf | other_debt_investments_lf | longterm_receivables_lf | longterm_equity_investments_lf | other_equity_investments_lf | other_noncurr_fin_assets_lf | investment_property_lf | fixed_assets_lf | fixed_assets_sum_lf | construction_in_progress_lf | construction_in_progress_sum_lf | project_materials_lf | fixed_assets_disposal_lf | productive_biological_assets_lf | oil_and_gas_assets_lf | right_of_use_assets_lf | intangible_assets_lf | development_costs_lf | goodwill_lf | longterm_prepaid_expense_lf | deferred_tax_assets_lf | other_noncurr_assets_lf | spec_diff_of_noncurr_assets_lf | totbal_diff_of_noncurr_assets_lf | total_noncurr_assets_lf | spec_diff_of_total_assets_lf | totbal_diff_of_total_assets_lf | total_assets_lf | shortterm_borrowings_lf | borrowing_from_central_bank_lf | deposits_from_banks_and_fin_instiutions_lf | loans_from_banks_and_fin_institutions_lf | tradable_fin_liabilities_lf | derivatives_fin_liabilities_lf | notes_payable_lf | accounts_payable_lf | notes_and_accounts_payable_lf | advances_lf | contract_liabilities_lf | fin_assets_sold_under_resale_lf | fees_and_commissions_payable_lf | employee_benefits_payable_lf | taxes_and_levies_payable_lf | interest_payable_lf | dividends_payable_lf | other_payables_lf | other_payables_sum_lf | reinsurance_payables_lf | insurance_contract_reserves_lf | acting_trading_payables_lf | underwriting_payables_lf | liabilities_held_for_sale_lf | noncurr_liabilities_due_within_1y_lf | deferred_income_current_liabilities_lf | shortterm_bonds_payable_lf | other_current_liabilities_lf | spec_diff_of_current_liabilities_lf | totbal_diff_of_current_liabilities_lf | total_current_liabilities_lf | longterm_borrowings_lf | bonds_payable_lf | perpetual_bonds_lf | preference_shares_lf | lease_liabilities_lf | longterm_payables_lf | longterm_payables_sum_lf | longterm_employee_benefits_lf | specific_payables_lf | provisions_lf | deferred_tax_liabilities_lf | deferred_income_noncurr_liabilities_lf | other_noncurr_liabilities_lf | spec_diff_of_noncurr_liabilities_lf | totbal_diff_of_noncurr_liabilities_lf | total_noncurr_liabilities_lf | spec_diff_of_total_liabilities_lf | totbal_diff_of_total_liabilities_lf | total_liabilities_lf | share_capital_lf | capital_reserves_lf | treasury_shares_lf | balance_othcom_income_lf | other_equity_instruments_lf | preference_of_other_equity_instruments_lf | specific_reserve_lf | surplus_reserve_lf | general_reserve_lf | undistributed_profit_lf | balance_translation_diff_of_foreign_currency_lf | total_equity_to_parent_shareholders_lf | minority_interests_lf | spec_diff_of_shareholders_equity_lf | totbal_diff_of_shareholders_equity_lf | total_owner_equity_lf | spec_diff_of_liabilities_and_shareholder_equity_lf | totbal_diff_of_liabilities_and_shareholder_equity_lf | total_liabilities_and_owner_equity_lf | total_operating_revenue_lf | operating_revenue_lf | interest_income_lf | insurance_premium_income_lf | fee_and_commission_income_lf | spec_diff_of_operating_revenue_lf | totbal_diff_of_operating_revenue_lf | total_operating_costs_lf | operating_costs_lf | interest_costs_lf | fee_and_commission_costs_lf | surrenders_lf | net_insurance_claims_paid_lf | net_amount_of_insurance_reserve_lf | expense_on_policy_dividends_lf | reinsurance_premium_expense_lf | taxes_and_levies_lf | selling_epense_lf | administrative_expense_lf | research_and_development_expense_lf | finance_expense_lf | fin_interest_expense_lf | fin_interest_income_lf | asset_impairment_loss_lf | credit_impairment_loss_lf | spec_diff_of_operating_costs_lf | totbal_diff_of_operating_costs_lf | fair_value_chg_gain_lf | invest_income_lf | invest_income_of_jv_and_associates_lf | income_derecognition_of_fin_assets_at_amortized_cost_lf | net_income_of_open_hedge_lf | exchange_gain_lf | asset_disposal_income_lf | other_income_lf | spec_diff_of_operating_profit_lf | totbal_diff_of_operating_profit_lf | operating_profit_lf | nonoperating_income_lf | noncurr_assets_dispose_gain_lf | nonoperating_costs_lf | noncurr_assets_dispose_loss_lf | spec_diff_of_total_profit_lf | totbal_diff_of_total_profit_lf | total_profit_lf | income_tax_expense_lf | spec_diff_of_net_profit_lf | totbal_diff_of_net_profit_lf | net_profit_lf | continuing_operation_net_profit_lf | discontinued_operation_net_profit_lf | net_profit_to_parent_shareholders_lf | net_profit_to_minority_lf | eps_basic_lf | eps_diluted_lf | income_othcom_income_lf | othcom_income_to_parent_shareholders_lf | othcom_income_cannt_reclass_lf | chg_by_remeasurements_lf | othcom_income_cannt_reclass_under_equity_method_lf | other_cannt_reclass_lf | other_equity_instruments_fair_value_chg_lf | own_credit_risk_fair_value_chg_lf | othcom_income_reclass_lf | othcom_income_reclass_under_equity_method_lf | available_for_sale_fin_assets_fair_value_chg_lf | gains_or_losses_from_htm_to_afs_lf | effective_of_gains_or_losses_on_cashflow_hedge_lf | income_translation_diff_of_foreign_currency_lf | other_reclass_lf | other_debt_investments_fair_value_chg_lf | othcom_income_from_reclass_of_fin_assets_lf | credit_impairment_of_other_debt_investments_lf | cashflow_hedge_reserve_lf | othcom_income_to_minority_lf | total_comprehensive_income_lf | total_comprehensive_income_to_parent_shareholders_lf | cash_received_from_sales_and_services_lf | netinc_in_deposits_lf | netinc_in_borrowings_from_central_bank_lf | netinc_in_loans_from_other_fin_institutions_lf | cash_received_from_premiums_lf | net_cash_received_from_reinsurance_lf | netinc_in_insurance_deposits_and_invest_lf | netinc_in_disposal_fin_assets_lf | cash_received_from_interests_fess_and_commissions_lf | netinc_in_loans_from_banks_and_fin_institutions_lf | netinc_in_repurchase_transactions_lf | taxes_and_levies_rebates_lf | cash_received_from_other_operating_lf | spec_diff_of_cifoa_lf | totbal_diff_of_cifoa_lf | subtotal_cifoa_lf | cash_paid_for_goods_and_services_lf | netinc_in_loans_and_advances_lf | netinc_deposits_central_bank_interbank_lf | cash_paid_for_claims_lf | cash_paid_for_interests_fees_and_commissions_lf | cash_paid_for_policy_dividends_lf | cash_paid_for_employees_lf | cash_paid_for_taxes_and_levies_lf | other_cofoa_lf | spec_diff_of_cofoa_lf | totbal_diff_of_cofoa_lf | subtotal_cofoa_lf | spec_diff_of_net_cffoa_lf | totbal_diff_of_net_cffoa_lf | net_cffoa_lf | cash_received_from_disposal_investments_lf | return_on_investment_lf | net_cash_received_from_disposal_filt_assets_lf | net_cash_received_from_disposal_subsidiaries_lf | cash_received_from_other_investing_lf | spec_diff_of_cifia_lf | totbal_diff_of_cifia_lf | subtotal_cifia_lf | cash_paid_for_filt_assets_lf | cash_paid_for_investments_lf | netinc_in_pledge_loans_lf | cash_paid_by_acquiring_subsidiaries_lf | cash_paid_for_other_investing_lf | spec_diff_of_cofia_lf | totbal_diff_of_cofia_lf | subtotal_of_cofia_lf | spec_diff_of_net_cffia_lf | totbal_diff_of_net_cffia_lf | net_cffia_lf | capital_contributions_received_lf | cash_received_by_subsidiaries_from_minority_lf | cash_received_from_borrowings_lf | cash_received_from_bond_issue_lf | cash_received_from_other_financing_lf | spec_diff_of_ciffa_lf | totbal_diff_of_ciffa_lf | subtotal_ciffa_lf | cash_paid_for_debt_repayment_lf | cash_paid_for_dividends_profits_interests_lf | cash_paid_by_subsidiaries_to_minority_lf | cash_paid_for_other_financing_lf | spec_diff_of_coffa_lf | totbal_diff_of_coffa_lf | subtotal_of_coffa_lf | spec_diff_of_net_cfffa_lf | totbal_diff_of_net_cfffa_lf | net_cfffa_lf | effect_of_exchange_chg_on_cce_lf | spec_diff_of_netinc_in_cce_lf | totbal_diff_of_netinc_in_cce_lf | netinc_in_cce_lf | cce_beginning_lf | cce_ending_lf | net_profit_in_cashflow_sheet_lf | asset_impairment_reserve_lf | depreciation_of_fa_oga_pba_lf | amorization_of_intangible_assets_lf | amortization_of_longterm_deferred_expenses_lf | loss_from_disposal_of_fa_ia_lta_lf | loss_from_scraping_of_fixed_assets_lf | loss_from_fair_value_chg_lf | finance_expenses_in_cashflow_sheet_lf | invest_loss_lf | decrease_in_deferred_tax_assets_lf | increase_in_deferred_tax_liabilities_lf | decrease_in_inventories_lf | decrease_in_operating_receivables_lf | increase_in_operating_payables_lf | others_in_cashflow_sheet_lf | spec_diff_of_net_cffoa_indirect_lf | totbal_diff_of_net_cffoa_indirect_lf | net_cffoa_indirect_lf | debt_transfer_to_capital_lf | conv_corp_bonds_within_1y_lf | fin_lease_fixed_assets_lf | cash_balance_ending_lf | cash_balance_beginning_lf | cce_balance_ending_lf | cce_balance_beginning_lf | spec_diff_of_netinc_in_cce_indirect_lf | totbal_diff_of_netinc_in_cce_indirect_lf | netinc_in_cce_indirect_lf | credit_impairment_loss_in_cashflow_sheet_lf |
+|---------------|------------|---------------|-------|---------------------|-----------------------|----------------------------------------|------------------------|---------------------------|---------------------|------------------------|----------------------------------|--------------------------|----------------|------------------------|----------------------------|--------------------------------------------|------------------------|-------------------------|----------------------|--------------------------|--------------------------------------|----------------|--------------------|-------------------------|---------------------------------|-------------------------|--------------------------------|----------------------------------|-------------------------|-----------------------|---------------------------------|-----------------------------|----------------------------------|--------------------------------|---------------------|---------------------------|-------------------------|--------------------------------|-----------------------------|-----------------------------|------------------------|-----------------|---------------------|-----------------------------|---------------------------------|----------------------|--------------------------|---------------------------------|-----------------------|------------------------|----------------------|----------------------|-------------|-----------------------------|------------------------|-------------------------|--------------------------------|----------------------------------|-------------------------|------------------------------|--------------------------------|-----------------|-------------------------|--------------------------------|--------------------------------------------|------------------------------------------|-----------------------------|--------------------------------|------------------|---------------------|-------------------------------|-------------|-------------------------|---------------------------------|---------------------------------|------------------------------|-----------------------------|---------------------|----------------------|-------------------|-----------------------|-------------------------|--------------------------------|----------------------------|--------------------------|------------------------------|--------------------------------------|----------------------------------------|----------------------------|------------------------------|-------------------------------------|---------------------------------------|------------------------------|------------------------|------------------|--------------------|----------------------|----------------------|----------------------|--------------------------|-------------------------------|----------------------|---------------|-----------------------------|----------------------------------------|------------------------------|-------------------------------------|---------------------------------------|------------------------------|-----------------------------------|-------------------------------------|----------------------|------------------|---------------------|--------------------|--------------------------|-----------------------------|-------------------------------------------|---------------------|--------------------|--------------------|-------------------------|-------------------------------------------------|----------------------------------------|-----------------------|-------------------------------------|---------------------------------------|-----------------------|----------------------------------------------------|------------------------------------------------------|---------------------------------------|----------------------------|----------------------|--------------------|-----------------------------|------------------------------|-----------------------------------|-------------------------------------|--------------------------|--------------------|-------------------|-----------------------------|---------------|------------------------------|------------------------------------|--------------------------------|--------------------------------|---------------------|-------------------|---------------------------|-------------------------------------|--------------------|-------------------------|------------------------|--------------------------|---------------------------|---------------------------------|-----------------------------------|------------------------|------------------|---------------------------------------|---------------------------------------------------------|-----------------------------|------------------|--------------------------|-----------------|----------------------------------|------------------------------------|---------------------|------------------------|--------------------------------|-----------------------|--------------------------------|------------------------------|--------------------------------|-----------------|-----------------------|----------------------------|------------------------------|---------------|------------------------------------|--------------------------------------|--------------------------------------|---------------------------|--------------|----------------|-------------------------|-----------------------------------------|--------------------------------|--------------------------|----------------------------------------------------|------------------------|--------------------------------------------|-----------------------------------|--------------------------|----------------------------------------------|-------------------------------------------------|------------------------------------|---------------------------------------------------|------------------------------------------------|------------------|------------------------------------------|---------------------------------------------|------------------------------------------------|---------------------------|------------------------------|-------------------------------|------------------------------------------------------|------------------------------------------|-----------------------|-------------------------------------------|------------------------------------------------|--------------------------------|---------------------------------------|--------------------------------------------|----------------------------------|------------------------------------------------------|----------------------------------------------------|--------------------------------------|-----------------------------|---------------------------------------|-----------------------|-------------------------|-------------------|-------------------------------------|---------------------------------|-------------------------------------------|-------------------------|-------------------------------------------------|-----------------------------------|----------------------------|-----------------------------------|----------------|-----------------------|-------------------------|-------------------|---------------------------|-----------------------------|--------------|--------------------------------------------|-------------------------|------------------------------------------------|-------------------------------------------------|---------------------------------------|-----------------------|-------------------------|-------------------|------------------------------|------------------------------|---------------------------|----------------------------------------|----------------------------------|-----------------------|-------------------------|----------------------|---------------------------|-----------------------------|--------------|-----------------------------------|------------------------------------------------|----------------------------------|----------------------------------|---------------------------------------|-----------------------|-------------------------|-------------------|---------------------------------|----------------------------------------------|------------------------------------------|----------------------------------|-----------------------|-------------------------|----------------------|---------------------------|-----------------------------|--------------|----------------------------------|-------------------------------|---------------------------------|------------------|------------------|---------------|---------------------------------|-----------------------------|-------------------------------|-------------------------------------|-----------------------------------------------|------------------------------------|---------------------------------------|-----------------------------|---------------------------------------|----------------|------------------------------------|-----------------------------------------|----------------------------|--------------------------------------|-----------------------------------|-----------------------------|------------------------------------|--------------------------------------|-----------------------|-----------------------------|------------------------------|---------------------------|------------------------|---------------------------|-----------------------|--------------------------|----------------------------------------|------------------------------------------|---------------------------|---------------------------------------------|
+| timestamp[ns] | string     | timestamp[ns] | int8  | double              | double                | double                                 | double                 | double                    | double              | double                 | double                           | double                   | double         | double                 | double                     | double                                     | double                 | double                  | double               | double                   | double                               | double         | double             | double                  | double                          | double                  | double                         | double                           | double                  | double                | double                          | double                      | double                           | double                         | double              | double                    | double                  | double                         | double                      | double                      | double                 | double          | double              | double                      | double                          | double               | double                   | double                          | double                | double                 | double               | double               | double      | double                      | double                 | double                  | double                         | double                           | double                  | double                       | double                         | double          | double                  | double                         | double                                     | double                                   | double                      | double                         | double           | double              | double                        | double      | double                  | double                          | double                          | double                       | double                      | double              | double               | double            | double                | double                  | double                         | double                     | double                   | double                       | double                               | double                                 | double                     | double                       | double                              | double                                | double                       | double                 | double           | double             | double               | double               | double               | double                   | double                        | double               | double        | double                      | double                                 | double                       | double                              | double                                | double                       | double                            | double                              | double               | double           | double              | double             | double                   | double                      | double                                    | double              | double             | double             | double                  | double                                          | double                                 | double                | double                              | double                                | double                | double                                             | double                                               | double                                | double                     | double               | double             | double                      | double                       | double                            | double                              | double                   | double             | double            | double                      | double        | double                       | double                             | double                         | double                         | double              | double            | double                    | double                              | double             | double                  | double                 | double                   | double                    | double                          | double                            | double                 | double           | double                                | double                                                  | double                      | double           | double                   | double          | double                           | double                             | double              | double                 | double                         | double                | double                         | double                       | double                         | double          | double                | double                     | double                       | double        | double                             | double                               | double                               | double                    | double       | double         | double                  | double                                  | double                         | double                   | double                                             | double                 | double                                     | double                            | double                   | double                                       | double                                          | double                             | double                                            | double                                         | double           | double                                   | double                                      | double                                         | double                    | double                       | double                        | double                                               | double                                   | double                | double                                    | double                                         | double                         | double                                | double                                     | double                           | double                                               | double                                             | double                               | double                      | double                                | double                | double                  | double            | double                              | double                          | double                                    | double                  | double                                          | double                            | double                     | double                            | double         | double                | double                  | double            | double                    | double                      | double       | double                                     | double                  | double                                         | double                                          | double                                | double                | double                  | double            | double                       | double                       | double                    | double                                 | double                           | double                | double                  | double               | double                    | double                      | double       | double                            | double                                         | double                           | double                           | double                                | double                | double                  | double            | double                          | double                                       | double                                   | double                           | double                | double                  | double               | double                    | double                      | double       | double                           | double                        | double                          | double           | double           | double        | double                          | double                      | double                        | double                              | double                                        | double                             | double                                | double                      | double                                | double         | double                             | double                                  | double                     | double                               | double                            | double                      | double                             | double                               | double                | double                      | double                       | double                    | double                 | double                    | double                | double                   | double                                 | double                                   | double                    | double                                      |
+
 

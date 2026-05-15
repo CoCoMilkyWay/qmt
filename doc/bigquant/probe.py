@@ -1,16 +1,16 @@
 """BigQuant DAI 接口探测脚本.
 
-对 README.md §字段表 19 项数据需求 (16 tushare itf + 3 _meta) 逐一调用
-`bq dai query "<SQL>" --filters '<JSON>'`, 验证表存在 + 字段可用 + 单点查询返回非空.
+对 doc/bigquant/used/api.md 列出的 30 个表逐一调用 `bq dai query`,
+验证表存在 + 字段可用 + 单点查询返回非空.
 
-约定 (与 doc/compare.md 一致):
+约定:
   - 假设 license 已开放全部 (旗舰版 / 独立订阅). 未开放的会 rc!=0 暴露.
   - 单日 + 单 instrument 收敛返回行数, 仅为 schema/通路验证.
-  - 财报类 PIT/shift 表用 `shift=0` 取 D 当日可见的最新一期.
+  - 财报 shift 表用 `shift=0` 取 D 当日可见的最新一期.
 
 用法:
-    python py/app/probe.py                    # 全部 probe
-    python py/app/probe.py <kw>               # 按 name/itf/table 子串过滤
+    python doc/bigquant/probe.py             # 全部 probe
+    python doc/bigquant/probe.py <kw>        # 按 name/itf/table 子串过滤
 """
 
 import json
@@ -24,17 +24,99 @@ INST = "000001.SZ"
 Probe = namedtuple("Probe", "name itf table sql filters note")
 
 PROBES = [
-    # ===== axis / meta =====
+    # ===== 通用数据 =====
     Probe(
-        "交易日历 SSE/SZSE",
-        "trade_cal",
+        "交易日历",
+        "trading_days",
         "trading_days",
         f"SELECT * FROM trading_days WHERE date='{D}'",
         None,
-        "替代 trade_cal; market_code 过滤 SSE/SZSE",
+        "全球交易市场日历; market_code 过滤 SSE/SZSE",
     ),
     Probe(
-        "股票全量主表 (含退市)",
+        "节假日",
+        "holidays",
+        "holidays",
+        "SELECT * FROM holidays LIMIT 5",
+        None,
+        "更新频率日频",
+    ),
+    Probe(
+        "中国股票代码列表",
+        "cn_stock_instruments",
+        "cn_stock_instruments",
+        f"SELECT * FROM cn_stock_instruments WHERE instrument='{INST}'",
+        {"date": [D, D]},
+        "全市场股票代码 + 中文简称 + type",
+    ),
+    #    Probe(
+    #        "中国指数代码列表",
+    #        "cn_index_instruments",
+    #        "cn_index_instruments",
+    #        "SELECT * FROM cn_index_instruments LIMIT 5",
+    #        {"date": [D, D]},
+    #        "申万行业指数代码列表",
+    #    ),
+    #    Probe(
+    #        "中国基金代码列表",
+    #        "cn_fund_instruments",
+    #        "cn_fund_instruments",
+    #        "SELECT * FROM cn_fund_instruments LIMIT 5",
+    #        {"date": [D, D]},
+    #        "每天参与交易的基金代码列表",
+    #    ),
+    #    Probe(
+    #        "中国期货代码列表",
+    #        "cn_future_instruments",
+    #        "cn_future_instruments",
+    #        "SELECT * FROM cn_future_instruments LIMIT 5",
+    #        {"date": [D, D]},
+    #        "每天的期货合约列表",
+    #    ),
+    #    Probe(
+    #        "中国可转债代码列表",
+    #        "cn_cbond_instruments",
+    #        "cn_cbond_instruments",
+    #        "SELECT * FROM cn_cbond_instruments LIMIT 5",
+    #        {"date": [D, D]},
+    #        "每天的可转债代码列表",
+    #    ),
+    # ===== 行业板块 =====
+    Probe(
+        "股票行业成分 (SW2021 PIT)",
+        "cn_stock_industry_component",
+        "cn_stock_industry_component",
+        f"SELECT instrument,industry_level1_code,industry_level1_name,industry_level2_name,industry_level3_name FROM cn_stock_industry_component WHERE instrument='{INST}'",
+        {"date": [D, D]},
+        "PIT 历史归属 (date 列)",
+    ),
+    Probe(
+        "行业进出记录",
+        "cn_stock_industry_change",
+        "cn_stock_industry_change",
+        f"SELECT * FROM cn_stock_industry_change WHERE instrument='{INST}' LIMIT 5",
+        {"date": ["2024-01-01", D]},
+        "更新频率日频",
+    ),
+    Probe(
+        "行业日线数据",
+        "cn_stock_industry_bar1d",
+        "cn_stock_industry_bar1d",
+        "SELECT * FROM cn_stock_industry_bar1d LIMIT 5",
+        {"date": [D, D]},
+        "行业 OHLCV; instrument=行业代码",
+    ),
+    Probe(
+        "行业估值",
+        "cn_stock_industry_valuation",
+        "cn_stock_industry_valuation",
+        "SELECT * FROM cn_stock_industry_valuation LIMIT 5",
+        {"date": [D, D]},
+        "申万 + 中信一二级行业 PE/PB",
+    ),
+    # ===== 股票信息 =====
+    Probe(
+        "股票基本信息",
         "stock_basic / _meta",
         "cn_stock_basic_info",
         f"SELECT instrument,name,exchange,list_sector,list_date,delist_date,industry,corp_nature FROM cn_stock_basic_info WHERE instrument='{INST}'",
@@ -42,93 +124,28 @@ PROBES = [
         "L+D+P+G; list_sector 表征 主板/创业板/科创板",
     ),
     Probe(
-        "代码 ID 映射 (辅助)",
-        "all_instruments",
-        "all_instruments",
-        "SELECT * FROM all_instruments LIMIT 5",
+        "股本信息 (历史变动)",
+        "cn_stock_capital",
+        "cn_stock_capital",
+        f"SELECT * FROM cn_stock_capital WHERE instrument='{INST}' LIMIT 5",
         None,
-        "instrument <-> instrument_id 双向",
+        "股本变动记录 (publish_date, change_date, reason)",
     ),
     Probe(
-        "股票曾用名段",
-        "namechange",
-        "cn_stock_name_change",
-        f"SELECT * FROM cn_stock_name_change WHERE instrument='{INST}'",
+        "分红送股 (实施)",
+        "dividend",
+        "cn_stock_dividend",
+        f"SELECT * FROM cn_stock_dividend WHERE instrument='{INST}' LIMIT 5",
         None,
-        "(instrument, start_date, end_date, name)",
+        "PK = (instrument, report_date); 仅实施版无 div_proc 三阶段",
     ),
     Probe(
-        "行业归属 SW2021 PIT",
-        "index_member_all / _meta",
-        "cn_stock_industry_component",
-        f"SELECT instrument,industry_level1_code,industry_level1_name,industry_level2_name,industry_level3_name FROM cn_stock_industry_component WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "PIT 历史归属 (date 列), 优于 tushare 当前快照",
-    ),
-    # ===== 网格 itf =====
-    Probe(
-        "收盘价 后复权 + 网格 OHLCV",
-        "bar1d (后复权)",
-        "cn_stock_bar1d",
-        f"SELECT date,instrument,adjust_factor,pre_close,open,close,high,low,volume,amount,change_ratio,turn,upper_limit,lower_limit FROM cn_stock_bar1d WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "项目前复权口径需切换或自算",
-    ),
-    Probe(
-        "收盘价 未复权",
-        "bar1d (未复权)",
-        "cn_stock_real_bar1d",
-        f"SELECT date,instrument,close,turn FROM cn_stock_real_bar1d WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "mcap_raw = real_close × total_shares",
-    ),
-    Probe(
-        "涨跌停价",
-        "stk_limit",
-        "cn_stock_limit_price",
-        f"SELECT * FROM cn_stock_limit_price WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "完全对应 tushare stk_limit",
-    ),
-    Probe(
-        "停复牌记录",
-        "suspend_d",
-        "cn_stock_suspend",
-        f"SELECT * FROM cn_stock_suspend WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "含 suspend_period + suspend_reason",
-    ),
-    Probe(
-        "ST 三态 + 风险警示 + 状态",
-        "stock_st",
-        "cn_stock_status",
-        f"SELECT date,instrument,st_status,is_risk_warning,suspended,price_limit_status,exdr FROM cn_stock_status WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "★ st_status TINYINT 0/1/2 直接 boolean",
-    ),
-    Probe(
-        "股票静态信息 (盘前快照)",
-        "static_data (盘前)",
-        "cn_stock_static_data",
-        f"SELECT date,instrument,pre_close,upper_limit,lower_limit,adjust_factor,suspended,st_status,exchange,in_delist,crd_buy_flag,crd_sell_flag,public_float_share FROM cn_stock_static_data WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "crd_buy/sell_flag 双向标识替代 margin_secs",
-    ),
-    Probe(
-        "个股估值 PE/PB/PS/PCF/DY",
-        "daily_basic (估值)",
-        "cn_stock_valuation",
-        f"SELECT date,instrument,total_market_cap,float_market_cap,pe_ttm,pb,ps_ttm,pcf_net_ttm,dividend_yield_ratio FROM cn_stock_valuation WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "★ 替代 daily_basic; 5 个估值 raw + 2 个市值 齐全",
-    ),
-    Probe(
-        "股本数据",
-        "shares (辅助 mcap)",
-        "cn_stock_shares",
-        f"SELECT * FROM cn_stock_shares WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "total_shares / a_float_shares / free_float_shares / total_float_shares",
+        "配股信息",
+        "cn_stock_allotment",
+        "cn_stock_allotment",
+        f"SELECT * FROM cn_stock_allotment WHERE instrument='{INST}' LIMIT 5",
+        None,
+        "更新频率日频",
     ),
     Probe(
         "融资融券明细 (个股)",
@@ -139,80 +156,81 @@ PROBES = [
         "financing_balance ↔ rzye, securities_lending_balance ↔ rqye",
     ),
     Probe(
-        "融资融券市场统计 (辅助)",
+        "融资融券市场统计",
         "margin_market",
         "cn_stock_margin_trading_market",
         "SELECT * FROM cn_stock_margin_trading_market",
         {"date": [D, D]},
-        "全市场总融资融券, 备查",
-    ),
-    # ===== 事件 itf - PIT 财报 =====
-    Probe(
-        "业绩预告 (公司发)",
-        "forecast_vip",
-        "cn_stock_profit_estimate",
-        f"SELECT date,instrument,begin_date,end_date,fore_profit_min,fore_profit_max,fore_type,ex_date FROM cn_stock_profit_estimate WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "★ profit_st/revenue_st 触发源",
+        "全市场总融资融券; method=sum/mean",
     ),
     Probe(
-        "业绩超预期 鉴定",
-        "express_vip (exceed appraisal)",
-        "cn_stock_profit_exceed_appraisal",
-        f"SELECT date,instrument,report_date,publish_date,fore_profit,profit_exceed_rate,appraisal_result FROM cn_stock_profit_exceed_appraisal WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "项目未入张量, 仅校验接口",
-    ),
-    Probe(
-        "业绩超预期 (券商研报)",
-        "express_vip (exceed expect)",
-        "cn_stock_profit_exceed_expect",
-        f"SELECT date,instrument,report_date,below_type,below_desc,estimate_profit,profit FROM cn_stock_profit_exceed_expect WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "",
-    ),
-    Probe(
-        "业绩低于预期",
-        "express_vip (below)",
-        "cn_stock_profit_below_expect",
-        f"SELECT date,instrument,report_date,below_type,below_desc,estimate_profit,profit FROM cn_stock_profit_below_expect WHERE instrument='{INST}'",
-        {"date": [D, D]},
-        "",
-    ),
-    Probe(
-        "财报实际披露日 (含修订)",
-        "disclosure_date (actual)",
-        "cn_stock_financial_changedate",
-        f"SELECT * FROM cn_stock_financial_changedate WHERE instrument='{INST}' LIMIT 10",
+        "股东户数",
+        "cn_stock_shareholder",
+        "cn_stock_shareholder",
+        f"SELECT * FROM cn_stock_shareholder WHERE instrument='{INST}' LIMIT 5",
         None,
-        "替代 disclosure_date.actual_date; 无事先 ann_date 计划",
+        "publish_date / end_date; 无 date 列",
     ),
     Probe(
-        "分红送股 (实施)",
-        "dividend",
-        "cn_stock_dividend",
-        f"SELECT * FROM cn_stock_dividend WHERE instrument='{INST}'",
+        "股本数据 (日频)",
+        "shares (辅助 mcap)",
+        "cn_stock_shares",
+        f"SELECT * FROM cn_stock_shares WHERE instrument='{INST}'",
+        {"date": [D, D]},
+        "total_shares / a_float_shares / free_float_shares / total_float_shares",
+    ),
+    Probe(
+        "股票状态 (ST/停牌/涨跌停)",
+        "stock_st",
+        "cn_stock_status",
+        f"SELECT date,instrument,st_status,is_risk_warning,suspended,price_limit_status,exdr FROM cn_stock_status WHERE instrument='{INST}'",
+        {"date": [D, D]},
+        "★ st_status TINYINT 0/1/2 直接 boolean",
+    ),
+    Probe(
+        "停复牌记录",
+        "suspend_d",
+        "cn_stock_suspend",
+        f"SELECT * FROM cn_stock_suspend WHERE instrument='{INST}'",
+        {"date": [D, D]},
+        "含 suspend_period + suspend_reason",
+    ),
+    Probe(
+        "证券简称变更",
+        "namechange",
+        "cn_stock_name_change",
+        f"SELECT * FROM cn_stock_name_change WHERE instrument='{INST}'",
         None,
-        "仅实施版无 div_proc 三阶段; PK = (instrument, report_date)",
+        "(instrument, start_date, end_date, name); 无 date 列",
     ),
+    # ===== 股票行情 =====
     Probe(
-        "分析师一致预期 (rolling, 辅助)",
-        "(辅助, 非 forecast 替代)",
-        "cn_stock_financial_forecast_consensus_rolling",
-        f"SELECT date,instrument,forecast_eps_fy1,forecast_np_fy1,forecast_revenue_fy1,forecast_np_yoy FROM cn_stock_financial_forecast_consensus_rolling WHERE instrument='{INST}'",
+        "龙虎榜",
+        "cn_stock_dragon_list",
+        "cn_stock_dragon_list",
+        "SELECT * FROM cn_stock_dragon_list LIMIT 5",
         {"date": [D, D]},
-        "不替代 forecast_vip (公司预告), 是分析师外推",
+        "上榜事件, 非每股每日有",
     ),
     Probe(
-        "财务分析-盈利能力 (PIT TTM)",
-        "fina_indicator (roe/roa)",
-        "cn_stock_financial_profitability",
-        f"SELECT date,instrument,report_date,shift,roe_avg_ttm,roa_avg_ttm,roe_period_ttm,roic_ttm,gross_profit_rate_ttm,net_profit_rate_ttm FROM cn_stock_financial_profitability WHERE instrument='{INST}' AND shift=0",
+        "股票后复权日行情 (OHLCV)",
+        "bar1d (后复权)",
+        "cn_stock_bar1d",
+        f"SELECT date,instrument,adjust_factor,pre_close,open,close,high,low,volume,amount,change_ratio,turn,upper_limit,lower_limit FROM cn_stock_bar1d WHERE instrument='{INST}'",
         {"date": [D, D]},
-        "★ 直接 _ttm 字段, 砍 ttm4_ytd 自算",
+        "项目前复权口径需切换或自算",
     ),
     Probe(
-        "利润表 PIT 原始",
+        "股票涨跌停价格",
+        "stk_limit",
+        "cn_stock_limit_price",
+        f"SELECT * FROM cn_stock_limit_price WHERE instrument='{INST}'",
+        {"date": [D, D]},
+        "完全对应 tushare stk_limit",
+    ),
+    # ===== 财务原始 PIT =====
+    Probe(
+        "利润表 PIT (一般企业)",
         "income_vip (pit raw)",
         "cn_stock_financial_income_general_pit",
         f"SELECT date,instrument,report_date,change_type,operating_revenue,net_profit,net_profit_to_parent_shareholders FROM cn_stock_financial_income_general_pit WHERE instrument='{INST}'",
@@ -220,23 +238,7 @@ PROBES = [
         "PIT 原生 (date=visible_date); change_type 修订追踪",
     ),
     Probe(
-        "利润表 TTM 衍生",
-        "income_vip (ttm)",
-        "cn_stock_financial_ttm_shift",
-        f"SELECT date,instrument,report_date,shift,total_operating_revenue_ttm,operating_revenue_ttm,net_profit_ttm,net_profit_to_parent_shareholders_ttm FROM cn_stock_financial_ttm_shift WHERE instrument='{INST}' AND shift=0",
-        {"date": [D, D]},
-        "★ ttm 直接给, 砍 ttm4_ytd 自算",
-    ),
-    Probe(
-        "利润表 LF 衍生 (最新一期)",
-        "income_vip (lf)",
-        "cn_stock_financial_lf_shift",
-        f"SELECT date,instrument,report_date,shift FROM cn_stock_financial_lf_shift WHERE instrument='{INST}' AND shift=0",
-        {"date": [D, D]},
-        "lf_shift 用于自算 PB (净资产) 等; 大表 313 列, 仅探活",
-    ),
-    Probe(
-        "现金流量表 PIT 原始",
+        "现金流量表 PIT (一般企业)",
         "cashflow_vip (pit raw)",
         "cn_stock_financial_cashflow_general_pit",
         f"SELECT date,instrument,report_date,change_type,net_cffoa,net_cffia,net_cfffa,netinc_in_cce FROM cn_stock_financial_cashflow_general_pit WHERE instrument='{INST}'",
@@ -244,12 +246,29 @@ PROBES = [
         "net_cffoa = 经营性现金流净额",
     ),
     Probe(
-        "现金流 TTM 衍生",
-        "cashflow_vip (ttm)",
-        "cn_stock_financial_ttm_shift",
-        f"SELECT date,instrument,report_date,shift,net_cffoa_ttm,net_cffia_ttm,net_cfffa_ttm FROM cn_stock_financial_ttm_shift WHERE instrument='{INST}' AND shift=0",
+        "资产负债表 PIT (一般企业)",
+        "balance_vip (pit raw)",
+        "cn_stock_financial_balance_general_pit",
+        f"SELECT date,instrument,report_date,change_type,total_assets,total_liabilities,total_owner_equity,total_equity_to_parent_shareholders FROM cn_stock_financial_balance_general_pit WHERE instrument='{INST}'",
         {"date": [D, D]},
-        "pcf_raw = mcap / net_cffoa_ttm",
+        "PIT 原生; total_equity_to_parent_shareholders 用于自算 PB",
+    ),
+    # ===== 财务衍生 =====
+    Probe(
+        "财务衍生 TTM (利润+现金流)",
+        "ttm_shift",
+        "cn_stock_financial_ttm_shift",
+        f"SELECT date,instrument,report_date,shift,operating_revenue_ttm,net_profit_ttm,net_profit_to_parent_shareholders_ttm,net_cffoa_ttm,net_cffia_ttm,net_cfffa_ttm FROM cn_stock_financial_ttm_shift WHERE instrument='{INST}' AND shift=0",
+        {"date": [D, D]},
+        "★ shift=0 取最新一期; ttm 直接给, 砍 ttm4_ytd 自算",
+    ),
+    Probe(
+        "财务衍生 (财务附注 LF/MRQ/TTM)",
+        "notes_shift",
+        "cn_stock_financial_notes_shift",
+        f"SELECT date,instrument,report_date,shift,nonrecurring_income_sum_lf,nonrecurring_income_sum_mrq,nonrecurring_income_sum_ttm FROM cn_stock_financial_notes_shift WHERE instrument='{INST}' AND shift=0",
+        {"date": [D, D]},
+        "财务附注 LF/MRQ/TTM 三套衍生",
     ),
 ]
 
@@ -317,7 +336,7 @@ if __name__ == "__main__":
     main()
 
 
-'''
+"""
 /bin/python /home/chuyin/work/qmt/doc/bigquant/probe.py
 chuyin@chuyin:~/work/qmt$ /bin/python /home/chuyin/work/qmt/doc/bigquant/probe.py
 BigQuant DAI 接口探测  (28/28)  D=2024-12-31  INST=000001.SZ
@@ -611,4 +630,4 @@ Traceback (most recent call last):
            ^^^^^^^^^
 AssertionError: 有 1 个 probe 失败
 chuyin@chuyin:~/work/qmt$ 
-'''
+"""

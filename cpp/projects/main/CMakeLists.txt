@@ -67,74 +67,133 @@ endif()
 add_compile_options(-fcolor-diagnostics -fansi-escape-codes -Wno-overriding-option)
 
 # ============================================================================
-# Includes
+# Includes — 含 vendored Arrow C++ Flight headers (cpp/include/package/arrow/include)
 # ============================================================================
-include_directories(
-    ../../include
-)
+set(ARROW_VENDOR  ${CMAKE_CURRENT_SOURCE_DIR}/../../include/package/arrow)
+set(ARROW_INCLUDE ${ARROW_VENDOR}/include)
+set(ARROW_LIB     ${ARROW_VENDOR}/lib)
+
+if(NOT EXISTS ${ARROW_INCLUDE}/arrow/flight/client.h)
+    message(FATAL_ERROR
+        "Vendored Arrow headers missing: ${ARROW_INCLUDE}/arrow/flight/client.h\n"
+        "Run: ${ARROW_VENDOR}/vendor_from_pyarrow.sh")
+endif()
+if(NOT EXISTS ${ARROW_LIB}/libarrow_flight.so)
+    message(FATAL_ERROR
+        "Vendored Arrow shared libs missing: ${ARROW_LIB}/libarrow_flight.so\n"
+        "Run: ${ARROW_VENDOR}/vendor_from_pyarrow.sh")
+endif()
+
+include_directories(../../include)
+# Arrow 13.x 头文件用 std::aligned_storage, 在 C++23 下被 deprecated.
+# 用 SYSTEM include 抑制第三方头里的 -Wdeprecated-declarations 等警告.
+include_directories(SYSTEM ${ARROW_INCLUDE})
+
+# ============================================================================
+# Dependency Preflight — 提前检查系统依赖, 缺失时直接给出 install 指令
+# ============================================================================
+find_path(_OPENSSL_SSL_H openssl/ssl.h PATHS /usr/include /usr/local/include)
+find_library(_OPENSSL_SSL_LIB    NAMES ssl)
+find_library(_OPENSSL_CRYPTO_LIB NAMES crypto)
+if(NOT _OPENSSL_SSL_H OR NOT _OPENSSL_SSL_LIB OR NOT _OPENSSL_CRYPTO_LIB)
+    message(FATAL_ERROR
+        "OpenSSL development files missing "
+        "(header=${_OPENSSL_SSL_H}, libssl=${_OPENSSL_SSL_LIB}, libcrypto=${_OPENSSL_CRYPTO_LIB}).\n"
+        "Install: sudo apt install libssl-dev")
+endif()
+
+find_package(OpenSSL REQUIRED)
 
 # ============================================================================
 # Source Files
 # ============================================================================
+# BQ 接通测试期间, 只编 main + api/bigquant + yyjson, 业务代码全部注掉.
+# 恢复时把下方 BQ 块替成原 SOURCES 即可.
 set(SOURCES
     ../../src/main.cpp
-    ../../src/misc/logging.cpp
-    ../../src/misc/date.cpp
-    ../../src/misc/fs.cpp
-    ../../src/misc/npy.cpp
+    ../../src/api/bigquant/signer.cpp
+    ../../src/api/bigquant/https.cpp
+    ../../src/api/bigquant/dai.cpp
+    ../../src/api/bigquant/spec.cpp
+    ../../src/api/bigquant/parse.cpp
     ../../include/package/yyjson/yyjson.c
-    ../../src/tushare/http.cpp
-    ../../src/tushare/spec.cpp
-    ../../src/tushare/store.cpp
-    ../../src/tushare/meta.cpp
-    ../../src/tushare/pipeline.cpp
-    ../../src/feature/axis.cpp
-    ../../src/feature/feature.cpp
-    ../../src/feature/tensor.cpp
-    ../../src/feature/pit.cpp
-    ../../src/feature/load.cpp
-    ../../src/feature/ts.cpp
-    ../../src/feature/cs.cpp
-    ../../src/feature/build.cpp
-    ../../src/feature/describe.cpp
-    ../../src/backtest/backtest.cpp
-    ../../src/analysis/analysis.cpp
+    # --- 原业务代码,临时停用 ---
+    # ../../src/misc/logging.cpp
+    # ../../src/misc/date.cpp
+    # ../../src/misc/fs.cpp
+    # ../../src/misc/npy.cpp
+    # ../../src/api/tushare/http.cpp
+    # ../../src/api/tushare/spec.cpp
+    # ../../src/api/tushare/store.cpp
+    # ../../src/api/tushare/meta.cpp
+    # ../../src/api/tushare/pipeline.cpp
+    # ../../src/feature/axis.cpp
+    # ../../src/feature/feature.cpp
+    # ../../src/feature/tensor.cpp
+    # ../../src/feature/pit.cpp
+    # ../../src/feature/load.cpp
+    # ../../src/feature/ts.cpp
+    # ../../src/feature/cs.cpp
+    # ../../src/feature/build.cpp
+    # ../../src/feature/describe.cpp
+    # ../../src/backtest/backtest.cpp
+    # ../../src/analysis/analysis.cpp
 )
 
 set(HEADERS
-    ../../include/misc/timer.hpp
-    ../../include/misc/print.hpp
-    ../../include/misc/progress_single.hpp
-    ../../include/misc/progress_parallel.hpp
-    ../../include/misc/affinity.hpp
-    ../../include/misc/logging.hpp
-    ../../include/misc/profiler.hpp
-    ../../include/misc/date.hpp
-    ../../include/misc/fs.hpp
-    ../../include/misc/npy.hpp
     ../../include/config.hpp
     ../../include/package/yyjson/yyjson.h
-    ../../include/tushare/http.hpp
-    ../../include/tushare/spec.hpp
-    ../../include/tushare/store.hpp
-    ../../include/tushare/meta.hpp
-    ../../include/tushare/pipeline.hpp
-    ../../include/feature/axis.hpp
-    ../../include/feature/feature.hpp
-    ../../include/feature/tensor.hpp
-    ../../include/feature/pit.hpp
-    ../../include/feature/load.hpp
-    ../../include/feature/ts.hpp
-    ../../include/feature/cs.hpp
-    ../../include/feature/build.hpp
-    ../../include/feature/describe.hpp
-    ../../include/backtest/backtest.hpp
-    ../../include/analysis/analysis.hpp
+    ../../include/api/bigquant/signer.hpp
+    ../../include/api/bigquant/https.hpp
+    ../../include/api/bigquant/dai.hpp
+    ../../include/api/bigquant/spec.hpp
+    ../../include/api/bigquant/parse.hpp
+    # --- 原业务代码,临时停用 ---
+    # ../../include/misc/timer.hpp
+    # ../../include/misc/print.hpp
+    # ../../include/misc/progress_single.hpp
+    # ../../include/misc/progress_parallel.hpp
+    # ../../include/misc/affinity.hpp
+    # ../../include/misc/logging.hpp
+    # ../../include/misc/profiler.hpp
+    # ../../include/misc/date.hpp
+    # ../../include/misc/fs.hpp
+    # ../../include/misc/npy.hpp
+    # ../../include/api/tushare/http.hpp
+    # ../../include/api/tushare/spec.hpp
+    # ../../include/api/tushare/store.hpp
+    # ../../include/api/tushare/meta.hpp
+    # ../../include/api/tushare/pipeline.hpp
+    # ../../include/feature/axis.hpp
+    # ../../include/feature/feature.hpp
+    # ../../include/feature/tensor.hpp
+    # ../../include/feature/pit.hpp
+    # ../../include/feature/load.hpp
+    # ../../include/feature/ts.hpp
+    # ../../include/feature/cs.hpp
+    # ../../include/feature/build.hpp
+    # ../../include/feature/describe.hpp
+    # ../../include/backtest/backtest.hpp
+    # ../../include/analysis/analysis.hpp
 )
 
 add_executable(app_main ${SOURCES} ${HEADERS})
 
-target_link_libraries(app_main PRIVATE pthread)
+# vendored Arrow C++ Flight + 系统 OpenSSL (HTTPS 控制面必需) + pthread
+target_link_libraries(app_main PRIVATE
+    ${ARROW_LIB}/libarrow_flight.so
+    ${ARROW_LIB}/libarrow.so
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    pthread
+    dl
+)
+
+# 运行时让 ld.so 找到 vendored libarrow*.so.1300
+set_target_properties(app_main PROPERTIES
+    BUILD_RPATH "${ARROW_LIB}"
+    INSTALL_RPATH "${ARROW_LIB}"
+)
 
 # ============================================================================
 # Install

@@ -20,7 +20,7 @@ visible_date 主键的判定:
     - 大部分表的 `date` 列就是当日盘后可见 (T+0 收盘后, 或 PIT 公告日);
     - 财报派生 (PIT/ttm/notes) 的 `date` = 首次公告可见日;
     - 公告类事件 (dividend/allotment/capital/shareholder) 用 publish_date;
-    - 名称变更用 start_date (新简称生效日);
+    - 名称变更用 end_date (该简称失效日, 之后才确知本段区间; 偏移 TBD);
     - basic_info / financial_changedate 为静态快照 (无 date 维度), 全量取.
 
 配置见文件顶部 CONFIG 区块, 直接改变量, 不走命令行.
@@ -40,8 +40,8 @@ import dai  # pyright: ignore[reportMissingImports]
 # CONFIG  (直接改这里)
 # ============================================================================
 # 月度区间, 闭区间, 格式 'YYYY-MM' (整月对齐, 不支持精确到日)
-START_MONTH = "2024-01"
-END_MONTH = "2024-02"
+START_MONTH = "2015-01"
+END_MONTH = "2026-04"
 
 # 模式: "all" | "static" | "range"
 MODE = "all"
@@ -63,13 +63,16 @@ PARQUET_COMPRESSION_LEVEL = 22  # zstd 最高级
 #   "partition" : date 是分区列且 = visible_date, 用 filters={"date":[s,e]} 加速;
 #   "where"     : visible_date 不是分区列, 用 SQL WHERE;
 #   "static"    : 无 date 维度, 全量拉, 不接受时间区间.
+# freq:
+#   "day"         : 每月按 [月初, 月末] 全量拉 (默认);
+#   "month_first" : 每月仅拉当月最早有记录的一天 (SQL MIN(date) 选), 用于月度快照
+#                   (例: industry_component 月度快照 + industry_change 日频增量 cover).
 
-Table = namedtuple("Table", "name visible_date strategy")
+Table = namedtuple("Table", "name visible_date strategy freq", defaults=("day",))
 
 TABLES = [
     # ---- 静态快照 (优先下载, 无时间维度) ----
     Table("cn_stock_basic_info", None, "static"),
-    Table("cn_stock_financial_changedate", None, "static"),
     # ---- 通用数据 (date = 当日) ----
     Table("trading_days", "date", "partition"),
     Table("holidays", "date", "partition"),
@@ -79,7 +82,9 @@ TABLES = [
     Table("cn_future_instruments", "date", "partition"),
     Table("cn_cbond_instruments", "date", "partition"),
     # ---- 行业 ----
-    Table("cn_stock_industry_component", "date", "partition"),
+    # industry_component: 月初快照 (低频), 月内变动靠 industry_change 增量 cover
+    Table("cn_stock_industry_component", "date", "partition", "month_first"),
+    Table("cn_stock_industry_change", "date", "partition"),
     Table("cn_stock_industry_bar1d", "date", "partition"),
     Table("cn_stock_industry_valuation", "date", "partition"),
     # ---- 股票日度状态/行情 ----
@@ -96,13 +101,15 @@ TABLES = [
     Table("cn_stock_dividend", "publish_date", "where"),
     Table("cn_stock_allotment", "publish_date", "where"),
     Table("cn_stock_shareholder", "publish_date", "where"),
-    Table("cn_stock_name_change", "start_date", "where"),
+    Table("cn_stock_name_change", "end_date", "where"),
     # ---- 财务 PIT (date = 首次公告可见日) ----
     Table("cn_stock_financial_income_general_pit", "date", "partition"),
     Table("cn_stock_financial_cashflow_general_pit", "date", "partition"),
     Table("cn_stock_financial_balance_general_pit", "date", "partition"),
     Table("cn_stock_financial_ttm_shift", "date", "partition"),
     Table("cn_stock_financial_notes_shift", "date", "partition"),
+    # ---- 因子 (date = 当日) ----
+    Table("cn_stock_valuation", "date", "partition"),
 ]
 
 
@@ -138,16 +145,22 @@ def _month_bounds(ym):
 def _query(t, start=None, end=None):
     if t.strategy == "static":
         return dai.query(f"SELECT * FROM {t.name}").df()
-    if t.strategy == "partition":
-        return dai.query(
-            f"SELECT * FROM {t.name}", filters={"date": [start, end]}
-        ).df()
-    if t.strategy == "where":
-        col = t.visible_date
+    col = t.visible_date
+    if t.freq == "month_first":
+        # 窗口内最早一天的全部行 (月初遇假期时往后顺延).
+        # partition 表必须传 filters 做分区裁剪, dai 才放行.
         sql = (
             f"SELECT * FROM {t.name} "
+            f"WHERE {col} = ("
+            f"SELECT MIN({col}) FROM {t.name} "
             f"WHERE {col} >= '{start}' AND {col} <= '{end}'"
+            f")"
         )
+        return dai.query(sql, filters={"date": [start, end]}).df()
+    if t.strategy == "partition":
+        return dai.query(f"SELECT * FROM {t.name}", filters={"date": [start, end]}).df()
+    if t.strategy == "where":
+        sql = f"SELECT * FROM {t.name} WHERE {col} >= '{start}' AND {col} <= '{end}'"
         return dai.query(sql).df()
     assert False, f"unknown strategy: {t.strategy}"
 
@@ -249,34 +262,47 @@ def main():
 
     # ---- 1. 静态表 (只拉一次) ----
     for i, t in enumerate(static_tables, 1):
-        df = _query(t)
         pq_path = os.path.join(pq_root, "_meta", f"{t.name}.parquet")
-        size = _save_parquet(df, pq_path)
+        cached = os.path.exists(pq_path)
+        if cached:
+            size = os.path.getsize(pq_path)
+            df = pd.read_parquet(pq_path, engine="pyarrow") if SPLIT_JSON else None
+        else:
+            df = _query(t)
+            size = _save_parquet(df, pq_path)
         msg_json = ""
         if SPLIT_JSON:
             _save_json_static(t, df, json_root)
             msg_json = "  +json"
+        rows_str = "cached" if df is None else str(len(df))
         print(
             f"[static {i}/{len(static_tables)}] {t.name:<42} "
-            f"rows={len(df):>9}  pq={size/1024:>9.1f} KB{msg_json}"
+            f"rows={rows_str:>9}  pq={size/1024:>9.1f} KB{msg_json}"
         )
 
     # ---- 2. 区间表: 月 × 表 ----
     for mi, ym in enumerate(months, 1):
-        start, end = _month_bounds(ym)
-        print(f"\n== [{mi}/{len(months)}] month {ym}  ({start} .. {end}) ==")
+        month_start, month_end = _month_bounds(ym)
+        print(f"\n== [{mi}/{len(months)}] month {ym}  ({month_start} .. {month_end}) ==")
         for ti, t in enumerate(range_tables, 1):
-            df = _query(t, start, end)
+            assert t.freq in ("day", "month_first"), f"unknown freq: {t.freq}"
             pq_path = os.path.join(pq_root, ym, f"{t.name}.parquet")
-            size = _save_parquet(df, pq_path)
+            cached = os.path.exists(pq_path)
+            if cached:
+                size = os.path.getsize(pq_path)
+                df = pd.read_parquet(pq_path, engine="pyarrow") if SPLIT_JSON else None
+            else:
+                df = _query(t, month_start, month_end)
+                size = _save_parquet(df, pq_path)
             msg_json = ""
             if SPLIT_JSON:
                 nfile = _save_json_day_split(t, df, json_root)
                 msg_json = f"  +json({nfile}d)"
+            rows_str = "cached" if df is None else str(len(df))
             print(
                 f"  [{ti:>2}/{len(range_tables)}] {t.name:<42} "
-                f"({t.strategy:<9} key={t.visible_date:<12})  "
-                f"rows={len(df):>9}  pq={size/1024:>9.1f} KB{msg_json}"
+                f"({t.strategy:<9} key={t.visible_date:<12} freq={t.freq:<11})  "
+                f"rows={rows_str:>9}  pq={size/1024:>9.1f} KB{msg_json}"
             )
 
 

@@ -1,0 +1,6 @@
+# Vendored Apache Arrow C++ + Flight binaries (~90 MB).
+# Populate by running ./vendor_from_pyarrow.sh on a host with pyarrow installed
+# (any major version; the script auto-discovers SONAME).
+include/
+lib/
+*.whl

@@ -1,3 +1,126 @@
+// 临时切到 BigQuant DAI 接通测试; 原 main (tushare pipeline + feature build + backtest + analysis)
+// 全部用 #if 0 包住, 验证完后改回 1 即可恢复.
+
+#include "api/bigquant/dai.hpp"
+#include "api/bigquant/parse.hpp"
+#include "api/bigquant/spec.hpp"
+#include "package/yyjson/yyjson.h"
+
+#include <arrow/table.h>
+
+#include <cassert>
+#include <cstdlib>
+#include <iostream>
+#include <string_view>
+
+namespace {
+
+// 采样日期: 全市场分区/事件表都用单日窗口, 保证一次跑完不重不漏.
+constexpr const char *kSampleStart = "2024-12-01";
+constexpr const char *kSampleEnd = "2024-12-31";
+
+// JSON 头部预览长度 — 单表 dump 头几个字符确认结构, 整个 JSON 量大不打.
+constexpr size_t kPreviewBytes = 240;
+
+const char *kind_str(bigquant::FetchKind k) {
+  switch (k) {
+  case bigquant::FetchKind::Static:    return "static";
+  case bigquant::FetchKind::Partition: return "partition";
+  case bigquant::FetchKind::Where:     return "where";
+  }
+  return "?";
+}
+
+const char *freq_str(bigquant::FetchFreq f) {
+  switch (f) {
+  case bigquant::FetchFreq::Day:        return "day";
+  case bigquant::FetchFreq::MonthFirst: return "month_first";
+  }
+  return "?";
+}
+
+void preview_json(yyjson_mut_doc *doc) {
+  size_t len = 0;
+  char *s = yyjson_mut_write(doc, 0, &len);
+  assert(s);
+  std::string_view sv(s, len);
+  std::cout << "    json (" << len << "B): ";
+  if (sv.size() <= kPreviewBytes) {
+    std::cout << sv << "\n";
+  } else {
+    std::cout << sv.substr(0, kPreviewBytes) << " ...(+" << (len - kPreviewBytes) << "B)\n";
+  }
+  std::free(s);
+}
+
+} // namespace
+
+int main() {
+  bigquant::DaiClient client;
+
+  std::cout << "=== [whoami] 控制面 HTTPS + HMAC ===\n";
+  {
+    yyjson_doc *doc = client.whoami();
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *uname = yyjson_obj_get(root, "username");
+    assert(uname && yyjson_is_str(uname));
+    std::cout << "  user: " << yyjson_get_str(uname) << "\n";
+    yyjson_doc_free(doc);
+  }
+
+  std::cout << "\n=== [schema] cn_stock_bar1d ===\n";
+  {
+    yyjson_doc *doc = client.get_datasource_schema("cn_stock_bar1d");
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *meta = yyjson_obj_get(root, "metadata");
+    assert(meta);
+    yyjson_val *schema = yyjson_obj_get(meta, "schema");
+    assert(schema);
+    std::cout << "  fields (" << yyjson_obj_size(schema) << "):";
+    size_t idx, n;
+    yyjson_val *k, *vv;
+    yyjson_obj_foreach(schema, idx, n, k, vv) {
+      std::cout << " " << yyjson_get_str(k) << "(" << yyjson_get_str(vv) << ")";
+    }
+    std::cout << "\n";
+    yyjson_doc_free(doc);
+  }
+
+  // 遍历 api.md 的 26 张表, 各取一次窗口数据, 走 parser → JSON.
+  std::cout << "\n=== [fetch + parse] Arrow Flight → yyjson (列式 JSON) ===\n";
+  std::cout << "  window: [" << kSampleStart << ", " << kSampleEnd << "]\n";
+
+  const auto &specs = bigquant::SPECS;
+  for (size_t i = 0; i < specs.size(); ++i) {
+    const auto &spec = specs[i];
+    std::cout << "\n[" << (i + 1) << "/" << specs.size() << "] " << spec.name
+              << " (" << kind_str(spec.kind) << "/" << freq_str(spec.freq) << ")\n";
+
+    std::shared_ptr<arrow::Table> table;
+    if (spec.kind == bigquant::FetchKind::Static) {
+      table = bigquant::fetch(client, spec);
+    } else {
+      table = bigquant::fetch(client, spec, kSampleStart, kSampleEnd);
+    }
+    std::cout << "    table: " << table->num_rows() << " rows x "
+              << table->num_columns() << " cols\n";
+
+    yyjson_mut_doc *jdoc = bigquant::table_to_json(table);
+    preview_json(jdoc);
+    yyjson_mut_doc_free(jdoc);
+  }
+
+  std::cout << "\n============================================================\n"
+            << "通过: " << specs.size() << "/" << specs.size() << "\n";
+  return 0;
+}
+
+// ============================================================================
+// 原 main (tushare + feature + backtest + analysis): 临时停用
+// 验完 BQ 通路后, 把下面 #if 0 改回 1 即可恢复.
+// ============================================================================
+#if 0
+
 #include "analysis/analysis.hpp"
 #include "backtest/backtest.hpp"
 #include "config.hpp"
@@ -8,8 +131,8 @@
 #include "feature/tensor.hpp"
 #include "misc/date.hpp"
 #include "misc/fs.hpp"
-#include "tushare/pipeline.hpp"
-#include "tushare/spec.hpp"
+#include "api/tushare/pipeline.hpp"
+#include "api/tushare/spec.hpp"
 
 #include <cassert>
 #include <cstddef>
@@ -20,8 +143,6 @@
 
 namespace {
 
-// 写 output/meta.json — py 报告生成器读它取 axes 标签 / factor 名 / 配置 / 计时.
-//   内容是手摸 JSON; 不引入 yyjson, 因为只是少量标量+数组. 字符串假设无引号.
 void write_meta(const feature::Axes &axes, const feature::Tensor &T,
                 double bt_seconds, double an_seconds) {
   namespace fs = std::filesystem;
@@ -40,7 +161,6 @@ void write_meta(const feature::Axes &axes, const feature::Tensor &T,
     f << ']';
   };
 
-  // factor 列表 (Kind::Factor, 与 analysis 输出顺序一致)
   std::vector<std::string> factor_names;
   std::vector<int> factor_indices;
   for (std::size_t i = 0; i < feature::FEATURES.size(); ++i) {
@@ -49,7 +169,6 @@ void write_meta(const feature::Axes &axes, const feature::Tensor &T,
       factor_indices.push_back(static_cast<int>(i));
     }
   }
-  // filter 列表
   std::vector<std::string> filter_names;
   std::vector<std::string> enabled_filter_names;
   for (std::size_t i = 0; i < feature::FEATURES.size(); ++i) {
@@ -61,7 +180,6 @@ void write_meta(const feature::Axes &axes, const feature::Tensor &T,
     enabled_filter_names.emplace_back(
         feature::FEATURES[static_cast<std::size_t>(ef)].name);
   }
-  // factor weights 配置 (与 FACTOR_WEIGHTS 同序)
   std::vector<std::string> fw_names;
   std::vector<float> fw_weights;
   for (const auto &fw : ::config::FACTOR_WEIGHTS) {
@@ -139,3 +257,5 @@ int main() {
   write_meta(axes, T, bt_sec, an_sec);
   return 0;
 }
+
+#endif // 原 main 屏蔽

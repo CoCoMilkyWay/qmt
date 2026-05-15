@@ -1,8 +1,8 @@
-#include "tushare/pipeline.hpp"
+#include "api/tushare/pipeline.hpp"
 #include "config.hpp"
-#include "tushare/http.hpp"
-#include "tushare/meta.hpp"
-#include "tushare/store.hpp"
+#include "api/tushare/http.hpp"
+#include "api/tushare/meta.hpp"
+#include "api/tushare/store.hpp"
 
 #include <cassert>
 #include <iostream>

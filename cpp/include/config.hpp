@@ -10,6 +10,13 @@ namespace config {
 inline constexpr const char *TUSHARE_TOKEN =
     "439b79afc0af96f0abb32a3be27df99b9e8fe9fa83f8d555d66fba72"; // tushare pro token，*_vip 接口需要 5000+ 积分
 
+// BigQuant DAI 凭据 (与官方 bq CLI ~/.bigquant/config.json::auth 同源)
+//   ak: Access Key, 12 字符, 明文回传 (X-BigQuant-Access-Key)
+//   sk: Secret Key, 64 字符, 仅用于本地 HMAC 签名 + Flight Basic Token, 永不回传
+// 想隔离不进 git: 整对挪去 cpp/include/secrets.hpp (.gitignore'd), config.hpp 改 include
+inline constexpr const char *BIGQUANT_AK = "6dS0GYgxocXL";
+inline constexpr const char *BIGQUANT_SK = "bKDM141Hz2etbj3QTLf9GA6aGmEZRu68MJuvaJBJyPgq22E3fNNDRehFCbgComTQ";
+
 inline constexpr const char *API_HOST = "api.tushare.pro"; // 官方 REST 网关，走明文 HTTP（无 HTTPS），省掉 SSL 依赖
 inline constexpr const char *API_PORT = "80";              // 官方 REST 网关端口
 inline constexpr int HTTP_TIMEOUT_SECONDS = 60;            // range 接口服务端序列化耗时可达 20s，60s 留余量；超时直接 assert，update 幂等重跑即可

@@ -1,7 +1,7 @@
-#include "tushare/meta.hpp"
+#include "api/tushare/meta.hpp"
 #include "misc/fs.hpp"
 #include "package/yyjson/yyjson.h"
-#include "tushare/http.hpp"
+#include "api/tushare/http.hpp"
 
 #include <algorithm>
 #include <array>
