@@ -47,6 +47,10 @@ struct TableSpec {
   FetchKind kind;
   FetchFreq freq;
   Category category;
+  // 同次响应去重 PK (字段名列表). 同一 visible_date day file 内, 同 PK 多条 → assert
+  // (BigQuant PIT 服务端通常保证单次响应 PK 唯一, 此处 fail-fast 兜底).
+  // Static 表 PK = 表唯一身份键 (e.g. instrument); 其他表通常含 (visible_date, instrument).
+  std::vector<std::string> pk;
 };
 
 // api.md 中"需要支持"的全部表 (26 张), 顺序与 api.md 自上而下一致.

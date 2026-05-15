@@ -107,26 +107,28 @@ find_package(OpenSSL REQUIRED)
 # ============================================================================
 # Source Files
 # ============================================================================
-# BQ 接通测试期间, 只编 main + api/bigquant + yyjson, 业务代码全部注掉.
-# 恢复时把下方 BQ 块替成原 SOURCES 即可.
+# Phase 1: 数据接入子系统 + 落地 (misc + api/bigquant + api/tushare).
+# feature / backtest / analysis 待 Phase 2 迁移到 bigquant itf 后再启用.
 set(SOURCES
     ../../src/main.cpp
+    ../../src/misc/date.cpp
+    ../../src/misc/fs.cpp
+    ../../src/misc/store.cpp
     ../../src/api/bigquant/signer.cpp
     ../../src/api/bigquant/https.cpp
     ../../src/api/bigquant/dai.cpp
     ../../src/api/bigquant/spec.cpp
     ../../src/api/bigquant/parse.cpp
+    ../../src/api/bigquant/store.cpp
+    ../../src/api/bigquant/pipeline.cpp
+    ../../src/api/tushare/http.cpp
+    ../../src/api/tushare/spec.cpp
+    ../../src/api/tushare/store.cpp
+    ../../src/api/tushare/pipeline.cpp
     ../../include/package/yyjson/yyjson.c
-    # --- 原业务代码,临时停用 ---
+    # --- feature / backtest / analysis 待 Phase 2 启用 ---
     # ../../src/misc/logging.cpp
-    # ../../src/misc/date.cpp
-    # ../../src/misc/fs.cpp
     # ../../src/misc/npy.cpp
-    # ../../src/api/tushare/http.cpp
-    # ../../src/api/tushare/spec.cpp
-    # ../../src/api/tushare/store.cpp
-    # ../../src/api/tushare/meta.cpp
-    # ../../src/api/tushare/pipeline.cpp
     # ../../src/feature/axis.cpp
     # ../../src/feature/feature.cpp
     # ../../src/feature/tensor.cpp
@@ -143,12 +145,21 @@ set(SOURCES
 set(HEADERS
     ../../include/config.hpp
     ../../include/package/yyjson/yyjson.h
+    ../../include/misc/date.hpp
+    ../../include/misc/fs.hpp
+    ../../include/misc/store.hpp
     ../../include/api/bigquant/signer.hpp
     ../../include/api/bigquant/https.hpp
     ../../include/api/bigquant/dai.hpp
     ../../include/api/bigquant/spec.hpp
     ../../include/api/bigquant/parse.hpp
-    # --- 原业务代码,临时停用 ---
+    ../../include/api/bigquant/store.hpp
+    ../../include/api/bigquant/pipeline.hpp
+    ../../include/api/tushare/http.hpp
+    ../../include/api/tushare/spec.hpp
+    ../../include/api/tushare/store.hpp
+    ../../include/api/tushare/pipeline.hpp
+    # --- feature / backtest / analysis 待 Phase 2 启用 ---
     # ../../include/misc/timer.hpp
     # ../../include/misc/print.hpp
     # ../../include/misc/progress_single.hpp
@@ -156,14 +167,7 @@ set(HEADERS
     # ../../include/misc/affinity.hpp
     # ../../include/misc/logging.hpp
     # ../../include/misc/profiler.hpp
-    # ../../include/misc/date.hpp
-    # ../../include/misc/fs.hpp
     # ../../include/misc/npy.hpp
-    # ../../include/api/tushare/http.hpp
-    # ../../include/api/tushare/spec.hpp
-    # ../../include/api/tushare/store.hpp
-    # ../../include/api/tushare/meta.hpp
-    # ../../include/api/tushare/pipeline.hpp
     # ../../include/feature/axis.hpp
     # ../../include/feature/feature.hpp
     # ../../include/feature/tensor.hpp

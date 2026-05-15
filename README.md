@@ -6,18 +6,16 @@ Motive: 实盘量化交易; 国金证券 QMT 客户端下单; 全市场张量因
 qmt/
 ├── run.py                           # 统一入口: build (py/main.py) + run (py/mode_*.py)
 ├── app/
-│   ├── gjzqqmt/                     # 国金证券 QMT 客户端 (Linux Wine 跑 Windows 程序)
-│   │   ├── run.md                   # Wine 安装 + 启动指南 (XtItClient=主端, XtMiniQmt=API端)
-│   │   ├── 国金证券QMT交易端/       # 客户端本体 (bin.x64 是 64 位主程序)
-│   │   └── QMT操作说明文档/         # 官方 PDF (操作/Python API/网格/VBA/算法交易)
-│   └── bq/                          # BigQuant Python SDK 副本 (供阅读, 主链路走 cpp/ 的 C++ DAI)
-│       ├── bigquant/                # bigquant 包 (bigtrader / cli / performance)
-│       └── bigtradercpp/            # bigquant C++ 引擎 + .so
+│   └── gjzqqmt/                     # 国金证券 QMT 客户端 (Linux Wine 跑 Windows 程序)
+│       ├── run.md                   # Wine 安装 + 启动指南 (XtItClient=主端, XtMiniQmt=API端)
+│       ├── 国金证券QMT交易端/       # 客户端本体 (bin.x64 是 64 位主程序)
+│       └── QMT操作说明文档/         # 官方 PDF (操作/Python API/网格/VBA/算法交易)
 ├── cpp/                             # C++23 实现 (Clang/Linux, header-only boost + yyjson + arrow)
 │   ├── projects/main/               # CMake 构建 (DEBUG / PROFILE / ASSERT / PRODUCTION)
 │   ├── include/
 │   │   ├── config.hpp               # 全局常量 (BigQuant host/token, Tushare host/token, lookback, 拉取窗口, 去重窗口)
-│   │   ├── misc/                    # 通用工具 (date / fs / logging / progress / timer / affinity)
+│   │   ├── misc/                    # 通用工具 (date / fs / store / logging / progress / timer / affinity)
+│   │   │                              # store.hpp: 数据集落地公共层 (day path / _empty.json / lastupdate / scan_missing); 不绑定数据源
 │   │   ├── package/yyjson/          # JSON 库
 │   │   ├── package/arrow/           # Arrow Flight wire transport (从 pyarrow vendor, 见 vendor_from_pyarrow.sh)
 │   │   ├── api/                     # 数据接入子系统 (数据入)
@@ -25,23 +23,21 @@ qmt/
 │   │   │   │   ├── https.hpp        # boost.beast over OpenSSL (走 443 控制面)
 │   │   │   │   ├── signer.hpp       # HMAC-SHA256 控制面签名
 │   │   │   │   ├── dai.hpp          # DaiClient (whoami / get_datasource_schema / query → arrow::Table)
-│   │   │   │   ├── parse.hpp        # arrow::Table → yyjson 列式 JSON (落盘格式)
-│   │   │   │   ├── spec.hpp         # 26 张表 TableSpec (Static / Partition / Where × Day / MonthFirst)
-│   │   │   │   ├── store.hpp        # scan_missing / write_by_visible_date (PK upsert + _empty.json)
-│   │   │   │   ├── meta.hpp         # 单 itf lastupdate 时间戳去重
+│   │   │   │   ├── parse.hpp        # arrow::Table → yyjson 列式 JSON (整表 / 行子集)
+│   │   │   │   ├── spec.hpp         # 26 张表 TableSpec (Static / Partition / Where × Day / MonthFirst, 内含 PK)
+│   │   │   │   ├── store.hpp        # write_table_by_visible_date (PK upsert + _empty.json) / write_meta_table
 │   │   │   │   └── pipeline.hpp     # scan → plan → fetch (DAI) → write
 │   │   │   └── tushare/             # 3 张事件表 (forecast / express / disclosure) HTTP+JSON
 │   │   │       ├── http.hpp         # boost.beast HTTP 客户端 (走 80 端口, 无 SSL)
 │   │   │       ├── spec.hpp         # 3 个 SPECS + RangeStrategy / PerDayStrategy
-│   │   │       ├── store.hpp        # scan_missing / write_by_visible_date (PK upsert + _empty.json)
-│   │   │       ├── meta.hpp         # 单 itf lastupdate 时间戳去重
+│   │   │       ├── store.hpp        # write_by_visible_date (PK upsert + _empty.json, 行式 JSON)
 │   │   │       └── pipeline.hpp     # scan → plan → fetch (HTTP) → write
 │   │   └── feature/                 # feature 子系统头文件 (张量出)
 │   └── src/
 │       ├── main.cpp                 # bigquant::update → tushare::update → feature::build → Tensor T[F][A][D]
 │       ├── api/
-│       │   ├── bigquant/            # https / signer / dai / parse / spec / store / meta / pipeline
-│       │   └── tushare/             # http / spec / store / meta / pipeline
+│       │   ├── bigquant/            # https / signer / dai / parse / spec / store / pipeline
+│       │   └── tushare/             # http / spec / store / pipeline
 │       └── feature/                 # 4-phase 特征系统; 业务密集化 + 外层 flow 完全 agnostic
 │                                    # 单点真理: pit.cpp (itf 维) + feature.cpp (feature 维)
 │           ├── axis.cpp             # Phase 0: load_axes + load_stock_meta (per-A 静态)
@@ -139,7 +135,7 @@ qmt/
 - **完整性设计** (BigQuant / Tushare 完全沿用同一套, `store.hpp` 平行实现):
   - **PK upsert** (同次响应): 同 PK 同次响应末条胜, PK 因 itf 而异 (见 `cpp/src/api/{bigquant,tushare}/spec.cpp`).
   - **三态稀疏**: file 存在 (有数据) / 在 `_empty.json` (拉过空) / 都不在 (未拉); 避免空日反复回 fetch.
-  - **lastupdate 去重**: `data/_meta/<name>.lastupdate` (unix epoch s); 上次成功距今 < `config::API_DEDUP_WINDOW_SECONDS` 跳过整段 (`meta.hpp::should_skip_api` / `mark_api_updated`).
+  - **lastupdate 去重**: `data/_meta/<name>.lastupdate` (unix epoch s); 上次成功距今 < `config::API_DEDUP_WINDOW_SECONDS` 跳过整段 (`misc::store::should_skip_api` / `mark_api_updated`).
   - **lookback 增量回扫**: `scan_missing` 在 `[start, end]` 内, 文件不存在必拉 + 最近 `lookback_days` 日历日内必拉 (PK upsert 吃订正; 7 天 ≈ 5 交易日, 兜住当日未结算累积缺失).
   - **tmp+rename 写**: 单文件 atomic 替换, 中断不留半成品.
 - 月初快照: `cn_stock_industry_component` 每月仅在 `visible_date = MIN(date)` 一天落盘.
@@ -279,12 +275,12 @@ tensor 内特征数据本身就要保证没有未来信息, 最大化保证数�
 
 **Phase 切分动机**
 
-| phase  | 数据形态                  | 任务粒度             | 并行性             | 主要工作                              |
-| ------ | ------------------------- | -------------------- | ------------------ | ------------------------------------- |
-| 0 axes | 标量级元数据              | 主线程               | 无                 | 一次性确定 D / A / per-A 静态         |
-| 1 load | 文件级 raw (json)         | (day, itf) ≈ 3650×26 | embarrassingly     | 解析 + **PIT cutoff 落到 row D 索引** |
-| 2 时序 | 列式 (per-A 全 D)         | a ≈ 5500             | embarrassingly (A) | 单调时间序列计算 + 状态机             |
-| 3 截面 | 行式 (per-D 全 A)         | d ≈ 2750             | embarrassingly (D) | 截面归一 + universe 选取              |
+| phase  | 数据形态          | 任务粒度             | 并行性             | 主要工作                              |
+| ------ | ----------------- | -------------------- | ------------------ | ------------------------------------- |
+| 0 axes | 标量级元数据      | 主线程               | 无                 | 一次性确定 D / A / per-A 静态         |
+| 1 load | 文件级 raw (json) | (day, itf) ≈ 3650×26 | embarrassingly     | 解析 + **PIT cutoff 落到 row D 索引** |
+| 2 时序 | 列式 (per-A 全 D) | a ≈ 5500             | embarrassingly (A) | 单调时间序列计算 + 状态机             |
+| 3 截面 | 行式 (per-D 全 A) | d ≈ 2750             | embarrassingly (D) | 截面归一 + universe 选取              |
 
 **业务密集化 + agnostic 外层** — 改字段表/计算图不动外层:
 - `pit.cpp` (itf 维 单点真理): 每 itf 一组 `{prealloc, parse, post_sort?, post_ffill?}` + 末尾 `ITFS[]` 表挂载.

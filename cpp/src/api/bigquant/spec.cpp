@@ -9,49 +9,60 @@ namespace bigquant {
 // ============================================================================
 // SPECS — 顺序严格对齐 doc/bigquant/used/api.md 自上而下
 // ============================================================================
+// PK 推断依据 doc/bigquant/used/schema.md (字段全检); 同 PK 同 day file 多条 → store 层 assert.
 const std::vector<TableSpec> SPECS = {
     // -------------------- 通用数据 --------------------
-    {"trading_days",                 "date",         FetchKind::Partition, FetchFreq::Day,        Category::General},
-    {"holidays",                     "date",         FetchKind::Partition, FetchFreq::Day,        Category::General},
-    {"cn_stock_instruments",         "date",         FetchKind::Partition, FetchFreq::Day,        Category::General},
+    {"trading_days", "date", FetchKind::Partition, FetchFreq::Day, Category::General, {"date", "market_code"}},
+    {"holidays", "date", FetchKind::Partition, FetchFreq::Day, Category::General, {"date", "market_code"}},
+    {"cn_stock_instruments", "date", FetchKind::Partition, FetchFreq::Day, Category::General, {"date", "instrument"}},
     // -------------------- 行业板块-行业信息 --------------------
     // industry_component: 月初快照 (低频), 月内变动靠 industry_change 增量 cover.
-    {"cn_stock_industry_component",  "date",         FetchKind::Partition, FetchFreq::MonthFirst, Category::IndustryInfo},
-    {"cn_stock_industry_change",     "date",         FetchKind::Partition, FetchFreq::Day,        Category::IndustryInfo},
+    // industry∈{sw2021, sw2014, cs} 三套并存, 故 PK 含 industry.
+    {"cn_stock_industry_component", "date", FetchKind::Partition, FetchFreq::MonthFirst, Category::IndustryInfo, {"date", "instrument", "industry"}},
+    // industry_change: 行业进出事件; industry_level∈{1,2,3} 多级并存; change_flag∈{0进,1出} 同日同股同分类可双条.
+    {"cn_stock_industry_change", "date", FetchKind::Partition, FetchFreq::Day, Category::IndustryInfo, {"date", "instrument", "industry", "industry_level", "change_flag"}},
     // -------------------- 行业板块-行业行情 --------------------
-    {"cn_stock_industry_bar1d",      "date",         FetchKind::Partition, FetchFreq::Day,        Category::IndustryQuote},
-    {"cn_stock_industry_valuation",  "date",         FetchKind::Partition, FetchFreq::Day,        Category::IndustryQuote},
+    // industry_bar1d: instrument 列实际是 industry_code; method 是计算方式 (算术/总股本/流通加权).
+    {"cn_stock_industry_bar1d", "date", FetchKind::Partition, FetchFreq::Day, Category::IndustryQuote, {"date", "instrument", "method"}},
+    {"cn_stock_industry_valuation", "date", FetchKind::Partition, FetchFreq::Day, Category::IndustryQuote, {"date", "instrument", "industry", "industry_level"}},
     // -------------------- 股票数据-股票信息 --------------------
-    // basic_info: 静态快照, 无 date 维度, 全量取 (后续可加 date 列做版本切片, 当前不切).
-    {"cn_stock_basic_info",          "",             FetchKind::Static,    FetchFreq::Day,        Category::StockInfo},
-    // capital/dividend/allotment/shareholder: 事件型, visible=publish_date (非分区列, 用 WHERE).
-    {"cn_stock_capital",             "publish_date", FetchKind::Where,     FetchFreq::Day,        Category::StockInfo},
-    {"cn_stock_dividend",            "publish_date", FetchKind::Where,     FetchFreq::Day,        Category::StockInfo},
-    {"cn_stock_allotment",           "publish_date", FetchKind::Where,     FetchFreq::Day,        Category::StockInfo},
-    {"cn_stock_margin_trading_detail","date",        FetchKind::Partition, FetchFreq::Day,        Category::StockInfo},
-    {"cn_stock_margin_trading_market","date",        FetchKind::Partition, FetchFreq::Day,        Category::StockInfo},
-    {"cn_stock_shareholder",         "publish_date", FetchKind::Where,     FetchFreq::Day,        Category::StockInfo},
-    {"cn_stock_shares",              "date",         FetchKind::Partition, FetchFreq::Day,        Category::StockInfo},
-    {"cn_stock_status",              "date",         FetchKind::Partition, FetchFreq::Day,        Category::StockInfo},
-    {"cn_stock_suspend",             "date",         FetchKind::Partition, FetchFreq::Day,        Category::StockInfo},
+    // basic_info: 静态全市场快照 (Static, 无 date 列, 不入 per-day, 走 _meta).
+    {"cn_stock_basic_info", "", FetchKind::Static, FetchFreq::Day, Category::StockInfo, {"instrument"}},
+    // capital: 同 publish_date 可能多个 change_date (表内 PK).
+    {"cn_stock_capital", "publish_date", FetchKind::Where, FetchFreq::Day, Category::StockInfo, {"instrument", "publish_date", "change_date"}},
+    // dividend: 同 publish_date 一公司一报告期一次实施.
+    {"cn_stock_dividend", "publish_date", FetchKind::Where, FetchFreq::Day, Category::StockInfo, {"instrument", "publish_date", "report_date"}},
+    {"cn_stock_allotment", "publish_date", FetchKind::Where, FetchFreq::Day, Category::StockInfo, {"instrument", "publish_date"}},
+    {"cn_stock_margin_trading_detail", "date", FetchKind::Partition, FetchFreq::Day, Category::StockInfo, {"date", "instrument"}},
+    // margin_trading_market: 全市场聚合, method 是统计口径 (e.g. 沪市/深市/全市场).
+    {"cn_stock_margin_trading_market", "date", FetchKind::Partition, FetchFreq::Day, Category::StockInfo, {"date", "method"}},
+    // shareholder: 一公司一公告日一报告期一条.
+    {"cn_stock_shareholder", "publish_date", FetchKind::Where, FetchFreq::Day, Category::StockInfo, {"instrument", "publish_date", "end_date"}},
+    {"cn_stock_shares", "date", FetchKind::Partition, FetchFreq::Day, Category::StockInfo, {"date", "instrument"}},
+    {"cn_stock_status", "date", FetchKind::Partition, FetchFreq::Day, Category::StockInfo, {"date", "instrument"}},
+    {"cn_stock_suspend", "date", FetchKind::Partition, FetchFreq::Day, Category::StockInfo, {"date", "instrument"}},
     // name_change: visible=end_date (简称失效日, 此后才确知本段区间).
-    {"cn_stock_name_change",         "end_date",     FetchKind::Where,     FetchFreq::Day,        Category::StockInfo},
+    {"cn_stock_name_change", "end_date", FetchKind::Where, FetchFreq::Day, Category::StockInfo, {"instrument", "start_date", "end_date"}},
     // -------------------- 股票数据-股票行情 --------------------
-    {"cn_stock_dragon_list",         "date",         FetchKind::Partition, FetchFreq::Day,        Category::StockQuote},
-    {"cn_stock_bar1d",               "date",         FetchKind::Partition, FetchFreq::Day,        Category::StockQuote},
-    {"cn_stock_limit_price",         "date",         FetchKind::Partition, FetchFreq::Day,        Category::StockQuote},
+    // dragon_list: 同 date 同股可多条 (不同上榜原因).
+    {"cn_stock_dragon_list", "date", FetchKind::Partition, FetchFreq::Day, Category::StockQuote, {"date", "instrument", "reason"}},
+    {"cn_stock_bar1d", "date", FetchKind::Partition, FetchFreq::Day, Category::StockQuote, {"date", "instrument"}},
+    {"cn_stock_limit_price", "date", FetchKind::Partition, FetchFreq::Day, Category::StockQuote, {"date", "instrument"}},
     // -------------------- 财务数据-原始数据 (PIT) --------------------
-    {"cn_stock_financial_income_general_pit",   "date", FetchKind::Partition, FetchFreq::Day, Category::FinancialRaw},
-    {"cn_stock_financial_cashflow_general_pit", "date", FetchKind::Partition, FetchFreq::Day, Category::FinancialRaw},
-    {"cn_stock_financial_balance_general_pit",  "date", FetchKind::Partition, FetchFreq::Day, Category::FinancialRaw},
+    // 同 (date, instrument, report_date) 通常单条 (服务端 PIT 已合并到最新 change_type).
+    {"cn_stock_financial_income_general_pit", "date", FetchKind::Partition, FetchFreq::Day, Category::FinancialRaw, {"date", "instrument", "report_date"}},
+    {"cn_stock_financial_cashflow_general_pit", "date", FetchKind::Partition, FetchFreq::Day, Category::FinancialRaw, {"date", "instrument", "report_date"}},
+    {"cn_stock_financial_balance_general_pit", "date", FetchKind::Partition, FetchFreq::Day, Category::FinancialRaw, {"date", "instrument", "report_date"}},
     // -------------------- 财务数据-衍生数据 --------------------
-    {"cn_stock_financial_ttm_shift",   "date", FetchKind::Partition, FetchFreq::Day, Category::FinancialDerive},
-    {"cn_stock_financial_notes_shift", "date", FetchKind::Partition, FetchFreq::Day, Category::FinancialDerive},
+    // shift 字段定位某 (date, instrument, report_date) 的偏移序列, 各 shift 独立行.
+    {"cn_stock_financial_ttm_shift", "date", FetchKind::Partition, FetchFreq::Day, Category::FinancialDerive, {"date", "instrument", "report_date", "shift"}},
+    {"cn_stock_financial_notes_shift", "date", FetchKind::Partition, FetchFreq::Day, Category::FinancialDerive, {"date", "instrument", "report_date", "shift"}},
 };
 
 const TableSpec &spec_of(std::string_view name) {
   for (const auto &s : SPECS) {
-    if (s.name == name) return s;
+    if (s.name == name)
+      return s;
   }
   assert(false && "bigquant::spec_of: unknown table name");
   __builtin_unreachable();

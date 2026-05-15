@@ -1,50 +1,32 @@
 #include "api/tushare/pipeline.hpp"
-#include "config.hpp"
+
 #include "api/tushare/http.hpp"
-#include "api/tushare/meta.hpp"
 #include "api/tushare/store.hpp"
+#include "config.hpp"
+#include "misc/store.hpp"
 
 #include <cassert>
 #include <iostream>
 
 namespace tushare {
 
+// ============================================================================
+// Tushare fallback 流水线
+//   - 仅 3 张事件表 (forecast/express/disclosure); 其余 itf 一律走 bigquant
+//   - axis/static (stock_basic / industry / namechange) 全部移交 bigquant
+// ============================================================================
 void update(std::string_view start, std::string_view end,
             const std::vector<InterfaceSpec> &specs, int lookback_days) {
   Http http(::config::TUSHARE_TOKEN);
 
-  std::cout << "[update] " << start << " ~ " << end << " ("
+  std::cout << "[tushare.update] " << start << " ~ " << end << " ("
             << specs.size() << " interfaces, lookback=" << lookback_days
             << "d, dedup=" << ::config::API_DEDUP_WINDOW_SECONDS << "s)"
             << std::endl;
 
-  // 全局 meta：每次 update 全量刷新，与 per-day SPECS 体系独立
-  // 单 API 去重在 pipeline 入口处统一拦截 (refresh_* / 每个 spec)
-  if (should_skip_api("stock_basic", ::config::API_DEDUP_WINDOW_SECONDS)) {
-    std::cout << "\n[stock_basic] skip (recently updated)" << std::endl;
-  } else {
-    refresh_stock_basic(http);
-    mark_api_updated("stock_basic");
-  }
-
-  if (should_skip_api("index_member_all",
-                      ::config::API_DEDUP_WINDOW_SECONDS)) {
-    std::cout << "\n[index_member_all] skip (recently updated)" << std::endl;
-  } else {
-    refresh_index_member_all(http);
-    mark_api_updated("index_member_all");
-  }
-
-  // namechange 单独一次性全量拉 (per-day pipeline 会漏 PIPELINE_START_DATE 之前)
-  if (should_skip_api("namechange", ::config::API_DEDUP_WINDOW_SECONDS)) {
-    std::cout << "\n[namechange] skip (recently updated)" << std::endl;
-  } else {
-    refresh_namechange_meta(http);
-    mark_api_updated("namechange");
-  }
-
   for (const auto &spec : specs) {
-    if (should_skip_api(spec.name, ::config::API_DEDUP_WINDOW_SECONDS)) {
+    if (misc::store::should_skip_api(spec.name,
+                                     ::config::API_DEDUP_WINDOW_SECONDS)) {
       std::cout << "\n[" << spec.name << "] skip (recently updated)"
                 << std::endl;
       continue;
@@ -63,7 +45,8 @@ void update(std::string_view start, std::string_view end,
         const auto &task = tasks[i];
         std::cout << "  [" << (i + 1) << "/" << tasks.size() << "] "
                   << task.start;
-        if (task.end != task.start) std::cout << "~" << task.end;
+        if (task.end != task.start)
+          std::cout << "~" << task.end;
         std::cout << " ... " << std::flush;
 
         yyjson_doc *doc = spec.strategy->fetch(http, task, spec);
@@ -82,11 +65,10 @@ void update(std::string_view start, std::string_view end,
       }
     }
 
-    // 整段 (scan + plan + fetch + write) 走完无 assert → 标记成功
-    mark_api_updated(spec.name);
+    misc::store::mark_api_updated(spec.name);
   }
 
-  std::cout << "\n[update] done" << std::endl;
+  std::cout << "\n[tushare.update] done" << std::endl;
 }
 
 } // namespace tushare
