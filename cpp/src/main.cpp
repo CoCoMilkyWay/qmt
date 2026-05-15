@@ -17,7 +17,7 @@ namespace {
 
 // 采样日期: 全市场分区/事件表都用单日窗口, 保证一次跑完不重不漏.
 constexpr const char *kSampleStart = "2024-12-01";
-constexpr const char *kSampleEnd = "2024-12-31";
+constexpr const char *kSampleEnd = "2024-12-02";
 
 // JSON 头部预览长度 — 单表 dump 头几个字符确认结构, 整个 JSON 量大不打.
 constexpr size_t kPreviewBytes = 240;
