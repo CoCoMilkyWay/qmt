@@ -15,8 +15,8 @@ namespace config {
 //   Tushare pro token (官网 → 个人主页 → 接口 token); *_vip 接口需 5000+ 积分
 //   想隔离不进 git: 整段挪去 cpp/include/secrets.hpp (.gitignore), 本文件改 include
 // ============================================================================
-inline constexpr const char *BIGQUANT_AK   = "6dS0GYgxocXL";
-inline constexpr const char *BIGQUANT_SK   = "bKDM141Hz2etbj3QTLf9GA6aGmEZRu68MJuvaJBJyPgq22E3fNNDRehFCbgComTQ";
+inline constexpr const char *BIGQUANT_AK = "6dS0GYgxocXL";
+inline constexpr const char *BIGQUANT_SK = "bKDM141Hz2etbj3QTLf9GA6aGmEZRu68MJuvaJBJyPgq22E3fNNDRehFCbgComTQ";
 inline constexpr const char *TUSHARE_TOKEN = "439b79afc0af96f0abb32a3be27df99b9e8fe9fa83f8d555d66fba72";
 
 // ============================================================================
@@ -27,20 +27,20 @@ inline constexpr const char *TUSHARE_TOKEN = "439b79afc0af96f0abb32a3be27df99b9e
 // 超时 = 单次连接+读写整体时长 (boost::system_error 触发 → retry 上层兜底)
 // 重试 = RETRY_MAX 次额外重试 (实际尝试 = RETRY_MAX + 1); RETRY_INTERVAL 为线性间隔
 // ============================================================================
-inline constexpr const char *BIGQUANT_HTTPS_HOST                   = "bigquant.com";
-inline constexpr const char *BIGQUANT_HTTPS_PORT                   = "443";
-inline constexpr int         BIGQUANT_HTTPS_TIMEOUT_SECONDS        = 30;
-inline constexpr int         BIGQUANT_HTTPS_RETRY_MAX              = 4;        // 共 5 次尝试
-inline constexpr int         BIGQUANT_HTTPS_RETRY_INTERVAL_SECONDS = 5;
+inline constexpr const char *BIGQUANT_HTTPS_HOST = "bigquant.com";
+inline constexpr const char *BIGQUANT_HTTPS_PORT = "443";
+inline constexpr int BIGQUANT_HTTPS_TIMEOUT_SECONDS = 30;
+inline constexpr int BIGQUANT_HTTPS_RETRY_MAX = 4; // 共 5 次尝试
+inline constexpr int BIGQUANT_HTTPS_RETRY_INTERVAL_SECONDS = 5;
 
-inline constexpr const char *BIGQUANT_FLIGHT_URI                   = "grpc+tcp://bigquant.com:17010";
-inline constexpr int         BIGQUANT_FLIGHT_GRPC_MAX_METADATA_SIZE = 16 * 1024 * 1024; // 16 MiB; SDK 默认 8KB 会被 JWT 撑爆
+inline constexpr const char *BIGQUANT_FLIGHT_URI = "grpc+tcp://bigquant.com:17010";
+inline constexpr int BIGQUANT_FLIGHT_GRPC_MAX_METADATA_SIZE = 16 * 1024 * 1024; // 16 MiB; SDK 默认 8KB 会被 JWT 撑爆
 
-inline constexpr const char *TUSHARE_HTTP_HOST                     = "api.tushare.pro";
-inline constexpr const char *TUSHARE_HTTP_PORT                     = "80";     // 走 80, 省掉 SSL 依赖
-inline constexpr int         TUSHARE_HTTP_TIMEOUT_SECONDS          = 60;       // range 接口序列化耗时可达 20s, 留余量
-inline constexpr int         TUSHARE_HTTP_RETRY_MAX                = 4;        // 共 5 次尝试
-inline constexpr int         TUSHARE_HTTP_RETRY_INTERVAL_SECONDS   = 30;
+inline constexpr const char *TUSHARE_HTTP_HOST = "api.tushare.pro";
+inline constexpr const char *TUSHARE_HTTP_PORT = "80";  // 走 80, 省掉 SSL 依赖
+inline constexpr int TUSHARE_HTTP_TIMEOUT_SECONDS = 60; // range 接口序列化耗时可达 20s, 留余量
+inline constexpr int TUSHARE_HTTP_RETRY_MAX = 4;        // 共 5 次尝试
+inline constexpr int TUSHARE_HTTP_RETRY_INTERVAL_SECONDS = 30;
 
 // ============================================================================
 // C. 抓取流水线 (main.cpp 主入口; 公共参数 + per-source 单段拉取上限)
@@ -52,12 +52,12 @@ inline constexpr int         TUSHARE_HTTP_RETRY_INTERVAL_SECONDS   = 30;
 //     BigQuant: DAI 无明显行限, 单年事件/财务 ~ 几万-几十万行, 1 年安全
 //     Tushare:  单次 8000 行硬限, 按月拉全市场仅几千行, 1 月安全
 // ============================================================================
-inline constexpr const char *PIPELINE_START_DATE              = "20150101";
-inline constexpr int         PIPELINE_LOOKBACK_DAYS           = 7;
-inline constexpr int         PIPELINE_DEDUP_WINDOW_SECONDS    = 60 * 60;
+inline constexpr const char *PIPELINE_START_DATE = "20150101";
+inline constexpr int PIPELINE_LOOKBACK_DAYS = 7;
+inline constexpr int PIPELINE_DEDUP_WINDOW_SECONDS = 60 * 60;
 
-inline constexpr int         BIGQUANT_FETCH_MAX_DAYS_PER_CALL = 365;
-inline constexpr int         TUSHARE_FETCH_MAX_DAYS_PER_CALL  = 31;
+inline constexpr int BIGQUANT_FETCH_MAX_DAYS_PER_CALL = 365;
+inline constexpr int TUSHARE_FETCH_MAX_DAYS_PER_CALL = 31;
 
 // ============================================================================
 // D. Pool (basic + universe)
@@ -78,16 +78,10 @@ inline constexpr std::array<std::string_view, 2> POOL_EXCHANGE_WHITELIST = {{
     "SZSE",
 }};
 
-// pool_b 板块白名单 (asset 静态过滤, 与 _meta/stock_basic.json::market 中文枚举匹配).
-//   候选枚举: 主板 / 创业板 / 科创板 / CDR / ...
-//   注: feature `mb` 仍单独硬编码 "主板", 因为 `low_mc` / `revenue_st` / `dividend_st`
-//       依赖板块特定阈值与适用范围 (业务规则, 非策略可调过滤).
 inline constexpr std::array<std::string_view, 1> POOL_MARKET_WHITELIST = {{
     "主板",
 }};
 
-// pool_b 行业白名单 (asset 静态过滤, 与 _meta/index_member_all.json::l1_name 申万 SW2021 一级行业中文名匹配).
-//   全量 31 个 L1, 此处保留 28 个 (排除「环保 / 交通运输 / 房地产」 — 弹性差, 长期沉底).
 inline constexpr std::array<std::string_view, 28> POOL_INDUSTRY_L1_WHITELIST = {{
     "基础化工",
     "有色金属",
@@ -119,11 +113,8 @@ inline constexpr std::array<std::string_view, 28> POOL_INDUSTRY_L1_WHITELIST = {
     "银行",
 }};
 
-// pool_b 是否在池子里包括两融标的 (per-D per-A 动态过滤, 来自 itf:margin_secs).
-//   true  = 包括两融标的 (默认, 不过滤; 与 py 默认 margin_tradings=["两融标的","非两融标的"] 等价)
-//   false = 不包括两融标的 (仅非两融标的进 pool_b; 与 py 风格 margin_tradings=["非两融标的"] 等价)
-inline constexpr bool POOL_INCLUDE_MARGIN = true;
-inline constexpr int  POOL_UNIVERSE_SIZE  = 100;
+inline constexpr bool POOL_INCLUDE_MARGIN = true; // true = 池内含两融 (与 py margin_tradings=["两融标的","非两融标的"] 等价)
+inline constexpr int POOL_UNIVERSE_SIZE = 100;
 
 // ============================================================================
 // E. 策略 (cs_tradable filter 子集 + cs_factor_score 加权)
@@ -145,7 +136,7 @@ struct FactorWeight {
   float w;
 };
 inline constexpr std::array<FactorWeight, 2> STRATEGY_FACTOR_WEIGHTS = {{
-    {feature::F::mcap,  0.6f},
+    {feature::F::mcap, 0.6f},
     {feature::F::close, 0.4f},
 }};
 
@@ -161,22 +152,22 @@ inline constexpr std::array<FactorWeight, 2> STRATEGY_FACTOR_WEIGHTS = {{
 //   BACKTEST_MIN_COST              单笔最低成本 [元]
 //   BACKTEST_REBALANCE_THRESHOLD   持仓与目标差额 ≥ THD × pv_after 才补仓
 // ============================================================================
-inline constexpr const char *BACKTEST_START_DATE          = "20170101";
-inline constexpr int         BACKTEST_HOLD_N              = 10;
-inline constexpr float       BACKTEST_EXIT_RATIO          = 1.0f;
-inline constexpr float       BACKTEST_CAPITAL_BASE        = 1.0e6f;
-inline constexpr float       BACKTEST_PRICE_LIMIT_EPS     = 1e-4f;
-inline constexpr float       BACKTEST_BUY_COST            = 3e-4f;
-inline constexpr float       BACKTEST_SELL_COST           = 13e-4f;
-inline constexpr float       BACKTEST_MIN_COST            = 5.0f;
-inline constexpr float       BACKTEST_REBALANCE_THRESHOLD = 0.02f;
+inline constexpr const char *BACKTEST_START_DATE = "20170101";
+inline constexpr int BACKTEST_HOLD_N = 10;
+inline constexpr float BACKTEST_EXIT_RATIO = 1.0f;
+inline constexpr float BACKTEST_CAPITAL_BASE = 1.0e6f;
+inline constexpr float BACKTEST_PRICE_LIMIT_EPS = 1e-4f;
+inline constexpr float BACKTEST_BUY_COST = 3e-4f;
+inline constexpr float BACKTEST_SELL_COST = 13e-4f;
+inline constexpr float BACKTEST_MIN_COST = 5.0f;
+inline constexpr float BACKTEST_REBALANCE_THRESHOLD = 0.02f;
 
 // ============================================================================
 // G. 分析 (因子分层 + IC 移动平均)
 //   ANALYSIS_N_QUANTILES   分层桶数 (TAG 4 排名分析)
 //   ANALYSIS_IC_MA_WINDOW  因子 IC 移动平均窗口 (日)
 // ============================================================================
-inline constexpr int ANALYSIS_N_QUANTILES  = 10;
+inline constexpr int ANALYSIS_N_QUANTILES = 10;
 inline constexpr int ANALYSIS_IC_MA_WINDOW = 250;
 
 // ============================================================================
@@ -184,7 +175,7 @@ inline constexpr int ANALYSIS_IC_MA_WINDOW = 250;
 //   DESCRIBE_ENABLE   总开关
 //   DESCRIBE_BY_YEAR  关闭则只 "all"; 开启则额外按自然年 (axes.dates 前 4 位) 展开
 // ============================================================================
-inline constexpr bool DESCRIBE_ENABLE  = false;
+inline constexpr bool DESCRIBE_ENABLE = false;
 inline constexpr bool DESCRIBE_BY_YEAR = false;
 
 // ============================================================================
