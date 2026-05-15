@@ -80,6 +80,7 @@ def main():
     if ENABLE_REPORT:
         print("\nGenerating report...")
         from py import report
+
         report.main()
 
 
