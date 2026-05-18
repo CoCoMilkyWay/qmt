@@ -13,6 +13,7 @@
 #include "config.hpp"
 #include "feature/axis.hpp"
 #include "feature/build.hpp"
+#include "feature/describe.hpp"
 #include "feature/feature.hpp"
 #include "feature/tensor.hpp"
 #include "misc/date.hpp"
@@ -98,6 +99,11 @@ int main() {
   feature::Axes axes;
   feature::StockMeta meta;
   feature::Tensor T = feature::build(axes, meta);
+
+  // ---- Phase 2.5: per-feature × per-year describe (gate config::DESCRIBE_ENABLE)
+  if (::config::DESCRIBE_ENABLE) {
+    feature::describe(axes, T);
+  }
 
   // ---- Phase 3: backtest (per-D 状态机) → output/backtest/*.npy + labels.json
   double bt_seconds = backtest::run(axes, meta, T);

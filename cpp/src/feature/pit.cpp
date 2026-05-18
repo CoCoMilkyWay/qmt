@@ -114,11 +114,14 @@ inline void event_prealloc(EventStore<Ev> &store, std::size_t n_a) {
   store.assign(n_a, {});
 }
 
+// stable_sort: 同 v (多个 visible_date 经 floor_date+CUTOFF 落到同一 row) 时保留
+//   emplace 顺序, 至少保证 sort 算法层不引入新的不确定. (emplace 顺序本身受 Phase 1
+//   并发 task 调度影响, 要彻底 deterministic 需在 Ev 层加 tie-breaker.)
 template <class Ev>
 inline void event_post_sort(EventStore<Ev> &store) {
   for (auto &chain : store) {
-    std::sort(chain.begin(), chain.end(),
-              [](const Ev &a, const Ev &b) { return a.v < b.v; });
+    std::stable_sort(chain.begin(), chain.end(),
+                     [](const Ev &a, const Ev &b) { return a.v < b.v; });
   }
 }
 
@@ -310,9 +313,15 @@ void post_ffill(const Axes &axes, PitPool &p) {
 
 namespace itf_cn_stock_status {
 
-// cn_stock_status: 三个字段 st_status / suspended / (is_risk_warning 等暂不入).
-//   st_status int8: 0=正常, 1=ST, 2=*ST.
-//   suspended uint8: 0=正常, 1=停牌.
+// cn_stock_status: 派生 st_status (4 态) + suspended.
+//   原 BigQuant 字段: st_status (0/1/2, 狭义 ST 标签) + is_risk_warning (0/1, 广义风险)
+//     + suspended + is_risk_warning + price_limit_status + exdr 等.
+//   入张量 st_status (派生, 4 态): 0=正常 / 1=ST / 2=*ST / 3=退市整理期.
+//     映射: 原 st_status==1 → 1; ==2 → 2; (st==0 ∧ is_risk_warning==1) → 3; else → 0
+//     为什么需要 3 档: 退市整理期交易所摘掉 *ST 标签 (原 st_status 翻 0), 但 stock 仍
+//     在交易且面临退市风险, 仅靠原 st_status 漏判 (实测 *ST大通 2023/06/19 进入整理期
+//     后 st_status=0 / is_risk_warning=1, 被 strategy 选中持有至退市).
+//   入张量 suspended uint8: 0=正常, 1=停牌.
 //   实际 BigQuant 入库 17:00 (盘后) → CUTOFF=0 (hybrid 伪装, 假装盘前可见).
 //   历史 day file 按 row=v_idx 消化; 最后一天 (= 实盘当日, day file 尚未入库)
 //   由 apply_meta_overlays 用 cn_stock_static_data (真盘前 09:00) 填充
@@ -349,8 +358,14 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
                           static_cast<std::size_t>(n_d) +
                       base_off;
     int st = as_int_or_default(yyjson_obj_get(item, "st_status"), 0);
+    int rw = as_int_or_default(yyjson_obj_get(item, "is_risk_warning"), 0);
     int sp = as_int_or_default(yyjson_obj_get(item, "suspended"), 0);
-    pool.status.st_status[off] = static_cast<int8_t>(st);
+    // 4 态派生: st_status 优先 (1/2), 否则 is_risk_warning 兜底退市整理期 → 3.
+    int8_t out_st = (st == 1)            ? int8_t{1}
+                    : (st == 2)          ? int8_t{2}
+                    : (rw != 0)          ? int8_t{3}
+                                         : int8_t{0};
+    pool.status.st_status[off] = out_st;
     pool.status.suspended[off] = (sp != 0) ? uint8_t{1} : uint8_t{0};
   }
 }
@@ -882,6 +897,18 @@ void apply_meta_overlays(const Axes &axes, PitPool &pool) {
   yyjson_val *root = yyjson_doc_get_root(doc);
   assert(yyjson_is_arr(root));
 
+  // hybrid 时序契约 fail-fast: snapshot 文件内每行 date 字段 (= MAX(date) 一日) 必须
+  //   == axes.dates[last_d]. 任何错位 (trading_days 已推进但 snapshot 未刷 / 反向)
+  //   都会让真盘前态被贴到错误的 row, 此处直接 assert. 空文件已在上方 noop.
+  yyjson_val *first = yyjson_arr_get_first(root);
+  if (first) {
+    const char *snap_d = as_cstr_or_null(yyjson_obj_get(first, "date"));
+    assert(snap_d && "cn_stock_static_data row 缺 date 字段");
+    assert(axes.dates[last_d] == snap_d &&
+           "cn_stock_static_data.MAX(date) 与 axes.last_d 错位 — "
+           "先刷 trading_days / static_data 到同一交易日再 build");
+  }
+
   size_t i, n;
   yyjson_val *item;
   yyjson_arr_foreach(root, i, n, item) {
@@ -894,9 +921,16 @@ void apply_meta_overlays(const Axes &axes, PitPool &pool) {
 
     // status 2 字段 (suspended + st_status); limit_price 已改 CUTOFF=-1 normal,
     // 不再 overlay (承认滞后, T 取 T-1 limit).
+    // st_status 4 态派生: in_delist=1 → 3 (优先, 退市整理期), 否则 st_status 原值
+    // (0/1/2). static_data 无 is_risk_warning 字段, 退市整理期靠 in_delist 识别.
     int st = as_int_or_default(yyjson_obj_get(item, "st_status"), 0);
+    int dl = as_int_or_default(yyjson_obj_get(item, "in_delist"), 0);
     int sp = as_int_or_default(yyjson_obj_get(item, "suspended"), 0);
-    pool.status.st_status[off] = static_cast<int8_t>(st);
+    int8_t out_st = (dl != 0)            ? int8_t{3}
+                    : (st == 1)          ? int8_t{1}
+                    : (st == 2)          ? int8_t{2}
+                                         : int8_t{0};
+    pool.status.st_status[off] = out_st;
     pool.status.suspended[off] = (sp != 0) ? uint8_t{1} : uint8_t{0};
   }
 

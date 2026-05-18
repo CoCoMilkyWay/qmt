@@ -103,9 +103,18 @@ struct GridLimitPrice {
 };
 
 // cn_stock_status (CUTOFF=0, hybrid 伪装): 两个字段:
-//   st_status         int8: 0=正常, 1=ST, 2=*ST  → risk_warn 直读
+//   st_status         int8 4 态 (派生): 0=正常 / 1=ST / 2=*ST / 3=退市整理期
+//                     parse 时由原 BigQuant 字段派生:
+//                       cn_stock_status (日频): st_status==1 → 1; ==2 → 2;
+//                         (st==0 ∧ is_risk_warning==1) → 3; else → 0
+//                       cn_stock_static_data (overlay): in_delist==1 → 3 (优先);
+//                         否则 st_status 原值直落 (0/1/2)
+//                     退市整理期: 交易所摘掉 *ST 标签 → 原 st_status 翻 0, 但
+//                     is_risk_warning 仍 1 / static_data.in_delist=1; 用 4 态
+//                     表达保留退市整理识别力, 同时区分 ST vs *ST. 下游 cs_tradable
+//                     走 `> 0.5` OR 排除, 任一非零档都触发 filter.
 //   suspended         uint8: 0/1                  → susp 直读 (1=当日停牌)
-//   (is_risk_warning / price_limit_status / exdr 暂未入张量)
+//   (price_limit_status / exdr 暂未入张量)
 //   实际 BigQuant 入库 17:00 (盘后), 但 ST / 停牌当日开盘前即生效 → 业务上等同
 //   "盘前可知". 历史 day file 按 CUTOFF=0 假装盘前; 最后一天 (= 实盘当日, day file
 //   还未入库) 由 apply_meta_overlays 用 cn_stock_static_data 真盘前 09:00 填充

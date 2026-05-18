@@ -946,13 +946,14 @@ void ts_dividend_st(int a, const Axes &axes, const PitPool &pool,
   apply_segment(next_apply_d, n_d, current_3ysum);
 }
 
-// risk_warn: 直读 cn_stock_status.st_status (CUTOFF=0, hybrid 伪装假装盘前, last_d 由 static_data 填充).
-//   输出 0=正常, 1=ST, 2=*ST (int8 → float 直接 cast). 数据起点前一律 0
-//   (parse 时 prealloc 为 0, 文件不存在时不写, 保持初值).
-//   注: 旧版本走 stock_st (Tushare 每日 ST 名单 + ffill + namechange 段修正) 是
-//       为了兜住 tushare 票"今天不在 ST 名单"的二义性 (撤销 ST vs 退市整理期);
-//       新数据 cn_stock_status 是交易所盘前快照, st_status 字段语义明确, 无需修正.
-//   下游 cs_tradable 把 risk_warn > 0.5 视为排除 (1.0 ST / 2.0 *ST 都触发).
+// risk_warn: 直读 pool.status.st_status (CUTOFF=0, hybrid 伪装假装盘前, last_d 由 static_data 填充).
+//   pit.cpp itf_cn_stock_status::parse + apply_meta_overlays 已派生 4 态:
+//     0=正常 / 1=ST / 2=*ST / 3=退市整理期 (int8 → float 直接 cast).
+//   数据起点前一律 0 (parse 时 prealloc 为 0, 文件不存在时不写, 保持初值).
+//   注: 退市整理期靠 4 态识别 — 交易所摘 *ST 标签后狭义 st_status 翻 0, 仅靠
+//       原始 st_status 漏判会被 strategy 选中持有至退市 (实测 *ST大通 2023/06/19
+//       进退市整理期 → 漏排 → 持有 11 个交易日至退市). 派生规则见 pit.cpp.
+//   下游 cs_tradable 把 risk_warn > 0.5 视为排除 (1.0/2.0/3.0 均触发 filter).
 void ts_risk_warn(int a, const Axes &axes, const PitPool &pool,
                   const StockMeta &, Tensor &T) {
   int n_d = axes.n_d();
