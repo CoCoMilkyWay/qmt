@@ -12,7 +12,11 @@ namespace feature {
 // ============================================================================
 // D 轴 + A 轴 + 反向索引. 由 load_axes() 一次性构造, 此后只读.
 //   dates: data/_meta/trading_days.json 中 market_code='CN' 的 date 升序去重
-//   codes: data/_meta/cn_stock_basic_info.json 全量 instrument (含已退市) 升序
+//   codes: data/_meta/cn_stock_basic_info.json 中 instrument 升序去重 — 已过滤
+//          delist_date < PIPELINE_START_DATE 的标的 (axis 内永远 NaN, 纯冗员).
+//          含 window 内已退市标的 (它们在 delist 之前的 row 是 finite, delist 之后
+//          被 grid_ffill 延续 last close — 但下游 pool 用 ¬is_finite(delist_age)
+//          兜底排除, 无害).
 //   date_days: dates[i] 的 sys_days 缓存 (list_age / rolling 等场合避免重复 parse)
 // ============================================================================
 struct Axes {

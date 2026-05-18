@@ -28,9 +28,9 @@ struct Tensor {
   float  at(F f, int a, int d) const;
   float &at(F f, int a, int d);
 
-  // 单列 finite 校验 — 仅用于"按 README 契约绝对无 NaN"的 feature
-  //   (e.g. pool / tradable / 所有 bool 状态机). raw / factor 列预期可能 NaN
-  //   (上市前/退市后/财报未出), 不要在那些列上调用.
+  // 单列 finite 校验 — 仅用于"按契约绝对无 NaN"的 feature
+  //   (e.g. pool / tradable / 所有 bool 状态机 / factor / factor_score).
+  //   raw / *_age / daily_return 等列预期可能 NaN, 不要在那些列上调用.
   void assert_finite(F f) const;
 };
 

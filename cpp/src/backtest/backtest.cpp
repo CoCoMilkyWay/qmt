@@ -205,8 +205,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     assert(pv > 0.0 && "portfolio value <= 0");
 
     // (3) 候选 universe: tradable ∧ finite(factor_score)
-    //   factor_score 在 pool 外是 NaN (按 cs_factor_score 契约), 跳过即可;
-    //   pool 内全 factor 缺时也可能 NaN (理论上 pool 已保 mcap_raw finite → 不应触发).
+    //   factor_score 表达因子是否可算; universe 边界由 tradable/pool mask 表达.
     std::vector<std::pair<float, int>> cands;
     cands.reserve(::config::POOL_UNIVERSE_SIZE);
     for (int a = 0; a < n_a; ++a) {

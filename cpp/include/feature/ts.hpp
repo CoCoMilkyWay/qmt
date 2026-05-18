@@ -7,10 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
-#include <map>
 #include <span>
-#include <string>
 #include <vector>
 
 namespace feature {
@@ -23,80 +20,17 @@ namespace feature {
 void compute_ts(const Axes &, const PitPool &, const StockMeta &, Tensor &);
 
 // ============================================================================
-// 通用 TS kernel (供 feature.cpp 的 per-feature compute fn 复用)
-//
-// 注: 事件 ev.v 已在 pit.cpp parse 时应用 raw cutoff, 即 ev.v = 首次可见的 row D.
-//   下游直接 `ev.v <= d` 判可见, 不再 +1.
-//
-// 1) ttm12_compute<Ev>: (deprecated, 当前无调用方; 旧 Tushare income/cashflow 自拼 TTM 用过)
-//      按 v 升序回放 events, 维护 map<end_date, value> (latest version per end_date,
-//      可选 report_type=='1' 过滤; 不带 type 时 get_rt 返回空串接受全部);
-//      自动降级: 完整 X(t)+X(Y-1,12)-X(Y-1,M) → 缺同期 X(t)+X(Y-1,12)*(12-M)/12 → 缺年报 X(t)*12/M.
-//      M==12 退化为 X(t).
-//      新基建 (BigQuant cn_stock_financial_ttm_shift shift=0) 已直给 TTM, 由 feature.cpp
-//      内的 scan_latest_ttm 直接取, 不再需要拼接. 保留模板以备日历漂移修正等扩展.
-//
-// 2) state_machine_intervals<TEv>:
-//      按 v 升序遍历 trigger_events, 每 trigger 用 find_off(trigger) 求终止 d,
-//      区间 [trigger.v, off_d) 写 1.0; 区间外 0.0; 多 trigger OR (重叠取并集).
+// 通用 TS kernel — state_machine_intervals<TEv>:
+//   按 v 升序遍历 trigger_events, 每 trigger 用 find_off(trigger) 求终止 d,
+//   区间 [trigger.v, off_d) 写 1.0; 区间外 0.0; 多 trigger OR (重叠取并集).
+//   ev.v 已是 pit.cpp replay 时应用 raw cutoff 后的首次可见 row D, 直接用.
 // ============================================================================
-
-template <class Ev, class GetReportType, class GetValue>
-void ttm12_compute(const std::vector<Ev> &events, int n_d,
-                   GetReportType get_rt, GetValue get_val,
-                   std::span<float> out) {
-  std::fill(out.begin(), out.end(), std::nanf(""));
-
-  std::map<std::string, float> latest;
-  std::size_t ev_ptr = 0;
-  for (int d = 0; d < n_d; ++d) {
-    while (ev_ptr < events.size() && events[ev_ptr].v <= d) {
-      const Ev &e = events[ev_ptr++];
-      const std::string &rt = get_rt(e);
-      if (!rt.empty() && rt != "1") continue; // 仅合并报表 (空串 = 不过滤)
-      float v = get_val(e);
-      if (!is_finite(v)) continue;
-      if (e.end_date.empty()) continue;
-      latest[e.end_date] = v;
-    }
-    if (latest.empty()) continue;
-
-    auto it_t = latest.rbegin();
-    const std::string &t = it_t->first;
-    float x_t = it_t->second;
-    int Y = year_of(t);
-    int M = month_of(t);
-    if (Y == 0 || M == 0) continue;
-
-    // M==12 (年报): 直接是 TTM
-    if (M == 12) { out[d] = x_t; continue; }
-
-    char buf_y_dec[16], buf_y_m[16];
-    std::snprintf(buf_y_dec, sizeof(buf_y_dec), "%04d1231", Y - 1);
-    std::snprintf(buf_y_m, sizeof(buf_y_m), "%04d%s", Y - 1, t.substr(4).c_str());
-    auto it_y_dec = latest.find(buf_y_dec);
-    auto it_y_m = latest.find(buf_y_m);
-
-    if (it_y_dec != latest.end() && it_y_m != latest.end()) {
-      // 完整 TTM12: X(t) + X(Y-1, 12) - X(Y-1, M)
-      out[d] = x_t + it_y_dec->second - it_y_m->second;
-    } else if (it_y_dec != latest.end()) {
-      // 降级: 缺去年同期，用 X(t) + X(Y-1,12) * (12-M)/12 近似
-      float f = static_cast<float>(12 - M) / 12.0f;
-      out[d] = x_t + it_y_dec->second * f;
-    } else {
-      // 降级: 缺去年年报，用 X(t) * 12/M 年化
-      out[d] = x_t * 12.0f / static_cast<float>(M);
-    }
-  }
-}
-
 template <class TEv, class FindOff>
 void state_machine_intervals(const std::vector<TEv> &triggers, int n_d,
                              FindOff find_off, std::span<float> dst) {
   std::fill(dst.begin(), dst.end(), 0.0f);
   for (const TEv &e : triggers) {
-    int on_d  = e.v; // ev.v 已是首次可见 row D
+    int on_d  = e.v;
     int off_d = find_off(e);
     if (on_d < 0) on_d = 0;
     if (off_d > n_d) off_d = n_d;

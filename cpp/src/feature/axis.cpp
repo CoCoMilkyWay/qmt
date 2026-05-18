@@ -1,5 +1,6 @@
 #include "feature/axis.hpp"
 
+#include "config.hpp"
 #include "misc/date.hpp"
 #include "misc/fs.hpp"
 #include "package/yyjson/yyjson.h"
@@ -98,12 +99,24 @@ Axes load_axes() {
   yyjson_val *bi_root = yyjson_doc_get_root(bi_doc);
   assert(yyjson_is_arr(bi_root));
 
+  // PIPELINE_START_DATE 之前已退市的标的不入 A 轴 — 它们在整个 build window 内
+  //   无 day file 可拉, 永远 NaN, 是纯冗员 (~81 只, 占 axis 1.4%). 下游 pool / tradable
+  //   已用 delist_age 兜过, 这里只是 axis 级别清理, 让 describe / mcap_raw 等
+  //   统计口径不掺这 81 只全 NaN 行.
   std::set<std::string> codes_set;
   yyjson_arr_foreach(bi_root, i, n, item) {
     yyjson_val *ins = yyjson_obj_get(item, "instrument");
     if (!ins || !yyjson_is_str(ins)) continue;
     const char *s = yyjson_get_str(ins);
-    if (s && *s) codes_set.emplace(s);
+    if (!s || !*s) continue;
+    yyjson_val *dd_v = yyjson_obj_get(item, "delist_date");
+    if (dd_v && yyjson_is_str(dd_v)) {
+      const char *dd = yyjson_get_str(dd_v);
+      if (dd && std::strlen(dd) == 8 &&
+          std::strcmp(dd, ::config::PIPELINE_START_DATE) < 0)
+        continue;
+    }
+    codes_set.emplace(s);
   }
   yyjson_doc_free(bi_doc);
   assert(!codes_set.empty());

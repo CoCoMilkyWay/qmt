@@ -4,7 +4,9 @@
 
 #include <cstdint>
 #include <mutex>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace feature {
@@ -26,7 +28,7 @@ struct Axes; // fwd decl
 //                                          的 row D 索引.
 //
 // PitPool 是 typed struct (而非泛型 map<name, anything>) — 编译期类型安全,
-// parse fn 直接写 pool.<itf>.<field>; 增减 itf 只需改 PitPool 与 itf 模块的
+// itf.replay 直接写 pool.<itf>.<field>; 增减 itf 只需改 PitPool 与 itf 模块的
 // dense block (pit.cpp 内).
 //
 // 数据源 (BigQuant + Tushare 新基建):
@@ -59,10 +61,6 @@ struct Axes; // fwd decl
 //     financial_income_annual ← cn_stock_financial_income_general_pit (fs_quarter_index=4)
 //                                                                   CUTOFF=-1 (normal)
 //     forecast              ← Tushare forecast                      CUTOFF=-1 (normal)
-//
-//   保留的旧 Tushare 占位 (用户决策, 待 cn_stock_financial_changedate 迁移后清):
-//     report (Tushare 信披计划占位; 当前 EventStore 永远空, find_forecast_off_d
-//             退化为只用 4 月底 deadline_d, 不影响新 profit_st/revenue_st 子集)
 // ============================================================================
 
 // ========== 网格 ==========
@@ -104,7 +102,7 @@ struct GridLimitPrice {
 
 // cn_stock_status (CUTOFF=0, hybrid 伪装): 两个字段:
 //   st_status         int8 4 态 (派生): 0=正常 / 1=ST / 2=*ST / 3=退市整理期
-//                     parse 时由原 BigQuant 字段派生:
+//                     replay 时由原 BigQuant 字段派生:
 //                       cn_stock_status (日频): st_status==1 → 1; ==2 → 2;
 //                         (st==0 ∧ is_risk_warning==1) → 3; else → 0
 //                       cn_stock_static_data (overlay): in_delist==1 → 3 (优先);
@@ -212,7 +210,7 @@ struct FinancialBalanceEv {
 };
 
 // cn_stock_financial_income_general_pit: 利润表 PIT.
-//   只入 fs_quarter_index == 4 的年报 (parse 时过滤); 给 ni_raw 用 (dividend_st 阈值).
+//   只入 fs_quarter_index == 4 的年报 (aggregate 时过滤); 给 ni_raw 用 (dividend_st 阈值).
 //   字段:
 //     net_profit_to_parent_shareholders             ni_raw 数值 (归母年度 NI; 全栈对仗)
 //   同 report_date 多版本取 latest visible (修正语义).
@@ -220,15 +218,6 @@ struct FinancialIncomeAnnualEv {
   int v;
   std::string report_date;
   float net_profit_to_parent_shareholders;
-};
-
-// ----- Tushare 保留占位 (财务变更日, 待 cn_stock_financial_changedate 迁移) -----
-// 实际新基建该表未落地, parse 不被触发, EventStore 保持空 →
-// find_forecast_off_d 退化为只用 (Y+1, 4, 30) deadline_d, 4 月底安全网兜底.
-
-struct ReportEv {
-  int v;
-  std::string end_date;
 };
 
 template <class Ev>
@@ -252,24 +241,37 @@ struct PitPool {
 
   // 事件 (Tushare 保留)
   EventStore<ForecastEv> forecast;
+};
 
-  // 事件 (Tushare 占位, 暂保留待 cn_stock_financial_changedate 迁移)
-  EventStore<ReportEv> report;
+struct AggregateRow {
+  std::string day;
+  std::string code;
+  float f0 = 0.0f;
+  float f1 = 0.0f;
+  float f2 = 0.0f;
+  int i0 = 0;
+  int i1 = 0;
+  int i2 = 0;
+  std::string s0;
+  std::string s1;
+  std::string s2;
 };
 
 // ============================================================================
-// ItfDesc: 单 itf 的描述. 在 pit.cpp 内每个 itf 一组 fn (prealloc + parse +
-//   post_sort + post_ffill) 集中定义, 然后填进 ITFS[] 表. load.cpp 仅迭代该表,
-//   不出现具体 itf 名.
+// ItfDesc: 单 itf 的描述. 在 pit.cpp 内每个 itf 一组 fn (prealloc + aggregate +
+//   replay + post_sort + post_ffill) 集中定义, 然后填进 ITFS[] 表.
+//   load.cpp 仅迭代该表, 不出现具体 itf 名.
 //   增减 itf 只需 (1) PitPool 加字段 (2) pit.cpp 加一组 fn (3) ITFS[] 加一行.
 //
 // 函数职责:
 //   prealloc(axes, pool):
 //     初始化 pool 中此 itf 的字段. 网格 itf 把每个字段 vector 设为
 //     length=n_a*n_d 的 NaN/0; 事件 itf 把 EventStore[a] 设为 length=n_a 的空链.
-//   parse(arr, v_idx, axes, pool, mu):
-//     解析单 (day, itf) json 数组到 pool. 网格场合 mu==nullptr, 直接 dense slot
-//     写入无锁; 事件场合 mu 是 length=n_a 的 mutex 数组, 按 a 取锁 emplace.
+//   aggregate(arr, day, out):
+//     解析单 (day, itf) json 数组为 raw aggregate rows; 不依赖 Axes/PitPool.
+//   replay(rows, axes, pool, mu):
+//     把 raw aggregate rows 映射进 PitPool. 网格场合 mu==nullptr, 事件场合
+//     mu 是 length=n_a 的 mutex 数组, 按 a 取锁 emplace.
 //   post_sort(pool):
 //     事件 itf 末段 sort by v 升序 (Phase 2 走单调指针扫). 网格 itf 留 nullptr.
 //   post_ffill(axes, pool):
@@ -280,8 +282,10 @@ struct ItfDesc {
   bool is_event;         // false=网格 (无锁), true=事件 (per-A mutex)
 
   void (*prealloc)(const Axes &, PitPool &);
-  void (*parse)(yyjson_val *arr, int v_idx, const Axes &, PitPool &,
-                std::vector<std::mutex> *mu /* 网格场合可为 nullptr */);
+  void (*aggregate)(yyjson_val *arr, std::string_view day,
+                    std::vector<AggregateRow> &out);
+  void (*replay)(std::span<const AggregateRow> rows, const Axes &, PitPool &,
+                 std::vector<std::mutex> *mu);
   void (*post_sort)(PitPool &);                // 事件 itf 末段 sort by v; 网格 itf 留 nullptr
   void (*post_ffill)(const Axes &, PitPool &); // 网格 itf per-A forward fill; 事件 itf 留 nullptr
 };

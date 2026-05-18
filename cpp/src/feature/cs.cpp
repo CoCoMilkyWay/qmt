@@ -106,11 +106,6 @@ void pct_rank(std::span<float> x) {
 void factor_pipeline(int d, F src, F dst, bool invert, Tensor &T,
                      std::span<float> buf) {
   T.gather_cs_row(src, d, buf);
-  // 记录哪些是 raw=0 (上市前), 哪些是 raw=NaN (数据问题)
-  std::vector<bool> was_zero(buf.size());
-  for (std::size_t i = 0; i < buf.size(); ++i) {
-    was_zero[i] = (buf[i] == 0.0f);
-  }
   if (invert) {
     for (float &v : buf) {
       if (!is_finite(v) || v == 0.0f) v = std::nanf("");
@@ -120,10 +115,27 @@ void factor_pipeline(int d, F src, F dst, bool invert, Tensor &T,
   winsor_mad(buf, 3.0f);
   z(buf);
   pct_rank(buf);
-  // 只对 raw=0 (上市前) 的 NaN 填 0; raw=NaN (数据问题) 保留暴露问题
-  for (std::size_t i = 0; i < buf.size(); ++i) {
-    if (!is_finite(buf[i]) && was_zero[i]) buf[i] = 0.0f;
+
+  double sum = 0.0;
+  std::size_t cnt = 0;
+  for (float v : buf) {
+    if (!is_finite(v))
+      continue;
+    sum += v;
+    ++cnt;
   }
+  if (cnt == 0) {
+    // 全截面都缺失时没有均值可算; 填同一常数只表达"无横截面信息",
+    // 不制造排序差异. 局部缺失仍走真实截面均值.
+    std::fill(buf.begin(), buf.end(), 0.0f);
+    T.scatter_cs_row(dst, d, std::span<const float>(buf.data(), buf.size()));
+    return;
+  }
+  float mean = static_cast<float>(sum / static_cast<double>(cnt));
+  for (float &v : buf)
+    if (!is_finite(v))
+      v = mean;
+
   T.scatter_cs_row(dst, d, std::span<const float>(buf.data(), buf.size()));
 }
 

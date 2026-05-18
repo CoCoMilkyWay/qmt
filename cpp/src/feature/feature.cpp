@@ -89,19 +89,21 @@ inline const std::array<bool, SW2021_L1_COUNT> &industry_l1_whitelist_mask() {
   return mask;
 }
 
-// 计算股票 a 的上市日索引 (在 axes.dates 中的 lower_bound)
-// 返回 -1 表示无有效 list_date (视为永远未上市)
+// 计算股票 a 的上市日索引 (在 axes.dates 中的 lower_bound).
+// 返回 n_d 表示无有效 list_date (视为永远未上市).
 inline int get_list_d(int a, const Axes &axes, const StockMeta &meta) {
   const std::string &ld = meta.list_date[a];
   if (ld.size() != 8)
-    return axes.n_d(); // 无 list_date → 永远未上市
+    return axes.n_d();
   auto it = std::lower_bound(axes.dates.begin(), axes.dates.end(), ld);
   return static_cast<int>(std::distance(axes.dates.begin(), it));
 }
 
-// 不再填 0，保留 NaN 让后续 stage 判断数据可用性
-inline void fill_before_list(std::span<float>, int, const Axes &,
-                             const StockMeta &) {
+// 仅上市前 raw 用 0 哨兵；上市后 NaN/Inf 必须保留，用来暴露数据问题。
+inline void fill_before_list(std::span<float> out, int a, const Axes &axes,
+                             const StockMeta &meta) {
+  int hi = std::min(get_list_d(a, axes, meta), axes.n_d());
+  std::fill(out.begin(), out.begin() + hi, 0.0f);
 }
 
 // 计算股票 a 的退市日索引 (在 axes.dates 中的 lower_bound)
@@ -120,16 +122,17 @@ inline void fill_after_delist(std::span<float>, int, const Axes &,
 }
 
 // forecast 触发 → 终止 d:
-//   off = min(report.actual_date 同 end_date 的最早 r.v, 下一年 4 月 30 日 ceil)
-//   注: r.v 已在 parse 时应用 cutoff = 首次可见 row D.
+//   off = min(对应 report_date 的正式 PIT 财报首次可见 row, 下一年 4 月 30 日 ceil)
+//   注: r.v 已在 replay 时应用 cutoff = 首次可见 row D.
+template <class FinancialEv>
 int find_forecast_off_d(const ForecastEv &fe,
-                        const std::vector<ReportEv> &reports,
+                        const std::vector<FinancialEv> &financials,
                         const Axes &axes) {
   int n_d = axes.n_d();
-  int report_d = -1;
-  for (const auto &r : reports) {
-    if (r.end_date == fe.end_date) {
-      report_d = r.v;
+  int financial_d = -1;
+  for (const auto &r : financials) {
+    if (r.report_date == fe.end_date) {
+      financial_d = r.v;
       break;
     }
   }
@@ -145,8 +148,8 @@ int find_forecast_off_d(const ForecastEv &fe,
                      : static_cast<int>(std::distance(axes.dates.begin(), it));
   }
   int off = n_d;
-  if (report_d >= 0)
-    off = std::min(off, report_d);
+  if (financial_d >= 0)
+    off = std::min(off, financial_d);
   if (deadline_d >= 0)
     off = std::min(off, deadline_d);
   return off;
@@ -163,25 +166,21 @@ namespace impl {
 
 namespace {
 
-// 模板: 网格 float 字段 → ts_row, 可选 scale (× scale 单位转换); NaN 透传保留数据问题.
+// 模板: 网格 float 字段 → ts_row; NaN 透传保留数据问题.
+//   fill_pre_list=true: 上市前哨兵置 0 (close/mcap/share 等估值类);
+//   fill_pre_list=false: 全期保留 NaN (margin balance 等"不存在=NaN").
 template <class GetField>
 inline void grid_copy(int a, const Axes &axes, const StockMeta &meta, Tensor &T,
-                      F dst, GetField get_field, float scale = 1.0f) {
+                      F dst, GetField get_field, bool fill_pre_list = true) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   const std::vector<float> &src = get_field();
   auto out = T.ts_row(dst, a);
-  if (scale == 1.0f) {
-    for (int d = 0; d < n_d; ++d) {
-      out[d] = src[base + static_cast<std::size_t>(d)];
-    }
-  } else {
-    for (int d = 0; d < n_d; ++d) {
-      float v = src[base + static_cast<std::size_t>(d)];
-      out[d] = is_finite(v) ? v * scale : v;
-    }
+  for (int d = 0; d < n_d; ++d) {
+    out[d] = src[base + static_cast<std::size_t>(d)];
   }
-  fill_before_list(out, a, axes, meta);
+  if (fill_pre_list)
+    fill_before_list(out, a, axes, meta);
   fill_after_delist(out, a, axes, meta);
 }
 
@@ -268,7 +267,7 @@ void ts_share_raw(int a, const Axes &axes, const PitPool &pool,
 //     per-A 沿 v 升序, 维护 map<report_date, {val, last_v}>; ni_raw 取 last_v 最大
 //     的 2 条均值, 用于 dividend_st 阈值稳定 (单年 NI 波动大易误触发).
 //
-// PIT 安全: 网格 / 事件 ev.v 已在 pit.cpp parse 时应用 raw cutoff, ev.v <= d 即
+// PIT 安全: 网格 / 事件 ev.v 已在 pit.cpp replay 时应用 raw cutoff, ev.v <= d 即
 //   "T 当日已可见". 所有 helper / ts_* 不再做时间偏移.
 // ----------------------------------------------------------------------------
 
@@ -290,7 +289,6 @@ inline void scan_latest_ttm(int a, const Axes &axes, const PitPool &pool,
     }
     out[d] = (last_idx >= 0) ? compute(d, events[last_idx]) : std::nanf("");
   }
-  fill_before_list(out, a, axes, meta);
   fill_after_delist(out, a, axes, meta);
 }
 
@@ -315,11 +313,11 @@ inline void scan_latest_balance(int a, const Axes &axes, const PitPool &pool,
     }
     out[d] = compute(d, latest_by_rd.rbegin()->second);
   }
-  fill_before_list(out, a, axes, meta);
   fill_after_delist(out, a, axes, meta);
 }
 
-// pb_raw = mcap_raw / balance.total_owner_equity (含少数股东, BigQuant 实测口径)
+// pb_raw = mcap_raw / balance.total_owner_equity (含少数股东, BigQuant 实测口径).
+//   支持负 PB (负权益); mcap<=0 是未上市/无价格哨兵, 不参与估值.
 void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
   auto mcap = T.ts_row(F::mcap_raw, a);
@@ -327,7 +325,8 @@ void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
                       [&](int d, const FinancialBalanceEv &e) -> float {
                         float m = mcap[d];
                         float eq = e.total_owner_equity;
-                        return (is_finite(m) && is_finite(eq) && eq > 0.0f)
+                        return (is_finite(m) && m > 0.0f &&
+                                is_finite(eq) && eq != 0.0f)
                                    ? m / eq
                                    : std::nanf("");
                       });
@@ -336,6 +335,7 @@ void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
 // ps_raw = mcap_raw / ttm.total_operating_revenue_ttm
 //   分母用 total_operating_revenue_ttm (含利息/保费; BigQuant 实测口径) 而非
 //   operating_revenue_ttm; 600519 茅台等 2% 误差排查得.
+//   支持负 PS (负收入修正/异常但有排序含义); mcap<=0 不参与估值.
 void ts_ps_raw(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
   auto mcap = T.ts_row(F::mcap_raw, a);
@@ -343,7 +343,8 @@ void ts_ps_raw(int a, const Axes &axes, const PitPool &pool,
                   [&](int d, const FinancialTtmEv &e) -> float {
                     float m = mcap[d];
                     float r = e.total_operating_revenue_ttm;
-                    return (is_finite(m) && is_finite(r) && r > 0.0f)
+                    return (is_finite(m) && m > 0.0f &&
+                            is_finite(r) && r != 0.0f)
                                ? m / r
                                : std::nanf("");
                   });
@@ -380,6 +381,10 @@ void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
   std::sort(items.begin(), items.end(),
             [](const Item &x, const Item &y) { return x.ex < y.ex; });
 
+  // 双指针滑窗 cash_sum: hi 是即将入窗事件下标, lo 是已弹出事件下标 (= 当前窗
+  //   含 [lo, hi) 区间事件). 窗口为空 (lo == hi) 时显式归零, 防 += / -= 浮点
+  //   累计漂移 (实测后期年份 4-5% 样本会漂到 -1e-7 微负). 输出再 max(0, ·) 兜底
+  //   非空窗内的漂移, 强约束 dy_raw ∈ [0, +∞).
   std::size_t lo = 0, hi = 0;
   float cash_sum = 0.0f;
   for (int d = 0; d < n_d; ++d) {
@@ -393,49 +398,48 @@ void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
       cash_sum -= items[lo].cash;
       ++lo;
     }
+    if (lo >= hi)
+      cash_sum = 0.0f;
     float m = mcap[d];
     float ts = shares[base + static_cast<std::size_t>(d)];
     if (!is_finite(m) || m <= 0.0f || !is_finite(ts)) {
       out[d] = std::nanf("");
     } else {
-      out[d] = (cash_sum * ts) / m;
+      float dy = (cash_sum * ts) / m;
+      out[d] = (dy > 0.0f) ? dy : 0.0f;
     }
+  }
+  fill_after_delist(out, a, axes, meta);
+}
+
+// up_lim / dn_lim 主动 -1: limit_price (CUTOFF=-1) 取的是 row D 当日适用涨跌停
+//   (基于 D-1 close × 1.1/1.2 来); close_raw[D] (CUTOFF=-1) = D-1 实际收盘.
+//   想判 "D-1 日是否封板" 应用 D-1 适用涨跌停, 即 limit_price[a, d-1]. ts_*_lim
+//   主动 -1 完成此对齐. d=0 处无前一交易日 → NaN.
+namespace {
+inline void ts_lim_shift1(int a, const Axes &axes, const StockMeta &meta,
+                          Tensor &T, F dst, const std::vector<float> &src) {
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto out = T.ts_row(dst, a);
+  if (n_d > 0)
+    out[0] = std::nanf("");
+  for (int d = 1; d < n_d; ++d) {
+    out[d] = src[base + static_cast<std::size_t>(d - 1)];
   }
   fill_before_list(out, a, axes, meta);
   fill_after_delist(out, a, axes, meta);
 }
+} // namespace
 
-// up_lim / dn_lim 主动 -1: limit_price (CUTOFF=0) 取的是 row D 当日盘前公布
-//   = D 日适用涨跌停 (基于 D-1 close × 1.1/1.2 来的); close_raw[D] (CUTOFF=-1)
-//   = D-1 日实际收盘. 想判 "D-1 日是否封板" 应用 D-1 适用涨跌停, 即 limit_price[D-1]
-//   = pool.limit_price.upper_limit[a, d-1]. ts_up_lim 主动 -1 完成此对齐.
-//   d=0 处无前一交易日 → NaN.
 void ts_up_lim(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
-  int n_d = axes.n_d();
-  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
-  auto out = T.ts_row(F::up_lim, a);
-  if (n_d > 0)
-    out[0] = std::nanf("");
-  for (int d = 1; d < n_d; ++d) {
-    out[d] = pool.limit_price.upper_limit[base + static_cast<std::size_t>(d - 1)];
-  }
-  fill_before_list(out, a, axes, meta);
-  fill_after_delist(out, a, axes, meta);
+  ts_lim_shift1(a, axes, meta, T, F::up_lim, pool.limit_price.upper_limit);
 }
 
 void ts_dn_lim(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
-  int n_d = axes.n_d();
-  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
-  auto out = T.ts_row(F::dn_lim, a);
-  if (n_d > 0)
-    out[0] = std::nanf("");
-  for (int d = 1; d < n_d; ++d) {
-    out[d] = pool.limit_price.lower_limit[base + static_cast<std::size_t>(d - 1)];
-  }
-  fill_before_list(out, a, axes, meta);
-  fill_after_delist(out, a, axes, meta);
+  ts_lim_shift1(a, axes, meta, T, F::dn_lim, pool.limit_price.lower_limit);
 }
 
 // susp ← cn_stock_status.suspended (CUTOFF=0, hybrid 伪装假装盘前, last_d 由 static_data 填充)
@@ -455,13 +459,15 @@ void ts_is_margin(int a, const Axes &axes, const PitPool &pool,
 void ts_mr_bal_raw(int a, const Axes &axes, const PitPool &pool,
                    const StockMeta &meta, Tensor &T) {
   grid_copy(a, axes, meta, T, F::mr_bal_raw,
-            [&]() -> const std::vector<float> & { return pool.margin_detail.financing_balance; });
+            [&]() -> const std::vector<float> & { return pool.margin_detail.financing_balance; },
+            false);
 }
 
 void ts_ms_bal_raw(int a, const Axes &axes, const PitPool &pool,
                    const StockMeta &meta, Tensor &T) {
   grid_copy(a, axes, meta, T, F::ms_bal_raw,
-            [&]() -> const std::vector<float> & { return pool.margin_detail.securities_lending_balance; });
+            [&]() -> const std::vector<float> & { return pool.margin_detail.securities_lending_balance; },
+            false);
 }
 
 // industry_l1: SW2021 一级行业 ID per (D, A), 0=未知, 1..31 见 industry.hpp.
@@ -505,7 +511,7 @@ void ts_rev_raw(int a, const Axes &axes, const PitPool &pool,
                   });
 }
 
-// ni_raw: 仅取 fs_quarter_index==4 年报 (parse 已过滤);
+// ni_raw: 仅取 fs_quarter_index==4 年报 (aggregate 已过滤);
 //   维护 map<report_date, {val, last_v}>, 取 last_v 最大 2 条均值 (smooth 阈值);
 //   单条退 1 条; 0 条 NaN. 给 dividend_st 阈值用.
 void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
@@ -563,12 +569,11 @@ void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
     else if (i0 >= 0)
       out[d] = annuals[i0].second.val;
   }
-  fill_before_list(out, a, axes, meta);
   fill_after_delist(out, a, axes, meta);
 }
 
 // pe_raw = mcap_raw / ttm.net_profit_to_parent_shareholders_ttm
-//   支持负 PE (亏损); n==0 → NaN.
+//   支持负 PE (亏损); mcap<=0 是未上市/无价格哨兵; n==0 → NaN.
 void ts_pe_raw(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
   auto mcap = T.ts_row(F::mcap_raw, a);
@@ -576,13 +581,15 @@ void ts_pe_raw(int a, const Axes &axes, const PitPool &pool,
                   [&](int d, const FinancialTtmEv &e) -> float {
                     float m = mcap[d];
                     float n = e.net_profit_to_parent_shareholders_ttm;
-                    return (is_finite(m) && is_finite(n) && n != 0.0f)
+                    return (is_finite(m) && m > 0.0f &&
+                            is_finite(n) && n != 0.0f)
                                ? m / n
                                : std::nanf("");
                   });
 }
 
-// pcf_raw = mcap_raw / ttm.net_cffoa_ttm; 经营性现金流可负, 不剔; n==0 → NaN.
+// pcf_raw = mcap_raw / ttm.net_cffoa_ttm; 经营性现金流可负, 不剔;
+//   mcap<=0 是未上市/无价格哨兵; c==0 → NaN.
 void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool,
                 const StockMeta &meta, Tensor &T) {
   auto mcap = T.ts_row(F::mcap_raw, a);
@@ -590,7 +597,8 @@ void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool,
                   [&](int d, const FinancialTtmEv &e) -> float {
                     float m = mcap[d];
                     float c = e.net_cffoa_ttm;
-                    return (is_finite(m) && is_finite(c) && c != 0.0f)
+                    return (is_finite(m) && m > 0.0f &&
+                            is_finite(c) && c != 0.0f)
                                ? m / c
                                : std::nanf("");
                   });
@@ -626,7 +634,6 @@ inline void scan_latest_ttm_and_balance(int a, const Axes &axes,
     }
     out[d] = compute(d, ttms[last_ttm], latest_by_rd.rbegin()->second);
   }
-  fill_before_list(out, a, axes, meta);
   fill_after_delist(out, a, axes, meta);
 }
 
@@ -662,38 +669,33 @@ void ts_roa_raw(int a, const Axes &axes, const PitPool &pool,
 // TS: raw meta 派生 (per-A 动态: D - list_date / D - delist_date)
 // ============================================================================
 
-// list_age: D - list_date if D ≥ list_date else NaN.
-//   PIT: 不写"距上市天数" (未来信息). 下游用 is_finite 判 "已上市".
-void ts_list_age(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
-                 Tensor &T) {
+// list_age / delist_age: D - {list,delist}_date if D ≥ anchor else NaN.
+//   PIT: 不写"距事件天数" (未来信息). 下游用 is_finite 判 "已上市 / 已退市".
+namespace {
+inline void ts_age_from(int a, const Axes &axes, Tensor &T, F dst,
+                        const std::string &anchor) {
   int n_d = axes.n_d();
-  auto out = T.ts_row(F::list_age, a);
-  if (meta.list_date[a].size() == 8) {
-    auto ld = misc::parse_yyyymmdd(meta.list_date[a]);
-    for (int d = 0; d < n_d; ++d) {
-      float age = static_cast<float>((axes.date_days[d] - ld).count());
-      out[d] = (age >= 0.0f) ? age : std::nanf("");
-    }
-  } else {
+  auto out = T.ts_row(dst, a);
+  if (anchor.size() != 8) {
     std::fill(out.begin(), out.end(), std::nanf(""));
+    return;
+  }
+  auto ad = misc::parse_yyyymmdd(anchor);
+  for (int d = 0; d < n_d; ++d) {
+    float age = static_cast<float>((axes.date_days[d] - ad).count());
+    out[d] = (age >= 0.0f) ? age : std::nanf("");
   }
 }
+} // namespace
 
-// delist_age: D - delist_date if D ≥ delist_date else NaN.
-//   PIT: 不写"距退市天数" (未来信息). 下游用 is_finite 判 "已退市".
+void ts_list_age(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
+                 Tensor &T) {
+  ts_age_from(a, axes, T, F::list_age, meta.list_date[a]);
+}
+
 void ts_delist_age(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
                    Tensor &T) {
-  int n_d = axes.n_d();
-  auto out = T.ts_row(F::delist_age, a);
-  if (meta.delist_date[a].size() == 8) {
-    auto dd = misc::parse_yyyymmdd(meta.delist_date[a]);
-    for (int d = 0; d < n_d; ++d) {
-      float age = static_cast<float>((axes.date_days[d] - dd).count());
-      out[d] = (age >= 0.0f) ? age : std::nanf("");
-    }
-  } else {
-    std::fill(out.begin(), out.end(), std::nanf(""));
-  }
+  ts_age_from(a, axes, T, F::delist_age, meta.delist_date[a]);
 }
 
 // ============================================================================
@@ -741,7 +743,7 @@ void ts_low_p(int a, const Axes &axes, const PitPool &, const StockMeta &,
   auto cl = T.ts_row(F::close_raw, a);
   auto out = T.ts_row(F::low_p, a);
   for (int d = 0; d < n_d; ++d) {
-    out[d] = (is_finite(cl[d]) && cl[d] < 1.0f) ? 1.0f : 0.0f;
+    out[d] = (is_finite(cl[d]) && cl[d] > 0.0f && cl[d] < 1.0f) ? 1.0f : 0.0f;
   }
 }
 
@@ -754,38 +756,38 @@ void ts_low_mc(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
   auto out = T.ts_row(F::low_mc, a);
   float thr = (meta.list_sector[a] == 1) ? 5e8f : 3e8f;
   for (int d = 0; d < n_d; ++d) {
-    out[d] = (is_finite(mc[d]) && mc[d] < thr) ? 1.0f : 0.0f;
+    out[d] = (is_finite(mc[d]) && mc[d] > 0.0f && mc[d] < thr) ? 1.0f : 0.0f;
   }
 }
 
-void ts_limit_up(int a, const Axes &axes, const PitPool &, const StockMeta &,
-                 Tensor &T) {
+// limit_up / limit_dn: close 与 D-1 适用涨跌停同向触碰判定.
+//   lim==+inf (数据不合理: BigQuant upper_limit==0 等) 或 NaN → is_finite=false → 不视为封板.
+namespace {
+template <class Cmp>
+inline void ts_limit_cmp(int a, const Axes &axes, Tensor &T, F lim_f, F dst, Cmp cmp) {
   int n_d = axes.n_d();
   auto cl = T.ts_row(F::close_raw, a);
-  auto up = T.ts_row(F::up_lim, a);
-  auto out = T.ts_row(F::limit_up, a);
+  auto lm = T.ts_row(lim_f, a);
+  auto out = T.ts_row(dst, a);
   for (int d = 0; d < n_d; ++d) {
-    // up >= 100000 是无涨停限制哨兵，排除
-    out[d] = (is_finite(cl[d]) && is_finite(up[d]) &&
-              up[d] < 100000.0f && cl[d] >= up[d] - 1e-4f)
+    out[d] = (is_finite(cl[d]) && cl[d] > 0.0f &&
+              is_finite(lm[d]) && lm[d] > 0.0f && cmp(cl[d], lm[d]))
                  ? 1.0f
                  : 0.0f;
   }
+}
+} // namespace
+
+void ts_limit_up(int a, const Axes &axes, const PitPool &, const StockMeta &,
+                 Tensor &T) {
+  ts_limit_cmp(a, axes, T, F::up_lim, F::limit_up,
+               [](float c, float l) { return c >= l - 1e-4f; });
 }
 
 void ts_limit_dn(int a, const Axes &axes, const PitPool &, const StockMeta &,
                  Tensor &T) {
-  int n_d = axes.n_d();
-  auto cl = T.ts_row(F::close_raw, a);
-  auto dn = T.ts_row(F::dn_lim, a);
-  auto out = T.ts_row(F::limit_dn, a);
-  for (int d = 0; d < n_d; ++d) {
-    // dn <= 0.01 是无跌停限制哨兵，排除
-    out[d] = (is_finite(cl[d]) && is_finite(dn[d]) &&
-              dn[d] > 0.01f && cl[d] <= dn[d] + 1e-4f)
-                 ? 1.0f
-                 : 0.0f;
-  }
+  ts_limit_cmp(a, axes, T, F::dn_lim, F::limit_dn,
+               [](float c, float l) { return c <= l + 1e-4f; });
 }
 
 // ============================================================================
@@ -808,7 +810,7 @@ void ts_profit_st(int a, const Axes &axes, const PitPool &pool,
   state_machine_intervals(
       trig, axes.n_d(),
       [&](const ForecastEv &fe) {
-        return find_forecast_off_d(fe, pool.report[a], axes);
+        return find_forecast_off_d(fe, pool.financial_income_annual[a], axes);
       },
       T.ts_row(F::profit_st, a));
 }
@@ -839,7 +841,7 @@ void ts_revenue_st(int a, const Axes &axes, const PitPool &pool,
       continue;
 
     int on_d = e.v;
-    int off_d = find_forecast_off_d(e, pool.report[a], axes);
+    int off_d = find_forecast_off_d(e, pool.financial_income_annual[a], axes);
     if (on_d < 0)
       on_d = 0;
     if (off_d > n_d)
@@ -947,9 +949,9 @@ void ts_dividend_st(int a, const Axes &axes, const PitPool &pool,
 }
 
 // risk_warn: 直读 pool.status.st_status (CUTOFF=0, hybrid 伪装假装盘前, last_d 由 static_data 填充).
-//   pit.cpp itf_cn_stock_status::parse + apply_meta_overlays 已派生 4 态:
+//   pit.cpp itf_cn_stock_status::replay + apply_meta_overlays 已派生 4 态:
 //     0=正常 / 1=ST / 2=*ST / 3=退市整理期 (int8 → float 直接 cast).
-//   数据起点前一律 0 (parse 时 prealloc 为 0, 文件不存在时不写, 保持初值).
+//   数据起点前一律 0 (prealloc 为 0, 文件不存在时不写, 保持初值).
 //   注: 退市整理期靠 4 态识别 — 交易所摘 *ST 标签后狭义 st_status 翻 0, 仅靠
 //       原始 st_status 漏判会被 strategy 选中持有至退市 (实测 *ST大通 2023/06/19
 //       进退市整理期 → 漏排 → 持有 11 个交易日至退市). 派生规则见 pit.cpp.
@@ -999,7 +1001,7 @@ void ts_new_list(int a, const Axes &axes, const PitPool &, const StockMeta &,
 }
 
 // pool_b = exchange ∈ wl ∧ list_sector ∈ wl ∧ industry_l1 ∈ wl
-//          ∧ ¬susp ∧ ¬退市 ∧ (true if include_margin else ¬is_margin)
+//          ∧ 已上市 ∧ ¬susp ∧ ¬退市 ∧ (true if include_margin else ¬is_margin)
 //   exchange / list_sector 是 asset 静态 (全 D 同值, 启动期判一次);
 //   industry_l1 是时变 (per-D 读 T.ts_row(F::industry_l1, a) → ID → mask 查白名单).
 //   industry_l1 ID 0 (未知) 不在 mask 任何位 → ¬ind_ok, 自然排除.
@@ -1008,6 +1010,7 @@ void ts_pool_b(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
   int n_d = axes.n_d();
   auto susp_ = T.ts_row(F::susp, a);
   auto is_marg_ = T.ts_row(F::is_margin, a);
+  auto list_age_ = T.ts_row(F::list_age, a);
   auto delist_age_ = T.ts_row(F::delist_age, a);
   auto industry_l1_ = T.ts_row(F::industry_l1, a);
   auto out = T.ts_row(F::pool_b, a);
@@ -1026,7 +1029,8 @@ void ts_pool_b(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
       if (id > 0 && id < static_cast<int>(SW2021_L1_COUNT))
         ind_ok = mask[static_cast<std::size_t>(id)];
     }
-    bool b = asset_ok && ind_ok && !(susp_[d] > 0.5f) &&
+    bool b = asset_ok && ind_ok && is_finite(list_age_[d]) &&
+             !(susp_[d] > 0.5f) &&
              !is_finite(delist_age_[d]);
     if (!incl_margin)
       b = b && !(is_marg_[d] > 0.5f);
@@ -1081,7 +1085,7 @@ void cs_pool(int d, const Axes &, Tensor &T, CsBufs &b) {
     if (!(b.a[a] > 0.5f))
       continue;
     float mc = b.b[a];
-    if (!is_finite(mc))
+    if (!is_finite(mc) || mc <= 0.0f)
       continue;
     cands.emplace_back(mc, static_cast<int>(a));
   }
@@ -1119,11 +1123,8 @@ void cs_tradable(int d, const Axes &, Tensor &T, CsBufs &b) {
   T.scatter_cs_row(F::tradable, d, std::span<const float>(b.a.data(), na));
 }
 
-// factor_score: pool 内 finite-加权平均.
-//   buf 用法: a = score_num accumulator, b = score_den accumulator, c = factor temp / pool mask.
-//   流: 0 累加 num/den; 1 读 pool 用作 mask; 2 num/den + pool → score; scatter.
-//   注: factor_pipeline 已对 raw=0 (上市前) 填 0, 这里 finite 会算入分母 → score 有定义但分子被压;
-//       对该业务可接受 — 上市前的样本理论上不会进 pool (asset list_age 过滤先于 pool).
+// factor_score: 配置因子 finite-加权平均.
+//   factor_pipeline 已保证每个 factor 全 finite; pool/tradable 由下游另行 mask.
 void cs_factor_score(int d, const Axes &, Tensor &T, CsBufs &b) {
   std::size_t na = b.a.size();
   std::fill(b.a.begin(), b.a.end(), 0.0f);
@@ -1140,10 +1141,9 @@ void cs_factor_score(int d, const Axes &, Tensor &T, CsBufs &b) {
     }
   }
 
-  T.gather_cs_row(F::pool, d, b.c);
   for (std::size_t a = 0; a < na; ++a) {
-    bool in_pool = b.c[a] > 0.5f;
-    b.a[a] = (in_pool && b.b[a] > 0.0f) ? (b.a[a] / b.b[a]) : std::nanf("");
+    assert(b.b[a] > 0.0f && "factor_score: no finite configured factor");
+    b.a[a] = b.a[a] / b.b[a];
   }
   T.scatter_cs_row(F::factor_score, d, std::span<const float>(b.a.data(), na));
 }

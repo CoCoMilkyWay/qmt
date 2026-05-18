@@ -79,7 +79,7 @@ inline constexpr const char *BIGQUANT_DATABASE = "import/parquet";
 // BigQuant DAI 拉取的最早允许 visible_date (dashed, "YYYY-MM-DD"; bigquant::fetch 处校验).
 //   API 额度有限按日刷新, 此日期之前的历史数据必须走 BIGQUANT_IMPORT 压缩 archive 通道,
 //   不再消耗在线调用配额. 任何 start < 本阈值的 DAI 查询在 fetch 直接 assert fail.
-inline constexpr const char *BIGQUANT_API_MIN_DATE = "2026-01-01";
+inline constexpr const char *BIGQUANT_API_MIN_DATE = "2026-05-01";
 
 // ============================================================================
 // D. Pool (basic + universe)
@@ -146,7 +146,7 @@ inline constexpr int POOL_UNIVERSE_SIZE = 100;
 // ============================================================================
 // E. 策略 (cs_tradable filter 子集 + cs_factor_score 加权)
 //   STRATEGY_ENABLED_FILTERS  cs_tradable = pool ∧ ¬OR(此处 filter); 删一行即禁用一项
-//   STRATEGY_FACTOR_WEIGHTS   cs_factor_score = Σ w_f · factor_f / Σ w_f · 1{finite}, 限于 pool
+//   STRATEGY_FACTOR_WEIGHTS   cs_factor_score = Σ w_f · factor_f / Σ w_f · 1{finite}
 //     w 必须 > 0; 不想要的 factor 直接删行 (=禁用); F 必须是 enum 中的 factor (Kind::Factor)
 // ============================================================================
 inline constexpr std::array<feature::F, 6> STRATEGY_ENABLED_FILTERS = {{
@@ -207,10 +207,10 @@ inline constexpr bool DESCRIBE_BY_YEAR = true;
 
 // ============================================================================
 // I. Build 契约 (build 末尾必须全 finite 的 feature 白名单; fail fast)
-//   任何一格 NaN 都表示 compute fn 漏写或上游污染. raw / factor / *_age /
-//   daily_return 等列预期可能 NaN, 不在此列表.
+//   任何一格 NaN 都表示 compute fn 漏写或上游污染. raw / *_age /
+//   daily_return 等列预期可能 NaN, 不在此列表; factor 经截面均值补缺后必须全 finite.
 // ============================================================================
-inline constexpr std::array<feature::F, 15> BUILD_NO_NAN_FEATURES = {{
+inline constexpr std::array<feature::F, 26> BUILD_NO_NAN_FEATURES = {{
     // TS bool (ts_* 内 std::fill(0.0f) 后选中置 1.0f, 或 grid_copy_bool)
     feature::F::susp,
     feature::F::is_margin,
@@ -228,6 +228,18 @@ inline constexpr std::array<feature::F, 15> BUILD_NO_NAN_FEATURES = {{
     // CS bool (cs_pool / cs_tradable scatter 全行)
     feature::F::pool,
     feature::F::tradable,
+    // CS factor / score (factor_pipeline 截面均值补缺后应全 finite)
+    feature::F::close,
+    feature::F::mcap,
+    feature::F::fmcap,
+    feature::F::pe_ttm12,
+    feature::F::pb_ttm3,
+    feature::F::ps_ttm12,
+    feature::F::pcf_ttm12,
+    feature::F::roe_ttm12,
+    feature::F::roa_ttm12,
+    feature::F::dy_ttm12,
+    feature::F::factor_score,
 }};
 
 } // namespace config

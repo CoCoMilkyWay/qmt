@@ -15,16 +15,27 @@
 #include <vector>
 
 // ============================================================================
-// pit.cpp 是「itf api 单点」: 每个 itf 一组 (prealloc + parse + post_sort +
-//   post_ffill) 集中定义 ⇒ 末尾 ITFS[] 表挂载. load.cpp 仅迭代该表, 不出现
-//   具体 itf 名.
+// pit.cpp 是「itf api 单点」: 每个 itf 一组 (prealloc + aggregate + replay +
+//   post_sort + post_ffill) 集中定义 ⇒ 末尾 ITFS[] 表挂载. load.cpp 仅迭代该表,
+//   不出现具体 itf 名.
 //   增减 itf:  1) pit.hpp 加 typed Grid/Ev struct 与 PitPool 字段
-//             2) pit.cpp 加一个 namespace itf_<name> 块 (prealloc/parse/[post_sort/post_ffill])
+//             2) pit.cpp 加一个 namespace itf_<name> 块
+//                  (prealloc / aggregate / replay [/ post_sort / post_ffill])
 //             3) ITFS[] 末尾追加一行
+//
+// 流水: dayfile JSON → aggregate(arr, day, raw_rows) → replay(raw_rows, axes, pool).
+//   aggregate 不依赖 Axes/PitPool, 只做 "JSON → raw rows" 字段提取 + schema-level
+//     过滤 (e.g. shift==0); 产物可缓存 (load.cpp 二进制 aggregate cache).
+//   replay 把 raw rows 落进 PitPool, 一次性消化 cutoff 到 row D 索引.
+//
+// 通用脚手架 (匿名 namespace):
+//   aggregate_rows(arr, day, code_field, out, extract) — JSON arr 行级遍历;
+//   replay_grid (rows, axes, cutoff, write)            — 网格 (a, row D) 写;
+//   replay_event(rows, axes, cutoff, mu, emit)         — 事件 per-A emplace.
 //
 // 【raw cutoff 单点真理】每个 itf namespace 内 constexpr CUTOFF = 0 / -1:
 //   row D 的合法数据 = visible_date <= D + CUTOFF 的最新值
-//   ⇒ parse 时把 v_idx (= floor_date(visible_date)) 调整为 row = v_idx - CUTOFF:
+//   ⇒ replay 时把 v_idx (= floor_date(visible_date)) 调整为 row = v_idx - CUTOFF:
 //     CUTOFF= 0: T 当日记录可见 — 适用 (a) 真盘前入库 (margin_trading_detail);
 //                                  (b) hybrid 伪装 (status 盘后入库但当日已生效),
 //                                      最后一天由 apply_meta_overlays 填充.
@@ -36,8 +47,7 @@
 //   axes.dates[ev.v - 1] 还原 floor_date(visible_date) (仅 CUTOFF=-1 适用).
 //
 // 数据源 (lookup 字段差异):
-//   BigQuant 表统一用 "instrument";  Tushare 表 (forecast/...) 仍用 "ts_code".
-//   每个 itf 内部 inline 选择字段, 不抽公共 helper (避免运行时分支).
+//   BigQuant 表统一用 "instrument";  Tushare 表 (forecast/...) 用 "ts_code".
 // ============================================================================
 
 namespace feature {
@@ -104,6 +114,23 @@ inline int lookup_a(const Axes &axes, yyjson_val *item, const char *field) {
   return it == axes.code_idx.end() ? -1 : it->second;
 }
 
+inline int lookup_a_code(const Axes &axes, const std::string &code) {
+  auto it = axes.code_idx.find(code);
+  return it == axes.code_idx.end() ? -1 : it->second;
+}
+
+inline bool grid_day_exists(const Axes &axes, const std::string &day) {
+  return axes.date_idx.find(day) != axes.date_idx.end();
+}
+
+inline AggregateRow raw_base(std::string_view day, yyjson_val *item,
+                             const char *code_field) {
+  AggregateRow r;
+  r.day = std::string(day);
+  r.code = as_str(yyjson_obj_get(item, code_field));
+  return r;
+}
+
 // 网格字段 prealloc 共用模板: length = n_a*n_d, 填 NaN
 inline void grid_prealloc_float(std::vector<float> &v, std::size_t n) {
   v.assign(n, std::nanf(""));
@@ -144,12 +171,77 @@ inline void grid_ffill(std::vector<float> &grid, int n_a, int n_d) {
   }
 }
 
-// 网格 int8/uint8 字段 per-A forward fill:
-//   - 非 sentinel 值记 last
-//   - sentinel 值若 last 非 sentinel → 填充
-//   注意 GridStatus.suspended 是 0/1 (无 sentinel, 不需 ffill); st_status 0/1/2
-//   每日盘前全量快照, 0 表示当日不在 ST 名单 — 按"盘前快照保底"语义不做 ffill.
-//   预留 helper, 当前未使用.
+// ----------------------------------------------------------------------------
+// itf 通用脚手架: 把 aggregate / replay 的 boilerplate 一次性收纳, 各 itf
+//   仅写自己的"取字段 → 写字段" lambda (a few lines), 不再各写 floor_date /
+//   bounds / lookup_a / lock 等 5-10 行重复逻辑.
+//
+//   aggregate_rows  — JSON arr 行级遍历: 提取 code + 调 extract(item, row) 填 raw,
+//                     extract 返回 false 跳过 (用于 schema-level 过滤如 shift==0).
+//   replay_grid     — raw rows → 网格 (a, row D) 单元写; 网格 day 必须是 trading day.
+//   replay_event    — raw rows → 事件 (per-a chain) emplace; per-A mutex 保护.
+//   两个 replay 都把 cutoff 一次性消化进 row 索引 (row = v_idx - cutoff).
+// ----------------------------------------------------------------------------
+
+template <class Extract>
+inline void aggregate_rows(yyjson_val *arr, std::string_view day,
+                           const char *code_field,
+                           std::vector<AggregateRow> &out, Extract extract) {
+  assert(arr && yyjson_is_arr(arr));
+  size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(arr, i, n, item) {
+    AggregateRow r = raw_base(day, item, code_field);
+    if (r.code.empty())
+      continue;
+    if (!extract(item, r))
+      continue;
+    out.push_back(std::move(r));
+  }
+}
+
+template <class Write>
+inline void replay_grid(std::span<const AggregateRow> rows, const Axes &axes,
+                        int cutoff, Write write) {
+  int n_d = axes.n_d();
+  for (const AggregateRow &r : rows) {
+    if (!grid_day_exists(axes, r.day))
+      continue;
+    int v_idx = axes.floor_date(r.day);
+    if (v_idx < 0)
+      continue;
+    int row = v_idx - cutoff;
+    if (row >= n_d)
+      continue;
+    int a = lookup_a_code(axes, r.code);
+    if (a < 0)
+      continue;
+    std::size_t off = static_cast<std::size_t>(a) *
+                          static_cast<std::size_t>(n_d) +
+                      static_cast<std::size_t>(row);
+    write(off, r);
+  }
+}
+
+template <class Emit>
+inline void replay_event(std::span<const AggregateRow> rows, const Axes &axes,
+                         int cutoff, std::vector<std::mutex> *mu, Emit emit) {
+  assert(mu);
+  int n_d = axes.n_d();
+  for (const AggregateRow &r : rows) {
+    int v_idx = axes.floor_date(r.day);
+    if (v_idx < 0)
+      continue;
+    int row = v_idx - cutoff;
+    if (row >= n_d)
+      continue;
+    int a = lookup_a_code(axes, r.code);
+    if (a < 0)
+      continue;
+    std::lock_guard<std::mutex> lk((*mu)[a]);
+    emit(a, row, r);
+  }
+}
 
 } // namespace
 
@@ -176,30 +268,21 @@ void prealloc(const Axes &axes, PitPool &p) {
   grid_prealloc_float(p.bar1d.adjust_factor, n);
 }
 
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> * /*mu*/) {
-  assert(arr && yyjson_is_arr(arr));
-  if (v_idx < 0)
-    return;
-  int n_d = axes.n_d();
-  int row = v_idx - CUTOFF;
-  if (row >= n_d)
-    return;
-  std::size_t base_off = static_cast<std::size_t>(row);
+void aggregate(yyjson_val *arr, std::string_view day,
+               std::vector<AggregateRow> &out) {
+  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
+    r.f0 = as_float_or_nan(yyjson_obj_get(item, "close"));
+    r.f1 = as_float_or_nan(yyjson_obj_get(item, "adjust_factor"));
+    return true;
+  });
+}
 
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, item, "instrument");
-    if (a < 0)
-      continue;
-    std::size_t off = static_cast<std::size_t>(a) *
-                          static_cast<std::size_t>(n_d) +
-                      base_off;
-    pool.bar1d.close[off] = positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "close")));
-    pool.bar1d.adjust_factor[off] = positive_or_inf(
-        as_float_or_nan(yyjson_obj_get(item, "adjust_factor")));
-  }
+void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
+            std::vector<std::mutex> * /*mu*/) {
+  replay_grid(rows, axes, CUTOFF, [&](std::size_t off, const AggregateRow &r) {
+    pool.bar1d.close[off] = positive_or_inf(r.f0);
+    pool.bar1d.adjust_factor[off] = positive_or_inf(r.f1);
+  });
 }
 
 void post_ffill(const Axes &axes, PitPool &p) {
@@ -222,31 +305,21 @@ void prealloc(const Axes &axes, PitPool &p) {
   grid_prealloc_float(p.shares.a_float_shares, n);
 }
 
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> * /*mu*/) {
-  assert(arr && yyjson_is_arr(arr));
-  if (v_idx < 0)
-    return;
-  int n_d = axes.n_d();
-  int row = v_idx - CUTOFF;
-  if (row >= n_d)
-    return;
-  std::size_t base_off = static_cast<std::size_t>(row);
+void aggregate(yyjson_val *arr, std::string_view day,
+               std::vector<AggregateRow> &out) {
+  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
+    r.f0 = as_float_or_nan(yyjson_obj_get(item, "total_shares"));
+    r.f1 = as_float_or_nan(yyjson_obj_get(item, "a_float_shares"));
+    return true;
+  });
+}
 
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, item, "instrument");
-    if (a < 0)
-      continue;
-    std::size_t off = static_cast<std::size_t>(a) *
-                          static_cast<std::size_t>(n_d) +
-                      base_off;
-    pool.shares.total_shares[off] =
-        positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "total_shares")));
-    pool.shares.a_float_shares[off] = positive_or_inf(
-        as_float_or_nan(yyjson_obj_get(item, "a_float_shares")));
-  }
+void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
+            std::vector<std::mutex> * /*mu*/) {
+  replay_grid(rows, axes, CUTOFF, [&](std::size_t off, const AggregateRow &r) {
+    pool.shares.total_shares[off] = positive_or_inf(r.f0);
+    pool.shares.a_float_shares[off] = positive_or_inf(r.f1);
+  });
 }
 
 void post_ffill(const Axes &axes, PitPool &p) {
@@ -271,36 +344,27 @@ void prealloc(const Axes &axes, PitPool &p) {
   grid_prealloc_float(p.limit_price.lower_limit, n);
 }
 
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> * /*mu*/) {
-  assert(arr && yyjson_is_arr(arr));
-  if (v_idx < 0)
-    return;
-  int n_d = axes.n_d();
-  int row = v_idx - CUTOFF;
-  if (row >= n_d)
-    return;
-  std::size_t base_off = static_cast<std::size_t>(row);
+// upper_limit / lower_limit 业务约束: > 0; 0/负/non-finite (含 BigQuant 早年
+//   2015-2017 占 5-14% 的 upper_limit==0 数据缺口, 视为"无涨跌停限制")
+//   一律 → +inf, 走"数据不合理"标记. 下游 ts_limit_up/ts_limit_dn 用
+//   is_finite() 跳过, 不会触发误判涨跌停. ffill 不传播 +inf, 紧邻真缺失日
+//   会被前一个有效值兜底 — 比 1e6 finite 哨兵被 ffill 传播污染下游
+//   describe / mean 更干净.
+void aggregate(yyjson_val *arr, std::string_view day,
+               std::vector<AggregateRow> &out) {
+  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
+    r.f0 = as_float_or_nan(yyjson_obj_get(item, "upper_limit"));
+    r.f1 = as_float_or_nan(yyjson_obj_get(item, "lower_limit"));
+    return true;
+  });
+}
 
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, item, "instrument");
-    if (a < 0)
-      continue;
-    std::size_t off = static_cast<std::size_t>(a) *
-                          static_cast<std::size_t>(n_d) +
-                      base_off;
-    // 哨兵: up==0 (异常) → 1e6 (无涨停), dn==0 → 0.01 (无跌停).
-    {
-      float up = as_float_or_nan(yyjson_obj_get(item, "upper_limit"));
-      pool.limit_price.upper_limit[off] = (up == 0.0f) ? 1e6f : positive_or_inf(up);
-    }
-    {
-      float dn = as_float_or_nan(yyjson_obj_get(item, "lower_limit"));
-      pool.limit_price.lower_limit[off] = (dn == 0.0f) ? 0.01f : positive_or_inf(dn);
-    }
-  }
+void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
+            std::vector<std::mutex> * /*mu*/) {
+  replay_grid(rows, axes, CUTOFF, [&](std::size_t off, const AggregateRow &r) {
+    pool.limit_price.upper_limit[off] = positive_or_inf(r.f0);
+    pool.limit_price.lower_limit[off] = positive_or_inf(r.f1);
+  });
 }
 
 void post_ffill(const Axes &axes, PitPool &p) {
@@ -337,37 +401,27 @@ void prealloc(const Axes &axes, PitPool &p) {
   p.status.suspended.assign(n, uint8_t{0});
 }
 
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> * /*mu*/) {
-  assert(arr && yyjson_is_arr(arr));
-  if (v_idx < 0)
-    return;
-  int n_d = axes.n_d();
-  int row = v_idx - CUTOFF;
-  if (row >= n_d)
-    return;
-  std::size_t base_off = static_cast<std::size_t>(row);
+void aggregate(yyjson_val *arr, std::string_view day,
+               std::vector<AggregateRow> &out) {
+  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
+    r.i0 = as_int_or_default(yyjson_obj_get(item, "st_status"), 0);
+    r.i1 = as_int_or_default(yyjson_obj_get(item, "is_risk_warning"), 0);
+    r.i2 = as_int_or_default(yyjson_obj_get(item, "suspended"), 0);
+    return true;
+  });
+}
 
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, item, "instrument");
-    if (a < 0)
-      continue;
-    std::size_t off = static_cast<std::size_t>(a) *
-                          static_cast<std::size_t>(n_d) +
-                      base_off;
-    int st = as_int_or_default(yyjson_obj_get(item, "st_status"), 0);
-    int rw = as_int_or_default(yyjson_obj_get(item, "is_risk_warning"), 0);
-    int sp = as_int_or_default(yyjson_obj_get(item, "suspended"), 0);
+void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
+            std::vector<std::mutex> * /*mu*/) {
+  replay_grid(rows, axes, CUTOFF, [&](std::size_t off, const AggregateRow &r) {
     // 4 态派生: st_status 优先 (1/2), 否则 is_risk_warning 兜底退市整理期 → 3.
-    int8_t out_st = (st == 1)            ? int8_t{1}
-                    : (st == 2)          ? int8_t{2}
-                    : (rw != 0)          ? int8_t{3}
-                                         : int8_t{0};
+    int8_t out_st = (r.i0 == 1)   ? int8_t{1}
+                    : (r.i0 == 2) ? int8_t{2}
+                    : (r.i1 != 0) ? int8_t{3}
+                                  : int8_t{0};
     pool.status.st_status[off] = out_st;
-    pool.status.suspended[off] = (sp != 0) ? uint8_t{1} : uint8_t{0};
-  }
+    pool.status.suspended[off] = (r.i2 != 0) ? uint8_t{1} : uint8_t{0};
+  });
 }
 
 // 不做 ffill — cn_stock_status 是盘前全量快照, 缺日 (无文件) = 数据起点前/拉取漏日,
@@ -390,40 +444,31 @@ void prealloc(const Axes &axes, PitPool &p) {
   grid_prealloc_float(p.margin_detail.securities_lending_balance, n);
 }
 
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> * /*mu*/) {
-  assert(arr && yyjson_is_arr(arr));
-  if (v_idx < 0)
-    return;
-  int n_d = axes.n_d();
-  int row = v_idx - CUTOFF;
-  if (row >= n_d)
-    return;
-  std::size_t base_off = static_cast<std::size_t>(row);
+void aggregate(yyjson_val *arr, std::string_view day,
+               std::vector<AggregateRow> &out) {
+  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
+    r.f0 = as_float_or_nan(yyjson_obj_get(item, "financing_balance"));
+    r.f1 = as_float_or_nan(yyjson_obj_get(item, "securities_lending_balance"));
+    return true;
+  });
+}
 
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, item, "instrument");
-    if (a < 0)
-      continue;
-    std::size_t off = static_cast<std::size_t>(a) *
-                          static_cast<std::size_t>(n_d) +
-                      base_off;
+void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
+            std::vector<std::mutex> * /*mu*/) {
+  replay_grid(rows, axes, CUTOFF, [&](std::size_t off, const AggregateRow &r) {
     pool.margin_detail.is_margin[off] = 1;
-    pool.margin_detail.financing_balance[off] = non_negative_or_inf(
-        as_float_or_nan(yyjson_obj_get(item, "financing_balance")));
-    pool.margin_detail.securities_lending_balance[off] = non_negative_or_inf(
-        as_float_or_nan(yyjson_obj_get(item, "securities_lending_balance")));
-  }
+    pool.margin_detail.financing_balance[off] = non_negative_or_inf(r.f0);
+    pool.margin_detail.securities_lending_balance[off] =
+        non_negative_or_inf(r.f1);
+  });
 }
 
-void post_ffill(const Axes &axes, PitPool &p) {
-  int n_a = axes.n_a(), n_d = axes.n_d();
-  // is_margin 不做 ffill — 缺席日 (周末/节假日已被 floor; 真正的 0 表示当日不在两融名单)
-  grid_ffill(p.margin_detail.financing_balance, n_a, n_d);
-  grid_ffill(p.margin_detail.securities_lending_balance, n_a, n_d);
-}
+// 不做 ffill — financing_balance / securities_lending_balance 与 is_margin 对齐:
+//   非两融标的日没有 day file 行 ⇒ prealloc 默认 NaN (balance) + 0 (is_margin),
+//   不该 ffill 把"前一天还是两融余额"延续到"今天已退出名单"的日子. is_margin=0 ∧
+//   balance != NaN 是语义不一致 (实测 mr_bal_raw 2024 %finite 比 is_margin %+ 多
+//   2.25%, 全部是 ffill 把退名单后的余额延续了).
+//   是两融标的但 day file 缺日 (罕见, 数据 quality 缺口) 同样 NaN, 不外推.
 
 } // namespace itf_cn_stock_margin_trading_detail
 
@@ -444,33 +489,22 @@ void prealloc(const Axes &axes, PitPool &p) {
   event_prealloc(p.industry_component, static_cast<std::size_t>(axes.n_a()));
 }
 
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> *mu) {
-  assert(arr && yyjson_is_arr(arr));
-  assert(mu);
-  if (v_idx < 0)
-    return;
-  int row = v_idx - CUTOFF;
-  if (row >= axes.n_d())
-    return;
-
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
+void aggregate(yyjson_val *arr, std::string_view day,
+               std::vector<AggregateRow> &out) {
+  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
     const char *ind = as_cstr_or_null(yyjson_obj_get(item, "industry"));
     if (!ind || std::strcmp(ind, "sw2021") != 0)
-      continue;
-    int a = lookup_a(axes, item, "instrument");
-    if (a < 0)
-      continue;
-    const char *l1n = as_cstr_or_null(yyjson_obj_get(item, "industry_level1_name"));
-    uint8_t l1_id = sw2021_l1_name_to_id(l1n ? std::string_view(l1n) : std::string_view());
-    IndustryComponentEv ev{row, l1_id};
-    {
-      std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.industry_component[a].push_back(ev);
-    }
-  }
+      return false;
+    r.s0 = as_str(yyjson_obj_get(item, "industry_level1_name"));
+    return true;
+  });
+}
+
+void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
+            std::vector<std::mutex> *mu) {
+  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
+    pool.industry_component[a].push_back({row, sw2021_l1_name_to_id(r.s0)});
+  });
 }
 
 void post_sort(PitPool &p) { event_post_sort(p.industry_component); }
@@ -488,39 +522,26 @@ void prealloc(const Axes &axes, PitPool &p) {
   event_prealloc(p.industry_change, static_cast<std::size_t>(axes.n_a()));
 }
 
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> *mu) {
-  assert(arr && yyjson_is_arr(arr));
-  assert(mu);
-  if (v_idx < 0)
-    return;
-  int row = v_idx - CUTOFF;
-  if (row >= axes.n_d())
-    return;
-
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
+void aggregate(yyjson_val *arr, std::string_view day,
+               std::vector<AggregateRow> &out) {
+  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
     const char *ind = as_cstr_or_null(yyjson_obj_get(item, "industry"));
     if (!ind || std::strcmp(ind, "sw2021") != 0)
-      continue;
-    int level = as_int_or_default(yyjson_obj_get(item, "industry_level"), 0);
-    if (level != 1)
-      continue;
-    int flag = as_int_or_default(yyjson_obj_get(item, "change_flag"), -1);
-    if (flag != 1)
-      continue;
-    int a = lookup_a(axes, item, "instrument");
-    if (a < 0)
-      continue;
-    const char *nm = as_cstr_or_null(yyjson_obj_get(item, "industry_name"));
-    uint8_t l1_id = sw2021_l1_name_to_id(nm ? std::string_view(nm) : std::string_view());
-    IndustryChangeEv ev{row, l1_id};
-    {
-      std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.industry_change[a].push_back(ev);
-    }
-  }
+      return false;
+    if (as_int_or_default(yyjson_obj_get(item, "industry_level"), 0) != 1)
+      return false;
+    if (as_int_or_default(yyjson_obj_get(item, "change_flag"), -1) != 1)
+      return false;
+    r.s0 = as_str(yyjson_obj_get(item, "industry_name"));
+    return true;
+  });
+}
+
+void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
+            std::vector<std::mutex> *mu) {
+  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
+    pool.industry_change[a].push_back({row, sw2021_l1_name_to_id(r.s0)});
+  });
 }
 
 void post_sort(PitPool &p) { event_post_sort(p.industry_change); }
@@ -538,32 +559,21 @@ void prealloc(const Axes &axes, PitPool &p) {
   event_prealloc(p.dividend, static_cast<std::size_t>(axes.n_a()));
 }
 
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> *mu) {
-  assert(arr && yyjson_is_arr(arr));
-  assert(mu);
-  if (v_idx < 0)
-    return;
-  int row = v_idx - CUTOFF;
-  if (row >= axes.n_d())
-    return;
+void aggregate(yyjson_val *arr, std::string_view day,
+               std::vector<AggregateRow> &out) {
+  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
+    r.s0 = as_str(yyjson_obj_get(item, "report_date"));
+    r.s1 = as_str(yyjson_obj_get(item, "ex_date"));
+    r.f0 = as_float_or_nan(yyjson_obj_get(item, "cash_after_tax"));
+    return true;
+  });
+}
 
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, item, "instrument");
-    if (a < 0)
-      continue;
-    DividendEv ev;
-    ev.v = row;
-    ev.report_date = as_str(yyjson_obj_get(item, "report_date"));
-    ev.ex_date = as_str(yyjson_obj_get(item, "ex_date"));
-    ev.cash_after_tax = as_float_or_nan(yyjson_obj_get(item, "cash_after_tax"));
-    {
-      std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.dividend[a].push_back(std::move(ev));
-    }
-  }
+void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
+            std::vector<std::mutex> *mu) {
+  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
+    pool.dividend[a].push_back({row, r.s0, r.s1, r.f0});
+  });
 }
 
 void post_sort(PitPool &p) { event_post_sort(p.dividend); }
@@ -573,7 +583,7 @@ void post_sort(PitPool &p) { event_post_sort(p.dividend); }
 namespace itf_cn_stock_financial_ttm_shift {
 
 // cn_stock_financial_ttm_shift: 财务 TTM 时序 (only shift=0 入 EventStore).
-//   parse 过滤 shift!=0; shift=0 = BigQuant 给定的"该 visible_date 最新报告期 TTM"
+//   aggregate 过滤 shift!=0; shift=0 = BigQuant 给定的"该 visible_date 最新报告期 TTM"
 //   (含意随披露季节漂移). per-A 沿 v 升序, 同 (instrument, visible_date) 该次披露
 //   shift=0 单条; 跨 visible_date 多条 ⇒ feature 层走 max v.
 constexpr int CUTOFF = -1;
@@ -582,38 +592,25 @@ void prealloc(const Axes &axes, PitPool &p) {
   event_prealloc(p.financial_ttm, static_cast<std::size_t>(axes.n_a()));
 }
 
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> *mu) {
-  assert(arr && yyjson_is_arr(arr));
-  assert(mu);
-  if (v_idx < 0)
-    return;
-  int row = v_idx - CUTOFF;
-  if (row >= axes.n_d())
-    return;
-
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int shift = as_int_or_default(yyjson_obj_get(item, "shift"), -1);
-    if (shift != 0)
-      continue;
-    int a = lookup_a(axes, item, "instrument");
-    if (a < 0)
-      continue;
-    FinancialTtmEv ev;
-    ev.v = row;
-    ev.report_date = as_str(yyjson_obj_get(item, "report_date"));
-    ev.total_operating_revenue_ttm = as_float_or_nan(
-        yyjson_obj_get(item, "total_operating_revenue_ttm"));
-    ev.net_profit_to_parent_shareholders_ttm = as_float_or_nan(
+void aggregate(yyjson_val *arr, std::string_view day,
+               std::vector<AggregateRow> &out) {
+  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
+    if (as_int_or_default(yyjson_obj_get(item, "shift"), -1) != 0)
+      return false;
+    r.s0 = as_str(yyjson_obj_get(item, "report_date"));
+    r.f0 = as_float_or_nan(yyjson_obj_get(item, "total_operating_revenue_ttm"));
+    r.f1 = as_float_or_nan(
         yyjson_obj_get(item, "net_profit_to_parent_shareholders_ttm"));
-    ev.net_cffoa_ttm = as_float_or_nan(yyjson_obj_get(item, "net_cffoa_ttm"));
-    {
-      std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.financial_ttm[a].push_back(std::move(ev));
-    }
-  }
+    r.f2 = as_float_or_nan(yyjson_obj_get(item, "net_cffoa_ttm"));
+    return true;
+  });
+}
+
+void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
+            std::vector<std::mutex> *mu) {
+  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
+    pool.financial_ttm[a].push_back({row, r.s0, r.f0, r.f1, r.f2});
+  });
 }
 
 void post_sort(PitPool &p) { event_post_sort(p.financial_ttm); }
@@ -632,35 +629,23 @@ void prealloc(const Axes &axes, PitPool &p) {
   event_prealloc(p.financial_balance, static_cast<std::size_t>(axes.n_a()));
 }
 
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> *mu) {
-  assert(arr && yyjson_is_arr(arr));
-  assert(mu);
-  if (v_idx < 0)
-    return;
-  int row = v_idx - CUTOFF;
-  if (row >= axes.n_d())
-    return;
-
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, item, "instrument");
-    if (a < 0)
-      continue;
-    FinancialBalanceEv ev;
-    ev.v = row;
-    ev.report_date = as_str(yyjson_obj_get(item, "report_date"));
-    ev.total_owner_equity = as_float_or_nan(
-        yyjson_obj_get(item, "total_owner_equity"));
-    ev.total_equity_to_parent_shareholders = as_float_or_nan(
+void aggregate(yyjson_val *arr, std::string_view day,
+               std::vector<AggregateRow> &out) {
+  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
+    r.s0 = as_str(yyjson_obj_get(item, "report_date"));
+    r.f0 = as_float_or_nan(yyjson_obj_get(item, "total_owner_equity"));
+    r.f1 = as_float_or_nan(
         yyjson_obj_get(item, "total_equity_to_parent_shareholders"));
-    ev.total_assets = as_float_or_nan(yyjson_obj_get(item, "total_assets"));
-    {
-      std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.financial_balance[a].push_back(std::move(ev));
-    }
-  }
+    r.f2 = as_float_or_nan(yyjson_obj_get(item, "total_assets"));
+    return true;
+  });
+}
+
+void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
+            std::vector<std::mutex> *mu) {
+  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
+    pool.financial_balance[a].push_back({row, r.s0, r.f0, r.f1, r.f2});
+  });
 }
 
 void post_sort(PitPool &p) { event_post_sort(p.financial_balance); }
@@ -670,7 +655,7 @@ void post_sort(PitPool &p) { event_post_sort(p.financial_balance); }
 namespace itf_cn_stock_financial_income_general_pit {
 
 // cn_stock_financial_income_general_pit: 利润表 PIT.
-//   parse 过滤 fs_quarter_index != 4 (只入年报), 给 ni_raw 用 (dividend_st 阈值).
+//   aggregate 过滤 fs_quarter_index != 4 (只入年报), 给 ni_raw 用 (dividend_st 阈值).
 //   字段 net_profit_to_parent_shareholders (归母年度 NI; 与 pe_raw / roe_raw 分子对仗).
 //   同 report_date 多版本 (修正) 取 max v.
 constexpr int CUTOFF = -1;
@@ -680,35 +665,23 @@ void prealloc(const Axes &axes, PitPool &p) {
                  static_cast<std::size_t>(axes.n_a()));
 }
 
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> *mu) {
-  assert(arr && yyjson_is_arr(arr));
-  assert(mu);
-  if (v_idx < 0)
-    return;
-  int row = v_idx - CUTOFF;
-  if (row >= axes.n_d())
-    return;
-
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int q = as_int_or_default(yyjson_obj_get(item, "fs_quarter_index"), -1);
-    if (q != 4)
-      continue;
-    int a = lookup_a(axes, item, "instrument");
-    if (a < 0)
-      continue;
-    FinancialIncomeAnnualEv ev;
-    ev.v = row;
-    ev.report_date = as_str(yyjson_obj_get(item, "report_date"));
-    ev.net_profit_to_parent_shareholders = as_float_or_nan(
+void aggregate(yyjson_val *arr, std::string_view day,
+               std::vector<AggregateRow> &out) {
+  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
+    if (as_int_or_default(yyjson_obj_get(item, "fs_quarter_index"), -1) != 4)
+      return false;
+    r.s0 = as_str(yyjson_obj_get(item, "report_date"));
+    r.f0 = as_float_or_nan(
         yyjson_obj_get(item, "net_profit_to_parent_shareholders"));
-    {
-      std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.financial_income_annual[a].push_back(std::move(ev));
-    }
-  }
+    return true;
+  });
+}
+
+void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
+            std::vector<std::mutex> *mu) {
+  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
+    pool.financial_income_annual[a].push_back({row, r.s0, r.f0});
+  });
 }
 
 void post_sort(PitPool &p) { event_post_sort(p.financial_income_annual); }
@@ -728,81 +701,26 @@ void prealloc(const Axes &axes, PitPool &p) {
   event_prealloc(p.forecast, static_cast<std::size_t>(axes.n_a()));
 }
 
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> *mu) {
-  assert(arr && yyjson_is_arr(arr));
-  assert(mu);
-  if (v_idx < 0)
-    return;
-  int row = v_idx - CUTOFF;
-  if (row >= axes.n_d())
-    return;
+void aggregate(yyjson_val *arr, std::string_view day,
+               std::vector<AggregateRow> &out) {
+  aggregate_rows(arr, day, "ts_code", out, [](yyjson_val *item, AggregateRow &r) {
+    r.s0 = as_str(yyjson_obj_get(item, "end_date"));
+    r.s1 = as_str(yyjson_obj_get(item, "type"));
+    r.f0 = as_float_or_nan(yyjson_obj_get(item, "last_parent_net"));
+    return true;
+  });
+}
 
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, item, "ts_code");
-    if (a < 0)
-      continue;
-    ForecastEv ev;
-    ev.v = row;
-    ev.end_date = as_str(yyjson_obj_get(item, "end_date"));
-    ev.type = as_str(yyjson_obj_get(item, "type"));
-    ev.last_parent_net = as_float_or_nan(yyjson_obj_get(item, "last_parent_net"));
-    {
-      std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.forecast[a].push_back(std::move(ev));
-    }
-  }
+void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
+            std::vector<std::mutex> *mu) {
+  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
+    pool.forecast[a].push_back({row, r.s0, r.s1, r.f0});
+  });
 }
 
 void post_sort(PitPool &p) { event_post_sort(p.forecast); }
 
 } // namespace itf_forecast
-
-// ============================================================================
-// 事件 itf (Tushare 占位 — 待 cn_stock_financial_changedate 迁移后清理)
-//   实际新基建未落地, parse 不会被触发, EventStore 永远空 →
-//   find_forecast_off_d 退化为只用 (Y+1, 4, 30) deadline_d (4 月底安全网兜底).
-// ============================================================================
-
-namespace itf_report {
-
-constexpr int CUTOFF = -1;
-
-void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.report, static_cast<std::size_t>(axes.n_a()));
-}
-
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> *mu) {
-  assert(arr && yyjson_is_arr(arr));
-  assert(mu);
-  if (v_idx < 0)
-    return;
-  int row = v_idx - CUTOFF;
-  if (row >= axes.n_d())
-    return;
-
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, item, "ts_code");
-    if (a < 0)
-      continue;
-    ReportEv ev;
-    ev.v = row;
-    ev.end_date = as_str(yyjson_obj_get(item, "end_date"));
-    {
-      std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.report[a].push_back(std::move(ev));
-    }
-  }
-}
-
-void post_sort(PitPool &p) { event_post_sort(p.report); }
-
-} // namespace itf_report
 
 // ============================================================================
 // ITFS[] 表 — 单点真理
@@ -813,49 +731,55 @@ void post_sort(PitPool &p) { event_post_sort(p.report); }
 const ItfDesc ITFS[] = {
     // ---- 网格 itf (新基建; 无锁) ----
     {"cn_stock_real_bar1d", false, &itf_cn_stock_real_bar1d::prealloc,
-     &itf_cn_stock_real_bar1d::parse, nullptr, &itf_cn_stock_real_bar1d::post_ffill},
+     &itf_cn_stock_real_bar1d::aggregate, &itf_cn_stock_real_bar1d::replay,
+     nullptr, &itf_cn_stock_real_bar1d::post_ffill},
     {"cn_stock_shares", false, &itf_cn_stock_shares::prealloc,
-     &itf_cn_stock_shares::parse, nullptr, &itf_cn_stock_shares::post_ffill},
+     &itf_cn_stock_shares::aggregate, &itf_cn_stock_shares::replay, nullptr,
+     &itf_cn_stock_shares::post_ffill},
     {"cn_stock_limit_price", false, &itf_cn_stock_limit_price::prealloc,
-     &itf_cn_stock_limit_price::parse, nullptr,
+     &itf_cn_stock_limit_price::aggregate, &itf_cn_stock_limit_price::replay,
+     nullptr,
      &itf_cn_stock_limit_price::post_ffill},
     {"cn_stock_status", false, &itf_cn_stock_status::prealloc,
-     &itf_cn_stock_status::parse, nullptr, nullptr},
+     &itf_cn_stock_status::aggregate, &itf_cn_stock_status::replay, nullptr,
+     nullptr},
     {"cn_stock_margin_trading_detail", false,
      &itf_cn_stock_margin_trading_detail::prealloc,
-     &itf_cn_stock_margin_trading_detail::parse, nullptr,
-     &itf_cn_stock_margin_trading_detail::post_ffill},
+     &itf_cn_stock_margin_trading_detail::aggregate,
+     &itf_cn_stock_margin_trading_detail::replay, nullptr, nullptr},
 
     // ---- 事件 itf (新基建; per-A mutex) ----
     {"cn_stock_industry_component", true,
      &itf_cn_stock_industry_component::prealloc,
-     &itf_cn_stock_industry_component::parse,
+     &itf_cn_stock_industry_component::aggregate,
+     &itf_cn_stock_industry_component::replay,
      &itf_cn_stock_industry_component::post_sort, nullptr},
     {"cn_stock_industry_change", true, &itf_cn_stock_industry_change::prealloc,
-     &itf_cn_stock_industry_change::parse,
+     &itf_cn_stock_industry_change::aggregate,
+     &itf_cn_stock_industry_change::replay,
      &itf_cn_stock_industry_change::post_sort, nullptr},
     {"cn_stock_dividend", true, &itf_cn_stock_dividend::prealloc,
-     &itf_cn_stock_dividend::parse, &itf_cn_stock_dividend::post_sort, nullptr},
+     &itf_cn_stock_dividend::aggregate, &itf_cn_stock_dividend::replay,
+     &itf_cn_stock_dividend::post_sort, nullptr},
     {"cn_stock_financial_ttm_shift", true,
      &itf_cn_stock_financial_ttm_shift::prealloc,
-     &itf_cn_stock_financial_ttm_shift::parse,
+     &itf_cn_stock_financial_ttm_shift::aggregate,
+     &itf_cn_stock_financial_ttm_shift::replay,
      &itf_cn_stock_financial_ttm_shift::post_sort, nullptr},
     {"cn_stock_financial_balance_general_pit", true,
      &itf_cn_stock_financial_balance_general_pit::prealloc,
-     &itf_cn_stock_financial_balance_general_pit::parse,
+     &itf_cn_stock_financial_balance_general_pit::aggregate,
+     &itf_cn_stock_financial_balance_general_pit::replay,
      &itf_cn_stock_financial_balance_general_pit::post_sort, nullptr},
     {"cn_stock_financial_income_general_pit", true,
      &itf_cn_stock_financial_income_general_pit::prealloc,
-     &itf_cn_stock_financial_income_general_pit::parse,
+     &itf_cn_stock_financial_income_general_pit::aggregate,
+     &itf_cn_stock_financial_income_general_pit::replay,
      &itf_cn_stock_financial_income_general_pit::post_sort, nullptr},
 
     // ---- 事件 itf (Tushare 保留) ----
-    {"forecast", true, &itf_forecast::prealloc, &itf_forecast::parse,
-     &itf_forecast::post_sort, nullptr},
-
-    // ---- 事件 itf (Tushare 占位; 数据未落地, parse 不会触发) ----
-    {"report", true, &itf_report::prealloc, &itf_report::parse,
-     &itf_report::post_sort, nullptr},
+    {"forecast", true, &itf_forecast::prealloc, &itf_forecast::aggregate,
+     &itf_forecast::replay, &itf_forecast::post_sort, nullptr},
 };
 
 const int ITFS_COUNT = static_cast<int>(sizeof(ITFS) / sizeof(ITFS[0]));
@@ -873,7 +797,7 @@ const int ITFS_COUNT = static_cast<int>(sizeof(ITFS) / sizeof(ITFS[0]));
 //   axes.n_d() == 0 ⇒ silent noop.
 //   instrument 不在 axes.code_idx ⇒ skip.
 //
-//   不取锁: 单线程调用 (load.cpp 在 ITFS[] 并行 parse 全部 join 后才调度本函数).
+//   不取锁: 单线程调用 (load.cpp 在 aggregate replay 全部结束后才调度本函数).
 // ============================================================================
 void apply_meta_overlays(const Axes &axes, PitPool &pool) {
   namespace fs = std::filesystem;
