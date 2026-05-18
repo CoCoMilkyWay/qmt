@@ -56,13 +56,16 @@ void cleanup_stale_month_dds(
 } // namespace
 
 // ============================================================================
-// write_meta — Static 表 DAI 单段响应直写 _meta/<name>.json
+// write_meta — Static / Snapshot 表 DAI 单段响应直写 _meta/<name>.json
 //   (emit_meta 表不走此路径, 见 aggregate_meta)
+//   Static  : 无 date 维, 整表全量.
+//   Snapshot: 有 date 列, 但 fetch 已用 MAX(<vd>) 子查询只取最新一天的全量.
 // ============================================================================
 
 void write_meta(const std::shared_ptr<arrow::Table> &t, const TableSpec &spec) {
-  assert(spec.kind == FetchKind::Static);
-  assert(!spec.emit_meta && "Static 表自有 _meta 路径, emit_meta 必须为 false");
+  assert(spec.kind == FetchKind::Static || spec.kind == FetchKind::Snapshot);
+  assert(!spec.emit_meta &&
+         "Static / Snapshot 表自有 _meta 路径, emit_meta 必须为 false");
   assert(t);
   yyjson_mut_doc *doc = table_to_json(t);
   misc::atomic_write_json(misc::store::meta_data_path(spec.name), doc);

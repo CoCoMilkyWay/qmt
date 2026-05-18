@@ -24,10 +24,10 @@ namespace {
 
 // 单 (day, itf) 任务: ItfDesc* 指向 pit.cpp 内 ITFS[] 的某一项
 struct Task {
-  std::string day;   // YYYYMMDD (file's day; 即 visible_date)
-  int         v_idx; // axes.floor_date(day); 网格场合 == axes.date_idx[day]
+  std::string day; // YYYYMMDD (file's day; 即 visible_date)
+  int v_idx;       // axes.floor_date(day); 网格场合 == axes.date_idx[day]
   const ItfDesc *itf;
-  fs::path    path;
+  fs::path path;
 };
 
 // 枚举 data/YYYY/MM/DD/<ITFS[i].file_name>.json 全部存在的文件 → tasks
@@ -38,33 +38,42 @@ std::vector<Task> enumerate_tasks(const Axes &axes) {
   assert(fs::exists(data_root));
 
   for (auto &y_ent : fs::directory_iterator(data_root)) {
-    if (!y_ent.is_directory()) continue;
+    if (!y_ent.is_directory())
+      continue;
     std::string y = y_ent.path().filename().string();
-    if (y.size() != 4 || !std::isdigit(static_cast<unsigned char>(y[0]))) continue;
+    if (y.size() != 4 || !std::isdigit(static_cast<unsigned char>(y[0])))
+      continue;
 
     for (auto &m_ent : fs::directory_iterator(y_ent.path())) {
-      if (!m_ent.is_directory()) continue;
+      if (!m_ent.is_directory())
+        continue;
       std::string m = m_ent.path().filename().string();
-      if (m.size() != 2) continue;
+      if (m.size() != 2)
+        continue;
 
       for (auto &d_ent : fs::directory_iterator(m_ent.path())) {
-        if (!d_ent.is_directory()) continue;
+        if (!d_ent.is_directory())
+          continue;
         std::string dd = d_ent.path().filename().string();
-        if (dd.size() != 2) continue;
+        if (dd.size() != 2)
+          continue;
 
         std::string day = y + m + dd;
         int v_idx = axes.floor_date(day);
         // axes.dates 第 0 项之前的事件 (visible_date < dates[0]) 没有可写入的行 D, 整体跳过
-        if (v_idx < 0) continue;
+        if (v_idx < 0)
+          continue;
 
         for (int i = 0; i < ITFS_COUNT; ++i) {
           const ItfDesc &itf = ITFS[i];
           fs::path p = d_ent.path() / (std::string(itf.file_name) + ".json");
-          if (!fs::exists(p)) continue;
+          if (!fs::exists(p))
+            continue;
           // 网格 itf 的 file's day 必须是交易日 (data 数据本身保证)
           if (!itf.is_event) {
             auto it = axes.date_idx.find(day);
-            if (it == axes.date_idx.end()) continue; // 极端: 网格落到非交易日, 跳过
+            if (it == axes.date_idx.end())
+              continue; // 极端: 网格落到非交易日, 跳过
           }
           tasks.push_back(Task{day, v_idx, &itf, std::move(p)});
         }
@@ -77,7 +86,8 @@ std::vector<Task> enumerate_tasks(const Axes &axes) {
 void process_task(const Task &t, const Axes &axes, PitPool &pool,
                   std::vector<std::mutex> &mu) {
   std::string buf = misc::read_file_all(t.path);
-  if (buf.empty()) return;
+  if (buf.empty())
+    return;
   yyjson_doc *doc = yyjson_read(buf.data(), buf.size(), 0);
   assert(doc);
   yyjson_val *root = yyjson_doc_get_root(doc);
@@ -107,7 +117,8 @@ void load_pit(const Axes &axes, PitPool &pool) {
   std::vector<std::mutex> mu(static_cast<std::size_t>(axes.n_a()));
 
   unsigned n_threads = misc::Affinity::core_count();
-  if (n_threads == 0) n_threads = 1;
+  if (n_threads == 0)
+    n_threads = 1;
   std::atomic<std::size_t> next{0};
   std::atomic<std::size_t> done{0};
   std::size_t total = tasks.size();
@@ -115,7 +126,8 @@ void load_pit(const Axes &axes, PitPool &pool) {
   auto worker = [&]() {
     for (;;) {
       std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
-      if (i >= total) break;
+      if (i >= total)
+        break;
       process_task(tasks[i], axes, pool, mu);
       done.fetch_add(1, std::memory_order_relaxed);
     }
@@ -123,18 +135,28 @@ void load_pit(const Axes &axes, PitPool &pool) {
 
   std::vector<std::thread> threads;
   threads.reserve(n_threads);
-  for (unsigned t = 0; t < n_threads; ++t) threads.emplace_back(worker);
-  for (auto &th : threads) th.join();
+  for (unsigned t = 0; t < n_threads; ++t)
+    threads.emplace_back(worker);
+  for (auto &th : threads)
+    th.join();
   assert(done.load() == total);
 
   // ---- 4. 通用 post_sort: 迭代 ITFS[] ----
   for (int i = 0; i < ITFS_COUNT; ++i) {
-    if (ITFS[i].post_sort) ITFS[i].post_sort(pool);
+    if (ITFS[i].post_sort)
+      ITFS[i].post_sort(pool);
   }
 
-  // ---- 5. 通用 post_ffill: 迭代 ITFS[] (网格 itf per-A forward fill) ----
+  // ---- 5. _meta overlay: 真盘前快照填充 row=last_d (hybrid 伪装收尾) ----
+  //   仅 hybrid itf (当前: status) 在实盘当日 day file 未入库时, 用 static_data
+  //   真盘前 09:00 值填充 row=last_d. 仅触及 row=last_d 一行, 历史天不动.
+  //   详见 pit.hpp::apply_meta_overlays 注释.
+  apply_meta_overlays(axes, pool);
+
+  // ---- 6. 通用 post_ffill: 迭代 ITFS[] (网格 itf per-A forward fill) ----
   for (int i = 0; i < ITFS_COUNT; ++i) {
-    if (ITFS[i].post_ffill) ITFS[i].post_ffill(axes, pool);
+    if (ITFS[i].post_ffill)
+      ITFS[i].post_ffill(axes, pool);
   }
 }
 

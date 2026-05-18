@@ -44,14 +44,15 @@ void update(std::string_view start, std::string_view end,
             << std::endl;
 
   for (const auto &spec : specs) {
-    // Static 单文件输出: lastupdate + 实际 _meta 文件双保险, 任一丢失即重抓.
+    // Static / Snapshot 单文件输出: lastupdate + 实际 _meta 文件双保险, 任一丢失即重抓.
     //   防止 lastupdate mark 完但 _meta 文件丢失 (磁盘/中断/外部 rm) 后永久跳过.
     //   emit_meta 表的 _meta 是末尾从 day file 聚合的产物, 不需要 verify 兜底
     //   (丢了下轮 update 自动重建).
+    bool is_meta_kind = (spec.kind == FetchKind::Static) ||
+                        (spec.kind == FetchKind::Snapshot);
     std::filesystem::path verify =
-        (spec.kind == FetchKind::Static)
-            ? misc::store::meta_data_path(spec.name)
-            : std::filesystem::path{};
+        is_meta_kind ? misc::store::meta_data_path(spec.name)
+                     : std::filesystem::path{};
     if (misc::store::should_skip_api(
             spec.name, ::config::PIPELINE_DEDUP_WINDOW_SECONDS, verify)) {
       std::cout << "\n[" << spec.name << "] skip (recently updated)";
@@ -64,10 +65,12 @@ void update(std::string_view start, std::string_view end,
       continue;
     }
 
-    // ---- Static: DAI 一次响应直写 _meta (无 date 维, 不走调度) ----
-    if (spec.kind == FetchKind::Static) {
+    // ---- Static / Snapshot: DAI 一次响应直写 _meta (单文件覆盖, 不走调度) ----
+    //   Static  : 无 date 维, fetch 内部忽略 start/end.
+    //   Snapshot: 有 date 列, fetch 取 [start, end] 内 MAX(<vd>) 一天.
+    if (is_meta_kind) {
       std::cout << "\n[" << spec.name << "] meta refresh ..." << std::flush;
-      auto t = fetch(client, spec, start, end); // Static 内部忽略 start/end
+      auto t = fetch(client, spec, start, end);
       int64_t n = t ? t->num_rows() : 0;
       store::write_meta(t, spec);
       std::cout << " " << n << " rows -> _meta" << std::endl;

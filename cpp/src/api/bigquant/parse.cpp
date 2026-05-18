@@ -285,7 +285,8 @@ bucket_by_visible_date(const std::shared_ptr<arrow::Table> &t,
                        const TableSpec &spec, std::string_view start,
                        std::string_view end) {
   assert(t);
-  assert(spec.kind != FetchKind::Static);
+  assert(spec.kind != FetchKind::Static && spec.kind != FetchKind::Snapshot &&
+         "Static / Snapshot 走 write_meta, 不应进 bucket_by_visible_date");
   assert(!spec.visible_date.empty());
 
   int vd_idx = field_index_of(*t, spec.visible_date);

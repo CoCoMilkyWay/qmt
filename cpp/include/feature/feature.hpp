@@ -25,7 +25,7 @@ struct Tensor;
 //
 //   分段: TS 段 (一切 per-A 沿 D 计算) → CS 段 (一切 per-D 沿 A 计算).
 //   段内不强分小类, 但聚集相似项以利对仗 (raw / derived / filter / pool):
-//     raw     = 网格直读或事件 ttm4 拼接 / meta 派生 (单位 [元/股/%/ratio/bool])
+//     raw     = 网格直读或事件 ttm12 拼接 / meta 派生 (单位 [元/股/%/ratio/bool])
 //     derived = TS 内由 raw 推 (单位通常 [bool] 或 [ratio])
 //     filter  = 状态机或单点判 → 排除位 [bool], 1 = 排除 (D, A)
 //     pool    = universe 母集 [bool]
@@ -33,7 +33,7 @@ struct Tensor;
 enum class F : int {
   // ============================== TS ==============================
   // raw 网格 — PitPool dense 直读 / 由 raw 直接相乘 (per-A 动态)
-  close_raw = 0, // bar1d.close (后复权 [元/股])
+  close_raw = 0, // bar1d.close (不复权 [元/股]; ← cn_stock_real_bar1d.close)
   mcap_raw,      // close_raw × shares.total_shares  ([元])
   fmcap_raw,     // close_raw × shares.total_float_shares  ([元])
   share_raw,     // shares.total_shares  ([股])
@@ -48,7 +48,7 @@ enum class F : int {
   ms_bal_raw,    // margin_detail.securities_lending_balance ([元])
   industry_l1,   // sw2021 一级行业 ID 0..31 (industry_component 月初 + industry_change 月内回放)
 
-  // raw 自算 — ttm4_ytd 拼接 (财务 itf 暂未落地数据 → events 空 → 全 NaN)
+  // raw 自算 — ttm12 拼接 (财务 itf 暂未落地数据 → events 空 → 全 NaN)
   rev_raw,
   ni_raw,
   pe_raw,
@@ -83,13 +83,13 @@ enum class F : int {
   close,
   mcap,
   fmcap,
-  pe_ttm4,
-  pb_ttm1,
-  ps_ttm4,
-  pcf_ttm4,
-  roe_ttm4,
-  roa_ttm4,
-  dy_ttm4,
+  pe_ttm12,
+  pb_ttm3,
+  ps_ttm12,
+  pcf_ttm12,
+  roe_ttm12,
+  roa_ttm12,
+  dy_ttm12,
 
   // pool (CS) — universe 母集
   pool,     // pool_b ∧ rank(mcap_raw asc) ≤ POOL_UNIVERSE_SIZE

@@ -22,10 +22,10 @@ const std::vector<TableSpec> SPECS = {
     // industry_component: 月初快照 (低频), 月内变动靠 industry_change 增量 cover.
     // industry∈{sw2021, sw2014, cs} 三套并存, 故 PK 含 industry.
     {"cn_stock_industry_component", "date", FetchKind::Partition, FetchFreq::MonthFirst, {"date", "instrument", "industry"}},
-    // industry_change: 行业进出事件; industry_level∈{1,2,3} 多级并存; change_flag∈{0进,1出} 同日同股同分类可双条.
+    // industry_change: 行业进出事件; industry_level∈{1,2,3} 多级并存; change_flag∈{0出,1进} 同日同股同分类可双条 (pit.cpp 仅取 1=进入新行业 一侧).
     {"cn_stock_industry_change", "date", FetchKind::Partition, FetchFreq::Day, {"date", "instrument", "industry", "industry_level", "change_flag"}},
-    // industry_bar1d: instrument 列实际是 industry_code; method 是计算方式 (算术/总股本/流通加权).
-    {"cn_stock_industry_bar1d", "date", FetchKind::Partition, FetchFreq::Day, {"date", "instrument", "method"}},
+    // industry_real_bar1d: 行业不复权日行情. instrument 列实际是 industry_code; method 是计算方式 (算术/总股本/流通加权).
+    {"cn_stock_industry_real_bar1d", "date", FetchKind::Partition, FetchFreq::Day, {"date", "instrument", "method"}},
     {"cn_stock_industry_valuation", "date", FetchKind::Partition, FetchFreq::Day, {"date", "instrument", "industry", "industry_level"}},
     // basic_info: 静态全市场快照 (Static, 无 date 列, 不入 per-day, 走 _meta).
     {"cn_stock_basic_info", "", FetchKind::Static, FetchFreq::Day, {"instrument"}},
@@ -46,8 +46,15 @@ const std::vector<TableSpec> SPECS = {
     {"cn_stock_name_change", "end_date", FetchKind::Where, FetchFreq::Day, {"instrument", "start_date", "end_date"}},
     // dragon_list: 同 date 同股可多条 (不同上榜原因).
     {"cn_stock_dragon_list", "date", FetchKind::Partition, FetchFreq::Day, {"date", "instrument", "reason"}},
-    {"cn_stock_bar1d", "date", FetchKind::Partition, FetchFreq::Day, {"date", "instrument"}},
+    // real_bar1d: 股票不复权日行情 (项目统一走未复权).
+    {"cn_stock_real_bar1d", "date", FetchKind::Partition, FetchFreq::Day, {"date", "instrument"}},
     {"cn_stock_limit_price", "date", FetchKind::Partition, FetchFreq::Day, {"date", "instrument"}},
+    // static_data: 真盘前 09:00 全市场快照 (含 upper_limit/lower_limit/suspended/st_status/
+    //   pre_close/adjust_factor/crd_buy_flag/crd_sell_flag/...). Snapshot kind → 只取 [s,e]
+    //   内最新一天 (MAX(date)) 一份, 落 data/_meta/cn_stock_static_data.json 单文件;
+    //   pit overlay 阶段把 4 字段 (upper/lower/suspended/st_status) 覆盖 row=last_d, 给
+    //   实盘当日提供真盘前可见数据 (历史走 cn_stock_limit_price + cn_stock_status day file).
+    {"cn_stock_static_data", "date", FetchKind::Snapshot, FetchFreq::Day, {"date", "instrument"}},
     // 同 (date, instrument, report_date) 通常单条 (服务端 PIT 已合并到最新 change_type).
     {"cn_stock_financial_income_general_pit", "date", FetchKind::Partition, FetchFreq::Day, {"date", "instrument", "report_date"}},
     {"cn_stock_financial_cashflow_general_pit", "date", FetchKind::Partition, FetchFreq::Day, {"date", "instrument", "report_date"}},
@@ -124,6 +131,17 @@ std::shared_ptr<arrow::Table> fetch(DaiClient &client, const TableSpec &spec,
             " WHERE " + spec.visible_date + " >= '" + ds + "' AND " +
             spec.visible_date + " <= '" + de + "')";
     }
+    return client.query(sql, {{"date", {ds, de}}});
+  }
+
+  if (spec.kind == FetchKind::Snapshot) {
+    // Snapshot: 取窗口内最新一天的全量行 (假日则顺延前; 与 MonthFirst MIN 对仗).
+    assert(spec.freq == FetchFreq::Day && "Snapshot 当前仅支持 FetchFreq::Day");
+    std::string sql = "SELECT * FROM " + spec.name + " WHERE " +
+                      spec.visible_date + " = (SELECT MAX(" +
+                      spec.visible_date + ") FROM " + spec.name + " WHERE " +
+                      spec.visible_date + " >= '" + ds + "' AND " +
+                      spec.visible_date + " <= '" + de + "')";
     return client.query(sql, {{"date", {ds, de}}});
   }
 

@@ -135,8 +135,8 @@ void import_parquet(std::string_view database_root,
     std::cout << "\n== " << yyyymm.substr(0, 4) << "-" << yyyymm.substr(4, 2)
               << " ==" << std::endl;
     for (const auto &spec : specs) {
-      if (spec.kind == FetchKind::Static)
-        continue; // 静态表只走 DAI (无 date 维度, 不切月)
+      if (spec.kind == FetchKind::Static || spec.kind == FetchKind::Snapshot)
+        continue; // Static / Snapshot 只走 DAI _meta (不切月; Snapshot 在线取 MAX 一日)
       // emit_meta 表 (trading_days/holidays) 跟普通 Partition+Day 一样切月, 下轮
       // bigquant::update 末尾自动从 day file 聚合 _meta, 无需 import 端特判.
 

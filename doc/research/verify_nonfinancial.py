@@ -1,7 +1,7 @@
 """验证 data/ 下非财务类特征所需数据是否符合预期 (stdlib only).
 
 非财务特征 → itf 源 → 验证项, 与 cpp/src/feature/{pit,feature}.cpp 对齐:
-  bar1d                          → close_raw / mcap_raw / fmcap_raw / daily_return
+  bar1d                          → close_raw / adjust_factor / mcap_raw / fmcap_raw / daily_return (hfq 链式, 内部叠 af)
   shares                         → share_raw / fmcap_raw
   limit_price                    → up_lim / dn_lim / limit_up / limit_dn
   status                         → susp / risk_warn
@@ -280,39 +280,53 @@ def check_grid_itf(itf_name, year_filter, required_fields, value_checks):
 
 
 def check_bar1d(year):
-    section("[grid] cn_stock_bar1d  →  close_raw")
+    section("[grid] cn_stock_real_bar1d  →  close_raw + adjust_factor")
     files_n = 0
     rows_total = 0
     bad_close = 0; bad_close_samples = []   # close 异常 (≤0 / 非数 / null 且非停牌)
-    susp_null_skipped = 0                   # close=null ∧ suspended=1: 停牌正常, ffill 兜
+    bad_af = 0; bad_af_samples = []         # adjust_factor 异常 (≤0 / 非数 / null 且非停牌)
+    susp_null_skipped = 0                   # close/af=null ∧ suspended=1: 停牌正常, ffill 兜
     rows_per_day = []
-    for ymd, fp in iter_day_files("cn_stock_bar1d", year):
+    for ymd, fp in iter_day_files("cn_stock_real_bar1d", year):
         files_n += 1
         arr = load_json(fp)
         rows_per_day.append((ymd, len(arr)))
         rows_total += len(arr)
-        # 同日 status cross-check: close=null 落在停牌票上是正常 (pit.cpp ffill 兜前值)
-        status_fp = fp[: -len("cn_stock_bar1d.json")] + "cn_stock_status.json"
+        # 同日 status cross-check: close/af=null 落在停牌票上是正常 (pit.cpp ffill 兜前值)
+        status_fp = fp[: -len("cn_stock_real_bar1d.json")] + "cn_stock_status.json"
         susp_map = {}
         if os.path.exists(status_fp):
             for r in load_json(status_fp):
                 susp_map[r.get("instrument")] = r.get("suspended")
         for rec in arr:
+            ins = rec.get("instrument")
+            is_susp = (susp_map.get(ins) == 1)
             v = rec.get("close")
             if v is None:
-                if susp_map.get(rec.get("instrument")) == 1:
+                if is_susp:
                     susp_null_skipped += 1
-                    continue
+                else:
+                    bad_close += 1
+                    if len(bad_close_samples) < ANOMALY_HEAD:
+                        bad_close_samples.append(
+                            f"{ymd} ins={ins} close=null (未停牌)")
+            elif not (isinstance(v, (int, float)) and v > 0):
                 bad_close += 1
                 if len(bad_close_samples) < ANOMALY_HEAD:
                     bad_close_samples.append(
-                        f"{ymd} ins={rec.get('instrument')} close=null (未停牌)")
-                continue
-            if not (isinstance(v, (int, float)) and v > 0):
-                bad_close += 1
-                if len(bad_close_samples) < ANOMALY_HEAD:
-                    bad_close_samples.append(
-                        f"{ymd} ins={rec.get('instrument')} close={v!r}")
+                        f"{ymd} ins={ins} close={v!r}")
+            af = rec.get("adjust_factor")
+            if af is None:
+                if not is_susp:
+                    bad_af += 1
+                    if len(bad_af_samples) < ANOMALY_HEAD:
+                        bad_af_samples.append(
+                            f"{ymd} ins={ins} adjust_factor=null (未停牌)")
+            elif not (isinstance(af, (int, float)) and af > 0):
+                bad_af += 1
+                if len(bad_af_samples) < ANOMALY_HEAD:
+                    bad_af_samples.append(
+                        f"{ymd} ins={ins} adjust_factor={af!r}")
     print(f"  files={files_n}  total_rows={rows_total}")
     if rows_per_day:
         ns = [n for _, n in rows_per_day if n > 0]
@@ -321,8 +335,9 @@ def check_bar1d(year):
             print(f"  rows/day  min={min(ns)} p05={ns_sorted[len(ns)//20]} "
                   f"med={ns_sorted[len(ns)//2]} max={max(ns)}")
     if susp_null_skipped:
-        print(f"  close=null 但停牌 (业务正常, ffill 兜, 不计 anomaly): {susp_null_skipped} 行")
+        print(f"  close/af=null 但停牌 (业务正常, ffill 兜, 不计 anomaly): {susp_null_skipped} 行")
     status("close ≤ 0 / 非数 / null 且未停牌", rows_total, bad_close, bad_close_samples)
+    status("adjust_factor ≤ 0 / 非数 / null 且未停牌", rows_total, bad_af, bad_af_samples)
 
 
 def check_shares(year):
@@ -574,7 +589,7 @@ def check_file_dates_in_axis(d_axis):
     """每个网格 itf 的 day file 路径日是否都在 trading_days 中."""
     section("[cross] day files YYYYMMDD ∈ trading_days?")
     grid_itfs = [
-        "cn_stock_bar1d",
+        "cn_stock_real_bar1d",
         "cn_stock_shares",
         "cn_stock_limit_price",
         "cn_stock_status",
@@ -601,7 +616,7 @@ def check_instruments_against_axis(arr_basic):
     print(f"  axis A size = {len(code_set)}")
     # 仅扫每个 itf 最近一天文件 (足够发现 schema 级问题)
     grid_itfs = [
-        "cn_stock_bar1d",
+        "cn_stock_real_bar1d",
         "cn_stock_shares",
         "cn_stock_limit_price",
         "cn_stock_status",

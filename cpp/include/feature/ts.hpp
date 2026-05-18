@@ -28,7 +28,7 @@ void compute_ts(const Axes &, const PitPool &, const StockMeta &, Tensor &);
 // 注: 事件 ev.v 已在 pit.cpp parse 时应用 raw cutoff, 即 ev.v = 首次可见的 row D.
 //   下游直接 `ev.v <= d` 判可见, 不再 +1.
 //
-// 1) ttm4_ytd_compute<Ev>:
+// 1) ttm12_compute<Ev>:
 //      按 v 升序回放 events, 维护 map<end_date, value> (latest version per end_date,
 //      可选 report_type=='1' 过滤; fina_indicator 不带 type → get_rt 返回空串接受全部);
 //      自动降级: 完整 X(t)+X(Y-1,12)-X(Y-1,M) → 缺同期 X(t)+X(Y-1,12)*(12-M)/12 → 缺年报 X(t)*12/M.
@@ -40,9 +40,9 @@ void compute_ts(const Axes &, const PitPool &, const StockMeta &, Tensor &);
 // ============================================================================
 
 template <class Ev, class GetReportType, class GetValue>
-void ttm4_ytd_compute(const std::vector<Ev> &events, int n_d,
-                      GetReportType get_rt, GetValue get_val,
-                      std::span<float> out) {
+void ttm12_compute(const std::vector<Ev> &events, int n_d,
+                   GetReportType get_rt, GetValue get_val,
+                   std::span<float> out) {
   std::fill(out.begin(), out.end(), std::nanf(""));
 
   std::map<std::string, float> latest;
@@ -76,7 +76,7 @@ void ttm4_ytd_compute(const std::vector<Ev> &events, int n_d,
     auto it_y_m = latest.find(buf_y_m);
 
     if (it_y_dec != latest.end() && it_y_m != latest.end()) {
-      // 完整 TTM4: X(t) + X(Y-1, 12) - X(Y-1, M)
+      // 完整 TTM12: X(t) + X(Y-1, 12) - X(Y-1, M)
       out[d] = x_t + it_y_dec->second - it_y_m->second;
     } else if (it_y_dec != latest.end()) {
       // 降级: 缺去年同期，用 X(t) + X(Y-1,12) * (12-M)/12 近似

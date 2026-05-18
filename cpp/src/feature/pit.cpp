@@ -2,11 +2,13 @@
 
 #include "feature/axis.hpp"
 #include "feature/industry.hpp"
+#include "misc/fs.hpp"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -23,8 +25,11 @@
 // 【raw cutoff 单点真理】每个 itf namespace 内 constexpr CUTOFF = 0 / -1:
 //   row D 的合法数据 = visible_date <= D + CUTOFF 的最新值
 //   ⇒ parse 时把 v_idx (= floor_date(visible_date)) 调整为 row = v_idx - CUTOFF:
-//     CUTOFF=0  (盘前 / 状态生效日): row = v_idx       (当日生效)
-//     CUTOFF=-1 (盘后 / 公告实时): row = v_idx + 1     (下一交易日生效)
+//     CUTOFF= 0: T 当日记录可见 — 适用 (a) 真盘前入库 (margin_trading_detail);
+//                                  (b) hybrid 伪装 (status 盘后入库但当日已生效),
+//                                      最后一天由 apply_meta_overlays 填充.
+//     CUTOFF=-1: 承认滞后 — 适用绝大多数盘后入库 itf (normal 模式).
+//   全局规则: 项目按业务可推出性选 hybrid; 其他全 normal -1, 详见 README §cutoff.
 //   网格 itf 写 pool[a*n_d + row]; 事件 itf ev.v = row.
 //   pool 即「row D 已 cutoff 的合法数据」, 下游 feature 直读 pool[base + d],
 //   不再关心 cutoff. 业务需要原始 visible 日期 (dividend 判 ann_y) 时,
@@ -82,8 +87,10 @@ inline const char *as_cstr_or_null(yyjson_val *v) {
 }
 
 inline int as_int_or_default(yyjson_val *v, int def) {
-  if (!v) return def;
-  if (yyjson_is_int(v)) return static_cast<int>(yyjson_get_int(v));
+  if (!v)
+    return def;
+  if (yyjson_is_int(v))
+    return static_cast<int>(yyjson_get_int(v));
   return def;
 }
 
@@ -147,16 +154,23 @@ inline void grid_ffill(std::vector<float> &grid, int n_a, int n_d) {
 // 网格 itf (新基建)
 // ============================================================================
 
-namespace itf_cn_stock_bar1d {
+namespace itf_cn_stock_real_bar1d {
 
-// cn_stock_bar1d: 后复权 OHLCV + adjust_factor; 当前张量层只用 close.
-//   入库时机: 盘后 17:00–19:30; CUTOFF=-1 → row D 拿 D-1 实际收盘.
+// cn_stock_real_bar1d: 不复权 OHLCV + 后复权乘子; 张量层只用 close + adjust_factor.
+//   入库时机: 盘后 17:00–20:00; CUTOFF=-1 → row D 拿 D-1 实际收盘.
+//   close          不复权 [元/股] 原值 (实际成交价, 除权日真实跳跃);
+//                    给 tensor 顶层 close_raw 用 (mcap / limit / low_p / cs_close ...).
+//   adjust_factor  BigQuant 后复权累积乘子 (close_hfq = close × adjust_factor);
+//                    仅 PitPool 内部流转, 不入 tensor 顶层契约;
+//                    给 ts_daily_return 内部叠出 hfq 链式收益 (= 含分红再投入).
+//   post_ffill 保证停牌日继承前值 (af 与 close 同 ffill, 停牌中 af 维持上一交易日值).
 constexpr int CUTOFF = -1;
 
 void prealloc(const Axes &axes, PitPool &p) {
   std::size_t n = static_cast<std::size_t>(axes.n_a()) *
                   static_cast<std::size_t>(axes.n_d());
   grid_prealloc_float(p.bar1d.close, n);
+  grid_prealloc_float(p.bar1d.adjust_factor, n);
 }
 
 void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
@@ -180,14 +194,18 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
                           static_cast<std::size_t>(n_d) +
                       base_off;
     pool.bar1d.close[off] = positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "close")));
+    pool.bar1d.adjust_factor[off] = positive_or_inf(
+        as_float_or_nan(yyjson_obj_get(item, "adjust_factor")));
   }
 }
 
 void post_ffill(const Axes &axes, PitPool &p) {
-  grid_ffill(p.bar1d.close, axes.n_a(), axes.n_d());
+  int n_a = axes.n_a(), n_d = axes.n_d();
+  grid_ffill(p.bar1d.close, n_a, n_d);
+  grid_ffill(p.bar1d.adjust_factor, n_a, n_d);
 }
 
-} // namespace itf_cn_stock_bar1d
+} // namespace itf_cn_stock_real_bar1d
 
 namespace itf_cn_stock_shares {
 
@@ -238,8 +256,10 @@ void post_ffill(const Axes &axes, PitPool &p) {
 
 namespace itf_cn_stock_limit_price {
 
-// cn_stock_limit_price: 当日适用涨跌停价 [元/股]. 盘前 08:40 入库, CUTOFF=0.
-constexpr int CUTOFF = 0;
+// cn_stock_limit_price: 当日适用涨跌停价 [元/股].
+//   实际 BigQuant 入库 17:00 (盘后) → CUTOFF=-1 (normal, 承认滞后).
+//   row D = T 取 T-1 day file 的 limit; ST 翻转日略不准, 接受不 overlay.
+constexpr int CUTOFF = -1;
 
 void prealloc(const Axes &axes, PitPool &p) {
   std::size_t n = static_cast<std::size_t>(axes.n_a()) *
@@ -290,10 +310,15 @@ void post_ffill(const Axes &axes, PitPool &p) {
 
 namespace itf_cn_stock_status {
 
-// cn_stock_status: 盘前 09:20 全量快照. CUTOFF=0.
-//   st_status int8: 0=正常, 1=ST, 2=*ST  → 直接读, 无需 ffill (盘前每日全量).
-//   suspended uint8: 0=正常, 1=停牌      → 直接读.
-//   (is_risk_warning / price_limit_status / exdr 暂未入张量)
+// cn_stock_status: 三个字段 st_status / suspended / (is_risk_warning 等暂不入).
+//   st_status int8: 0=正常, 1=ST, 2=*ST.
+//   suspended uint8: 0=正常, 1=停牌.
+//   实际 BigQuant 入库 17:00 (盘后) → CUTOFF=0 (hybrid 伪装, 假装盘前可见).
+//   历史 day file 按 row=v_idx 消化; 最后一天 (= 实盘当日, day file 尚未入库)
+//   由 apply_meta_overlays 用 cn_stock_static_data (真盘前 09:00) 填充
+//   suspended / st_status 两字段到 row=last_d.
+//   不做 ffill — 缺日 (无文件) 一律保持 0 (按"未知=正常"处理); 实盘当日缺日的
+//   填充责任移交 overlay.
 constexpr int CUTOFF = 0;
 
 void prealloc(const Axes &axes, PitPool &p) {
@@ -393,10 +418,12 @@ void post_ffill(const Axes &axes, PitPool &p) {
 
 namespace itf_cn_stock_industry_component {
 
-// cn_stock_industry_component: 月初 sw2021 一级行业归属快照 (MonthFirst, CUTOFF=0).
+// cn_stock_industry_component: 月初 sw2021 一级行业归属快照 (MonthFirst).
 //   每月仅 1 个 DD 文件 (visible_date = MIN(date) of month); 同 (D, instrument)
 //   下 industry∈{cs,sw2014,sw2021} 三套, 仅取 sw2021 入 ev.
-constexpr int CUTOFF = 0;
+//   实际 BigQuant 入库 17:00 (盘后) → CUTOFF=-1 (normal, 承认滞后).
+//   月初首日 industry_l1 自然延续上月 base (ts_industry_l1 last_id 单调推进).
+constexpr int CUTOFF = -1;
 
 void prealloc(const Axes &axes, PitPool &p) {
   event_prealloc(p.industry_component, static_cast<std::size_t>(axes.n_a()));
@@ -744,8 +771,8 @@ void post_sort(PitPool &p) { event_post_sort(p.fina_indicator); }
 
 const ItfDesc ITFS[] = {
     // ---- 网格 itf (新基建; 无锁) ----
-    {"cn_stock_bar1d", false, &itf_cn_stock_bar1d::prealloc,
-     &itf_cn_stock_bar1d::parse, nullptr, &itf_cn_stock_bar1d::post_ffill},
+    {"cn_stock_real_bar1d", false, &itf_cn_stock_real_bar1d::prealloc,
+     &itf_cn_stock_real_bar1d::parse, nullptr, &itf_cn_stock_real_bar1d::post_ffill},
     {"cn_stock_shares", false, &itf_cn_stock_shares::prealloc,
      &itf_cn_stock_shares::parse, nullptr, &itf_cn_stock_shares::post_ffill},
     {"cn_stock_limit_price", false, &itf_cn_stock_limit_price::prealloc,
@@ -785,5 +812,63 @@ const ItfDesc ITFS[] = {
 };
 
 const int ITFS_COUNT = static_cast<int>(sizeof(ITFS) / sizeof(ITFS[0]));
+
+// ============================================================================
+// apply_meta_overlays — hybrid PIT 收尾: 真盘前 _meta 快照填充 row=last_d
+//   当前唯一 overlay: cn_stock_static_data → status 2 字段 (suspended, st_status).
+//
+//   语义"填充而非覆盖": status CUTOFF=0 假装盘前, 实盘当日 (last_d) day file 还未
+//     入库时 row=last_d 是 prealloc 默认 0 (正常态); 本函数把 static_data 真盘前
+//     09:00 值写进去补齐. 历史 day file 已存在的天数 (T < last_d) 不被触碰
+//     (函数仅写 row=last_d 这一行, 不动其他 row).
+//
+//   _meta 不存在 ⇒ silent noop (历史回测 / 首轮 build 容错).
+//   axes.n_d() == 0 ⇒ silent noop.
+//   instrument 不在 axes.code_idx ⇒ skip.
+//
+//   不取锁: 单线程调用 (load.cpp 在 ITFS[] 并行 parse 全部 join 后才调度本函数).
+// ============================================================================
+void apply_meta_overlays(const Axes &axes, PitPool &pool) {
+  namespace fs = std::filesystem;
+  fs::path meta_path =
+      misc::git_root() / "data" / "_meta" / "cn_stock_static_data.json";
+  if (!fs::exists(meta_path))
+    return;
+
+  std::string buf = misc::read_file_all(meta_path);
+  if (buf.empty())
+    return;
+
+  int n_d = axes.n_d();
+  if (n_d <= 0)
+    return;
+  int last_d = n_d - 1;
+  std::size_t base_off = static_cast<std::size_t>(last_d);
+
+  yyjson_doc *doc = yyjson_read(buf.data(), buf.size(), 0);
+  assert(doc);
+  yyjson_val *root = yyjson_doc_get_root(doc);
+  assert(yyjson_is_arr(root));
+
+  size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(root, i, n, item) {
+    int a = lookup_a(axes, item, "instrument");
+    if (a < 0)
+      continue;
+    std::size_t off = static_cast<std::size_t>(a) *
+                          static_cast<std::size_t>(n_d) +
+                      base_off;
+
+    // status 2 字段 (suspended + st_status); limit_price 已改 CUTOFF=-1 normal,
+    // 不再 overlay (承认滞后, T 取 T-1 limit).
+    int st = as_int_or_default(yyjson_obj_get(item, "st_status"), 0);
+    int sp = as_int_or_default(yyjson_obj_get(item, "suspended"), 0);
+    pool.status.st_status[off] = static_cast<int8_t>(st);
+    pool.status.suspended[off] = (sp != 0) ? uint8_t{1} : uint8_t{0};
+  }
+
+  yyjson_doc_free(doc);
+}
 
 } // namespace feature

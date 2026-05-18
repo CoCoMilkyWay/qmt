@@ -30,18 +30,31 @@ struct Axes; // fwd decl
 // dense block (pit.cpp 内).
 //
 // 数据源 (BigQuant + Tushare 新基建):
+//   全部 BigQuant 表实际入库时间都是盘后 17:00 之后, 按 PIT 严格 = -1; 项目按业务可推出性
+//   分两类模式 (详见 README §cutoff 表):
+//     normal (CUTOFF=-1, 承认滞后): row D=T 取 T-1 day file 数据.
+//     hybrid (CUTOFF=0,  伪装盘前): 历史 day file 按 row=v_idx 消化 (假装盘前可见);
+//                                   最后一天 (= 实盘当日) day file 还没入库时, 由
+//                                   apply_meta_overlays 用 cn_stock_static_data
+//                                   (真盘前 09:00) 填充 row=last_d.
+//
 //   网格:
-//     bar1d                 ← cn_stock_bar1d         CUTOFF=-1 (盘后)
-//     shares                ← cn_stock_shares        CUTOFF=-1 (盘后)
-//     limit_price           ← cn_stock_limit_price   CUTOFF=0  (盘前)
-//     status                ← cn_stock_status        CUTOFF=0  (盘前 09:20 全量快照)
+//     bar1d                 ← cn_stock_real_bar1d    CUTOFF=-1 (normal)
+//     shares                ← cn_stock_shares        CUTOFF=-1 (normal)
+//     limit_price           ← cn_stock_limit_price   CUTOFF=-1 (normal, 不 overlay)
+//     status                ← cn_stock_status        CUTOFF=0  (hybrid, overlay)
 //     margin_detail         ← cn_stock_margin_trading_detail  CUTOFF=0
+//                              (真盘前 10:00 入库, normal offset=0 不滞后)
 //                              (含派生 is_margin = 当日 (D,A) 是否在两融名单)
+//   meta overlay (apply_meta_overlays, post_sort 之后 / post_ffill 之前):
+//     cn_stock_static_data (Snapshot, 真盘前 09:00, _meta 单文件) → 填充 row=last_d 的
+//       status.{suspended, st_status} 两字段. 仅触及 row=last_d 一行,
+//       历史天 (T < last_d) 完全不动. (limit_price 已退回 normal -1, 不再 overlay.)
 //   事件:
-//     industry_component    ← cn_stock_industry_component (sw2021)  CUTOFF=0  (月初快照)
-//     industry_change       ← cn_stock_industry_change (sw2021 L1)  CUTOFF=-1 (盘后)
-//     dividend              ← cn_stock_dividend                     CUTOFF=-1 (公告盘后)
-//     forecast              ← Tushare forecast                      CUTOFF=-1
+//     industry_component    ← cn_stock_industry_component (sw2021)  CUTOFF=-1 (normal, 月初快照)
+//     industry_change       ← cn_stock_industry_change (sw2021 L1)  CUTOFF=-1 (normal)
+//     dividend              ← cn_stock_dividend                     CUTOFF=-1 (normal)
+//     forecast              ← Tushare forecast                      CUTOFF=-1 (normal)
 //
 //   财务事件 (用户决策: 财务部分暂保留旧 Tushare itf 不动, 实际数据未在新基建落地,
 //   parse 不会被触发; EventStore 永远空, 财务 raw feature 全 NaN — 后续单独迁移):
@@ -50,10 +63,22 @@ struct Axes; // fwd decl
 
 // ========== 网格 ==========
 
-// cn_stock_bar1d (CUTOFF=-1): 后复权 OHLCV + adjust_factor.
-//   当前张量层只用 close (后复权); 其余字段后续按需扩展.
+// cn_stock_real_bar1d (CUTOFF=-1): 不复权 OHLCV + 后复权乘子.
+//   close            不复权 [元/股] (实际市场成交价, 除权日自然跳跃)
+//   adjust_factor    BigQuant 后复权累积乘子 (close_hfq[d] = close[d] × adjust_factor[d]):
+//                      - 平日 af 不变, close 变化 = close×af 变化 = 真实日收益
+//                      - 除权日 close 跳 (含分红/送股), af 反向跳, close×af 平滑
+//                      - 起点附近 af ≈ 累积初值 (e.g. 平安银行 2024-06 ≈ 116)
+//   PitPool 暴露 close + adjust_factor; tensor 顶层只暴露 close_raw (= close 真价).
+//   estimation 类 (mcap_raw / limit_up / low_p / cs_close / ...) 全部用 close_raw 真值 —
+//   close × shares = 真市值; close vs limit_price 同口径才能判封板; < 1 元低价股看真实股价.
+//   连续性类 (daily_return; 未来 momentum / vol / N 日收益) 内部叠 adjust_factor 算
+//   hfq 链式 (= 含分红再投入的真持有收益, 除权日平滑无负跳; 见 feature.cpp::ts_daily_return).
+//   adjust_factor 是 PitPool 内部细节, 不入 tensor 顶层契约 (按"额外复权/偏移
+//   由特征自己内部处理, 不暴露顶层"原则).
 struct GridBar1d {
   std::vector<float> close;
+  std::vector<float> adjust_factor;
 };
 
 // cn_stock_shares (CUTOFF=-1): 各类股本 [股].
@@ -63,16 +88,22 @@ struct GridShares {
   std::vector<float> total_float_shares;
 };
 
-// cn_stock_limit_price (CUTOFF=0): 当日适用涨跌停价 [元/股] (盘前 08:40 入库).
+// cn_stock_limit_price (CUTOFF=-1, normal): 当日适用涨跌停价 [元/股].
+//   实际 BigQuant 入库 17:00 (盘后) → 承认滞后, row D=T 取 T-1 day file 的 limit.
+//   ST 翻转日略不准 (T-1 是停牌日, T-1 limit 是旧 pct), 接受不 overlay.
 struct GridLimitPrice {
   std::vector<float> upper_limit;
   std::vector<float> lower_limit;
 };
 
-// cn_stock_status (CUTOFF=0): 盘前 09:20 全量快照. 三个字段:
+// cn_stock_status (CUTOFF=0, hybrid 伪装): 两个字段:
 //   st_status         int8: 0=正常, 1=ST, 2=*ST  → risk_warn 直读
 //   suspended         uint8: 0/1                  → susp 直读 (1=当日停牌)
 //   (is_risk_warning / price_limit_status / exdr 暂未入张量)
+//   实际 BigQuant 入库 17:00 (盘后), 但 ST / 停牌当日开盘前即生效 → 业务上等同
+//   "盘前可知". 历史 day file 按 CUTOFF=0 假装盘前; 最后一天 (= 实盘当日, day file
+//   还未入库) 由 apply_meta_overlays 用 cn_stock_static_data 真盘前 09:00 填充
+//   row=last_d.
 struct GridStatus {
   std::vector<int8_t> st_status;
   std::vector<uint8_t> suspended;
@@ -91,9 +122,10 @@ struct GridMarginDetail {
 
 // ========== 事件 ==========
 
-// cn_stock_industry_component WHERE industry='sw2021' (CUTOFF=0, MonthFirst):
+// cn_stock_industry_component WHERE industry='sw2021' (CUTOFF=-1, normal, MonthFirst):
 //   每月初一份 sw2021 一级行业归属快照. 同 (D, instrument) 单条.
 //   l1_id = sw2021_l1_name_to_id(industry_level1_name); 不在表内 → 0.
+//   月初首日 industry_l1 自然延续上月 base (ts_industry_l1 last_id 单调推进, 见 feature.cpp).
 struct IndustryComponentEv {
   int v;
   uint8_t l1_id; // sw2021 一级行业 ID (0=未知, 1..31)
@@ -213,5 +245,28 @@ struct ItfDesc {
 
 extern const ItfDesc ITFS[];
 extern const int ITFS_COUNT;
+
+// ============================================================================
+// apply_meta_overlays — Phase 1 末段 hook (post_sort 之后, post_ffill 之前)
+//
+// 当前唯一 overlay 源: cn_stock_static_data (真盘前 09:00 全市场快照, _meta 单文件).
+//   读 data/_meta/cn_stock_static_data.json (Snapshot kind, MAX(date) 一日全量行),
+//   把 2 字段填充到 row = axes.n_d() - 1 (= 最后一天 / 实盘当日):
+//     pool.status.suspended,  pool.status.st_status
+//
+// 设计动机 (hybrid 伪装, 兼顾"回测简洁 + 实盘正确 + 二者一致"):
+//   - status 历史 (T < last_d): 沿用 cn_stock_status day file (实际盘后 17:00 入库,
+//     张量层 CUTOFF=0 假装盘前可见).
+//   - status 最后一天 (T = last_d, 实盘当日 day file 还没入库): static_data 是真盘前
+//     数据, overlay 填入 row=last_d 即"交易时已可见且最新".
+//   - 仅写 row=last_d 一行, 历史天完全不动 ⇒ 填充而非覆盖语义.
+//   - 顺序要紧: 必须在 post_ffill 之前 — status 自身不做 ffill, 但其他 itf 可能做;
+//     overlay 写真值后 ffill 看到非默认值即不动它.
+//
+// 注: cn_stock_limit_price 已退回 CUTOFF=-1 normal (承认滞后), 不再 overlay.
+//
+// _meta/cn_stock_static_data.json 不存在 → silently noop (历史回测 / 首次 build 容错).
+// ============================================================================
+void apply_meta_overlays(const Axes &axes, PitPool &pool);
 
 } // namespace feature

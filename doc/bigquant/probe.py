@@ -260,7 +260,7 @@ PROBES = [
         "cn_stock_financial_ttm_shift",
         f"SELECT date,instrument,report_date,shift,operating_revenue_ttm,net_profit_ttm,net_profit_to_parent_shareholders_ttm,net_cffoa_ttm,net_cffia_ttm,net_cfffa_ttm FROM cn_stock_financial_ttm_shift WHERE instrument='{INST}' AND shift=0",
         {"date": [D, D]},
-        "★ shift=0 取最新一期; ttm 直接给, 砍 ttm4_ytd 自算",
+        "★ shift=0 取最新一期; ttm 直接给, 砍 ttm12 自算",
     ),
     Probe(
         "财务衍生 (财务附注 LF/MRQ/TTM)",
@@ -598,7 +598,7 @@ BigQuant DAI 接口探测  (26/26)  D=2024-12-31  INST=000001.SZ
 
 [25/26] 财务衍生 TTM (利润+现金流)
   itf=ttm_shift  table=cn_stock_financial_ttm_shift
-  note: ★ shift=0 取最新一期; ttm 直接给, 砍 ttm4_ytd 自算
+  note: ★ shift=0 取最新一期; ttm 直接给, 砍 ttm12 自算
   SQL: SELECT date,instrument,report_date,shift,operating_revenue_ttm,net_profit_ttm,net_profit_to_parent_shareholders_ttm,net_cffoa_ttm,net_cffia_ttm,net_cfffa_ttm FROM cn_stock_financial_ttm_shift WHERE instrument='000001.SZ' AND shift=0
   filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK

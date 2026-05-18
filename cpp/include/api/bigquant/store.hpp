@@ -13,16 +13,18 @@
 //   - 本模块负责 "arrow::Table → data/.../<name>.json (行式)" 这一段
 //
 // 三条出口路径:
-//   - Static (basic_info, 无 date 列)             → write_meta (DAI 单段响应直写 _meta)
-//   - Partition+Day / Where / MonthFirst          → write_by_visible_date (per-day day file)
-//   - Partition+Day 且 emit_meta=true (axis 源)   → 上一行落 day file + 末尾 aggregate_meta
+//   - Static (basic_info) / Snapshot (static_data) → write_meta (DAI 单段响应直写 _meta)
+//   - Partition+Day / Where / MonthFirst           → write_by_visible_date (per-day day file)
+//   - Partition+Day 且 emit_meta=true (axis 源)    → 上一行落 day file + 末尾 aggregate_meta
 //
 // 段切分调用方直走 misc::plan_day_segments / plan_month_segments.
 // ============================================================================
 namespace bigquant::store {
 
-// _meta 单文件全量刷新 (Static 表专用; DAI 一次响应直写, 不依赖 day file).
+// _meta 单文件全量刷新 (Static / Snapshot 表; DAI 一次响应直写, 不依赖 day file).
 //   行式 JSON 直接覆盖 data/_meta/<name>.json.
+//   Static  : 整表全量 (e.g. basic_info).
+//   Snapshot: 仅最新一天的全市场快照 (e.g. static_data).
 void write_meta(const std::shared_ptr<arrow::Table> &t, const TableSpec &spec);
 
 // Partition / Where × Day / MonthFirst → 按 visible_date 分桶, 每天写盘 (与 tushare::store::write_by_visible_date 对仗)

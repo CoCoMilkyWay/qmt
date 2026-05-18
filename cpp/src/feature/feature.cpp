@@ -198,7 +198,10 @@ inline void grid_copy_bool(int a, const Axes &axes, Tensor &T, F dst,
 
 } // namespace
 
-// close_raw ← cn_stock_bar1d.close (后复权 [元/股]). row D = D-1 实际收盘 (CUTOFF=-1).
+// close_raw ← cn_stock_real_bar1d.close (不复权 [元/股]).
+//   row D = D-1 实际收盘 (CUTOFF=-1). 不复权口径: close 是当日真实成交价,
+//   PIT-immutable (历史不随任何除权动作改写), 与 limit_price / total_shares
+//   同口径. daily_return 直接基于该 close 链式, 除权日含分红/送股的真实跳跃.
 void ts_close_raw(int a, const Axes &axes, const PitPool &pool,
                   const StockMeta &meta, Tensor &T) {
   grid_copy(a, axes, meta, T, F::close_raw,
@@ -206,9 +209,8 @@ void ts_close_raw(int a, const Axes &axes, const PitPool &pool,
 }
 
 // mcap_raw = close_raw[d] × shares.total_shares[a, d]  ([元])
-//   注: close_raw 是后复权; total_shares 是当前总股本快照.
-//       严格按 README §字段表"close_raw × share_raw"字面口径; 历史送股多的老票
-//       后复权 close 累积放大, 横截面对比会有偏差 (TODO 待与字段表一并 review).
+//   close_raw 即不复权 close (← cn_stock_real_bar1d.close), 与 total_shares 同口径,
+//   mcap_raw = 真实总市值 [元]; cross-section 排序与 low_mc 阈值判定均正确.
 void ts_mcap_raw(int a, const Axes &axes, const PitPool &pool,
                  const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
@@ -250,7 +252,7 @@ void ts_share_raw(int a, const Axes &axes, const PitPool &pool,
 }
 
 // 财务相关 raw (pb / ps / dy): 数据源 BigQuant cn_stock_financial_* 暂未迁移
-//   到 PitPool, 这里先输出全 NaN — 下游 cs_pb_ttm1 / cs_ps_ttm4 / cs_dy_ttm4 的
+//   到 PitPool, 这里先输出全 NaN — 下游 cs_pb_ttm3 / cs_ps_ttm12 / cs_dy_ttm12 的
 //   factor_pipeline 会跳 NaN, 等价于 disable 该 factor (横截面无可用样本 → 全 NaN).
 void ts_pb_raw(int a, const Axes &axes, const PitPool &,
                const StockMeta &, Tensor &T) {
@@ -306,7 +308,7 @@ void ts_dn_lim(int a, const Axes &axes, const PitPool &pool,
   fill_after_delist(out, a, axes, meta);
 }
 
-// susp ← cn_stock_status.suspended (盘前 09:20 全量快照, CUTOFF=0)
+// susp ← cn_stock_status.suspended (CUTOFF=0, hybrid 伪装假装盘前, last_d 由 static_data 填充)
 void ts_susp(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
              Tensor &T) {
   grid_copy_bool(a, axes, T, F::susp,
@@ -361,13 +363,13 @@ void ts_industry_l1(int a, const Axes &axes, const PitPool &pool,
 }
 
 // ============================================================================
-// TS: raw 自算 — ttm4_ytd 拼接 (依赖 mcap_raw 已就绪 → enum 顺序保证)
+// TS: raw 自算 — ttm12 拼接 (依赖 mcap_raw 已就绪 → enum 顺序保证)
 // ============================================================================
 
 void ts_rev_raw(int a, const Axes &axes, const PitPool &pool,
                 const StockMeta &meta, Tensor &T) {
   auto out = T.ts_row(F::rev_raw, a);
-  ttm4_ytd_compute(
+  ttm12_compute(
       pool.income[a], axes.n_d(),
       [](const IncomeEv &e) -> const std::string & { return e.report_type; },
       [](const IncomeEv &e) { return e.revenue; },
@@ -443,12 +445,12 @@ void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
   fill_after_delist(out, a, axes, meta);
 }
 
-// pe_raw: 自己算 mcap_raw / ttm4(n_income_attr_p)，支持负 PE（亏损）
+// pe_raw: 自己算 mcap_raw / ttm12(n_income_attr_p)，支持负 PE（亏损）
 void ts_pe_raw(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::vector<float> ni_ttm(n_d, std::nanf(""));
-  ttm4_ytd_compute(
+  ttm12_compute(
       pool.income[a], n_d,
       [](const IncomeEv &e) -> const std::string & { return e.report_type; },
       [](const IncomeEv &e) { return e.n_income_attr_p; },
@@ -469,7 +471,7 @@ void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool,
                 const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::vector<float> denom(n_d, std::nanf(""));
-  ttm4_ytd_compute(
+  ttm12_compute(
       pool.cashflow[a], n_d,
       [](const CashflowEv &e) -> const std::string & { return e.report_type; },
       [](const CashflowEv &e) { return e.n_cashflow_act; },
@@ -492,7 +494,7 @@ void ts_roe_raw(int a, const Axes &axes, const PitPool &pool,
                 const StockMeta &meta, Tensor &T) {
   static const std::string kEmpty;
   auto out = T.ts_row(F::roe_raw, a);
-  ttm4_ytd_compute(
+  ttm12_compute(
       pool.fina_indicator[a], axes.n_d(),
       [&](const FinaIndEv &) -> const std::string & { return kEmpty; },
       [](const FinaIndEv &e) { return e.roe; },
@@ -505,7 +507,7 @@ void ts_roa_raw(int a, const Axes &axes, const PitPool &pool,
                 const StockMeta &meta, Tensor &T) {
   static const std::string kEmpty;
   auto out = T.ts_row(F::roa_raw, a);
-  ttm4_ytd_compute(
+  ttm12_compute(
       pool.fina_indicator[a], axes.n_d(),
       [&](const FinaIndEv &) -> const std::string & { return kEmpty; },
       [](const FinaIndEv &e) { return e.roa; },
@@ -556,20 +558,38 @@ void ts_delist_age(int a, const Axes &axes, const PitPool &, const StockMeta &me
 // TS: derived — 由 raw 推 (TS 内依赖)
 // ============================================================================
 
-// daily_return: 前复权链式日收益. d==0 或 close_raw[d-1] NaN/0 → NaN.
-//   下游 benchmark = pool 内等权 daily_return 均值.
-void ts_daily_return(int a, const Axes &axes, const PitPool &, const StockMeta &,
-                     Tensor &T) {
+// daily_return: 后复权 close 链式日收益 (含分红再投入的真持有收益).
+//   tensor 顶层 close_raw 是不复权真价 (mcap / limit / low_p 等需要真值);
+//   "复权"是 daily_return 自身需要的内部细节 — 这里直接从 PitPool 读
+//   {close, adjust_factor} 在内部叠出 close_hfq[d] = close[d] × adjust_factor[d],
+//   再链式: ret[d] = close_hfq[d] / close_hfq[d-1] - 1.
+//   除权日 close 真跳, adjust_factor 反向跳, close × af 平滑 ⇒ ret 仅含日内真实涨跌
+//   (无除权日 -5%~-10% 假负跳; 与"持有不减仓"账户的真实收益对齐).
+//   前复权不 causal (起点会随未来除权事件追溯调整, 历史回测会泄漏未来), 不采用.
+//   d==0 或前一日 close/af 非 finite/0 → NaN.
+//   下游 benchmark = pool 内等权 mean.
+void ts_daily_return(int a, const Axes &axes, const PitPool &pool,
+                     const StockMeta &, Tensor &T) {
   int n_d = axes.n_d();
-  auto cl = T.ts_row(F::close_raw, a);
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  const auto &cl = pool.bar1d.close;
+  const auto &af = pool.bar1d.adjust_factor;
   auto out = T.ts_row(F::daily_return, a);
   if (n_d > 0)
     out[0] = std::nanf("");
   for (int d = 1; d < n_d; ++d) {
-    float c0 = cl[d - 1];
-    float c1 = cl[d];
-    out[d] = (is_finite(c0) && c0 != 0.0f && is_finite(c1)) ? (c1 / c0 - 1.0f)
-                                                            : std::nanf("");
+    std::size_t i0 = base + static_cast<std::size_t>(d - 1);
+    std::size_t i1 = base + static_cast<std::size_t>(d);
+    float c0 = cl[i0], c1 = cl[i1];
+    float a0 = af[i0], a1 = af[i1];
+    if (is_finite(c0) && is_finite(c1) && is_finite(a0) && is_finite(a1) &&
+        c0 != 0.0f && a0 != 0.0f) {
+      float h0 = c0 * a0;
+      float h1 = c1 * a1;
+      out[d] = (h0 != 0.0f) ? (h1 / h0 - 1.0f) : std::nanf("");
+    } else {
+      out[d] = std::nanf("");
+    }
   }
 }
 
@@ -784,7 +804,7 @@ void ts_dividend_st(int a, const Axes &axes, const PitPool &pool,
   apply_segment(next_apply_d, n_d, current_3ysum);
 }
 
-// risk_warn: 直读 cn_stock_status.st_status (盘前 09:20 全量快照, CUTOFF=0).
+// risk_warn: 直读 cn_stock_status.st_status (CUTOFF=0, hybrid 伪装假装盘前, last_d 由 static_data 填充).
 //   输出 0=正常, 1=ST, 2=*ST (int8 → float 直接 cast). 数据起点前一律 0
 //   (parse 时 prealloc 为 0, 文件不存在时不写, 保持初值).
 //   注: 旧版本走 stock_st (Tushare 每日 ST 名单 + ffill + namechange 段修正) 是
@@ -885,26 +905,26 @@ void cs_mcap(int d, const Axes &, Tensor &T, CsBufs &b) {
 void cs_fmcap(int d, const Axes &, Tensor &T, CsBufs &b) {
   factor_pipeline(d, F::fmcap_raw, F::fmcap, true, T, b.a);
 }
-void cs_pe_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::pe_raw, F::pe_ttm4, true, T, b.a);
+void cs_pe_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::pe_raw, F::pe_ttm12, true, T, b.a);
 }
-void cs_pb_ttm1(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::pb_raw, F::pb_ttm1, true, T, b.a);
+void cs_pb_ttm3(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::pb_raw, F::pb_ttm3, true, T, b.a);
 }
-void cs_ps_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::ps_raw, F::ps_ttm4, true, T, b.a);
+void cs_ps_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::ps_raw, F::ps_ttm12, true, T, b.a);
 }
-void cs_pcf_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::pcf_raw, F::pcf_ttm4, true, T, b.a);
+void cs_pcf_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::pcf_raw, F::pcf_ttm12, true, T, b.a);
 }
-void cs_roe_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::roe_raw, F::roe_ttm4, /*invert=*/false, T, b.a);
+void cs_roe_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::roe_raw, F::roe_ttm12, /*invert=*/false, T, b.a);
 }
-void cs_roa_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::roa_raw, F::roa_ttm4, false, T, b.a);
+void cs_roa_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::roa_raw, F::roa_ttm12, false, T, b.a);
 }
-void cs_dy_ttm4(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::dy_raw, F::dy_ttm4, false, T, b.a);
+void cs_dy_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::dy_raw, F::dy_ttm12, false, T, b.a);
 }
 
 // pool: pool_b ∧ rank(mcap_raw asc within pool_b) ≤ POOL_UNIVERSE_SIZE
@@ -925,7 +945,9 @@ void cs_pool(int d, const Axes &, Tensor &T, CsBufs &b) {
 
   int n = static_cast<int>(cands.size());
   int k = std::min(::config::POOL_UNIVERSE_SIZE, n);
-  if (k > 0) {
+  // k == n 时 cands.begin()+k == cands.end(), std::nth_element 第二参传 end 是 UB;
+  // 全部入选时无需分割, 跳过 nth_element.
+  if (k > 0 && k < n) {
     std::nth_element(cands.begin(), cands.begin() + k, cands.end(),
                      [](const auto &x, const auto &y) { return x.first < y.first; });
   }
@@ -1007,7 +1029,7 @@ const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES = {{
     {"ms_bal_raw", Kind::Inter, Axis::TimeSeries, &impl::ts_ms_bal_raw, nullptr},
     // industry_l1 — sw2021 一级行业 ID per (D, A) (component 月初 + change 月内回放)
     {"industry_l1", Kind::Inter, Axis::TimeSeries, &impl::ts_industry_l1, nullptr},
-    // raw 自算 — ttm4_ytd 拼接 (依赖 mcap_raw)
+    // raw 自算 — ttm12 拼接 (依赖 mcap_raw)
     {"rev_raw", Kind::Inter, Axis::TimeSeries, &impl::ts_rev_raw, nullptr},
     {"ni_raw", Kind::Inter, Axis::TimeSeries, &impl::ts_ni_raw, nullptr},
     {"pe_raw", Kind::Inter, Axis::TimeSeries, &impl::ts_pe_raw, nullptr},
@@ -1037,13 +1059,13 @@ const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES = {{
     {"close", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_close},
     {"mcap", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_mcap},
     {"fmcap", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_fmcap},
-    {"pe_ttm4", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pe_ttm4},
-    {"pb_ttm1", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pb_ttm1},
-    {"ps_ttm4", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_ps_ttm4},
-    {"pcf_ttm4", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pcf_ttm4},
-    {"roe_ttm4", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_roe_ttm4},
-    {"roa_ttm4", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_roa_ttm4},
-    {"dy_ttm4", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_dy_ttm4},
+    {"pe_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pe_ttm12},
+    {"pb_ttm3", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pb_ttm3},
+    {"ps_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_ps_ttm12},
+    {"pcf_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pcf_ttm12},
+    {"roe_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_roe_ttm12},
+    {"roa_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_roa_ttm12},
+    {"dy_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_dy_ttm12},
     // pool (CS) — universe 母集
     {"pool", Kind::Inter, Axis::CrossSection, nullptr, &impl::cs_pool},
     {"tradable", Kind::Inter, Axis::CrossSection, nullptr, &impl::cs_tradable},

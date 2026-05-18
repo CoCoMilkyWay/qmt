@@ -22,7 +22,11 @@ namespace bigquant {
 //               做服务端分区裁剪, 性能最佳.
 //   Where     : visible_date 不是分区列. 用 SQL WHERE 过滤
 //               (publish_date / end_date 等事件列).
-enum class FetchKind { Static, Partition, Where };
+//   Snapshot  : 有 date 列, 但仅取 [s,e] 内 MAX(<vd>) 一天的全量快照, 落
+//               data/_meta/<name>.json 单文件 (像 Static 一样不走 day file).
+//               用于"真盘前"表 (cn_stock_static_data 09:00) 给 PIT overlay
+//               最后一天 row D 用. 与 MonthFirst 对仗 (MIN vs MAX).
+enum class FetchKind { Static, Partition, Where, Snapshot };
 
 // 抓取频率 — 当前仅一张表 (industry_component) 用 MonthFirst.
 //   Day        : 在 [start, end] 闭区间内全量拉.
@@ -57,6 +61,8 @@ extern const std::vector<TableSpec> SPECS;
 //                           filters={"date":[start,end]}
 //   Where + Day           : "SELECT * FROM <name> WHERE <vd>>=start AND <vd><=end",
 //                           filters={}
+//   Snapshot              : WHERE <vd>=(SELECT MAX(<vd>) ... WHERE <vd> BETWEEN s AND e),
+//                           filters={"date":[start,end]}
 // 日期格式: "YYYYMMDD" (内部 dash 成 DAI 接受的 "YYYY-MM-DD").
 // ============================================================================
 std::shared_ptr<arrow::Table> fetch(DaiClient &client, const TableSpec &spec,

@@ -8,7 +8,7 @@ namespace analysis {
 // 因子诊断 + 分层分析. 计算 per-D 沿 A 截面统计, 写入 <git_root>/output/analysis/.
 //
 // 输入:
-//   - axes / T (factor_score, pool, daily_return, F::close .. F::dy_ttm4)
+//   - axes / T (factor_score, pool, daily_return, F::close .. F::dy_ttm12)
 //
 // 配置 (config.hpp):
 //   - ANALYSIS_N_QUANTILES (TAG 4 分层桶数)
