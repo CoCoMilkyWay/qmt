@@ -3,6 +3,7 @@
 #include "api/tushare/http.hpp"
 #include "api/tushare/store.hpp"
 #include "config.hpp"
+#include "misc/schedule.hpp"
 #include "misc/store.hpp"
 
 #include <iostream>
@@ -12,6 +13,8 @@ namespace tushare {
 // ============================================================================
 // Tushare fallback 流水线
 //   - 仅 3 张事件表 (forecast/express/disclosure); 其余 itf 一律走 bigquant
+//   - 调度统一走 misc::plan_fetch_segments (整月空洞→月段 / 局部→日段 / lookback)
+//   - 段 → task 由 strategy::segment_to_tasks 决定 (range API 1 task, per-day N tasks)
 // ============================================================================
 void update(std::string_view start, std::string_view end,
             const std::vector<InterfaceSpec> &specs, int lookback_days) {
@@ -30,20 +33,16 @@ void update(std::string_view start, std::string_view end,
       continue;
     }
 
-    std::cout << "\n[" << spec.name << "] scan ..." << std::flush;
-    auto missing =
-        misc::store::scan_missing_days(spec.name, start, end, lookback_days);
-    std::cout << " " << missing.size() << " day(s) to fetch" << std::endl;
+    std::cout << "\n[" << spec.name << "] plan ..." << std::flush;
+    auto segments = misc::plan_fetch_segments(spec.name, start, end,
+                                              lookback_days,
+                                              spec.strategy->can_range());
+    std::cout << " " << segments.size() << " segment(s)" << std::endl;
 
-    if (!missing.empty()) {
-      auto tasks = spec.strategy->plan(missing);
-      std::cout << "[" << spec.name << "] plan -> " << tasks.size()
-                << " fetch task(s)" << std::endl;
-
-      for (size_t i = 0; i < tasks.size(); i++) {
-        const auto &task = tasks[i];
-        std::cout << "  [" << (i + 1) << "/" << tasks.size() << "] "
-                  << task.start;
+    for (const auto &seg : segments) {
+      auto tasks = spec.strategy->segment_to_tasks(seg);
+      for (const auto &task : tasks) {
+        std::cout << "  " << task.start;
         if (task.end != task.start)
           std::cout << "~" << task.end;
         std::cout << " ... " << std::flush;

@@ -5,6 +5,7 @@
 #include "api/bigquant/store.hpp"
 #include "config.hpp"
 #include "misc/date.hpp"
+#include "misc/schedule.hpp"
 #include "misc/store.hpp"
 
 #include <arrow/table.h>
@@ -58,9 +59,8 @@ void update(std::string_view start, std::string_view end,
 
   std::cout << "[bigquant.update] " << start << " ~ " << end << " ("
             << specs.size() << " tables, lookback=" << lookback_days
-            << "d, dedup=" << ::config::PIPELINE_DEDUP_WINDOW_SECONDS
-            << "s, max_seg=" << ::config::BIGQUANT_FETCH_MAX_DAYS_PER_CALL
-            << "d)" << std::endl;
+            << "d, dedup=" << ::config::PIPELINE_DEDUP_WINDOW_SECONDS << "s)"
+            << std::endl;
 
   for (const auto &spec : specs) {
     if (misc::store::should_skip_api(spec.name,
@@ -83,19 +83,12 @@ void update(std::string_view start, std::string_view end,
 
     // ---- Day 频率 (Partition + Day / Where + Day) ----
     if (spec.freq == FetchFreq::Day) {
-      std::cout << "\n[" << spec.name << "] scan ..." << std::flush;
-      auto missing =
-          misc::store::scan_missing_days(spec.name, start, end, lookback_days);
-      std::cout << " " << missing.size() << " day(s) to fetch" << std::endl;
-
-      if (!missing.empty()) {
-        auto segments = misc::split_segments(
-            missing, ::config::BIGQUANT_FETCH_MAX_DAYS_PER_CALL);
-        std::cout << "[" << spec.name << "] plan -> " << segments.size()
-                  << " fetch segment(s)" << std::endl;
-        for (auto &[s, e] : segments) {
-          fetch_and_write_segment(client, spec, s, e);
-        }
+      std::cout << "\n[" << spec.name << "] plan ..." << std::flush;
+      auto segments = misc::plan_fetch_segments(spec.name, start, end,
+                                                lookback_days, /*can_range=*/true);
+      std::cout << " " << segments.size() << " segment(s)" << std::endl;
+      for (auto &seg : segments) {
+        fetch_and_write_segment(client, spec, seg.start, seg.end);
       }
       misc::store::mark_api_updated(spec.name);
       continue;

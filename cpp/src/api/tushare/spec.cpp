@@ -1,7 +1,7 @@
 #include "api/tushare/spec.hpp"
 #include "api/tushare/http.hpp"
-#include "config.hpp"
-#include "misc/date.hpp"
+
+#include <cassert>
 
 namespace tushare {
 
@@ -15,42 +15,26 @@ yyjson_doc *FetchStrategy::fetch(Http &http, const FetchTask &task,
 }
 
 // ============================================================================
-// RangeStrategy
+// MonthStrategy — 段 [s, e] → 1 task (range query)
 // ============================================================================
 
 std::vector<FetchTask>
-RangeStrategy::plan(const std::vector<std::string> &missing) const {
-  auto segments = misc::split_segments(missing, max_days_);
-
-  std::vector<FetchTask> tasks;
-  size_t n_variants = variant_values_.empty() ? 1 : variant_values_.size();
-  tasks.reserve(segments.size() * n_variants);
-
-  for (auto &[s, e] : segments) {
-    if (variant_values_.empty()) {
-      tasks.push_back({s, e, {{"start_date", s}, {"end_date", e}}});
-    } else {
-      for (auto &v : variant_values_) {
-        tasks.push_back(
-            {s, e, {{"start_date", s}, {"end_date", e}, {variant_key_, v}}});
-      }
-    }
-  }
-  return tasks;
+MonthStrategy::segment_to_tasks(const misc::FetchSegment &seg) const {
+  return {{seg.start, seg.end,
+           {{"start_date", seg.start}, {"end_date", seg.end}}}};
 }
 
 // ============================================================================
-// PerDayStrategy
+// PerDayStrategy — 段必为 [d, d]; 每个 day_param 一次 task
 // ============================================================================
 
 std::vector<FetchTask>
-PerDayStrategy::plan(const std::vector<std::string> &missing) const {
+PerDayStrategy::segment_to_tasks(const misc::FetchSegment &seg) const {
+  assert(seg.start == seg.end && "PerDay 段必为单日 (scheduler 已用 can_range=false 强制)");
   std::vector<FetchTask> tasks;
-  tasks.reserve(missing.size() * day_params_.size());
-  for (auto &d : missing) {
-    for (auto &p : day_params_) {
-      tasks.push_back({d, d, {{p, d}}});
-    }
+  tasks.reserve(day_params_.size());
+  for (auto &p : day_params_) {
+    tasks.push_back({seg.start, seg.end, {{p, seg.start}}});
   }
   return tasks;
 }
@@ -68,12 +52,12 @@ const std::vector<InterfaceSpec> SPECS = {
      "forecast_vip",
      {"ann_date"},
      {"ts_code", "end_date"},
-     std::make_shared<RangeStrategy>(::config::TUSHARE_FETCH_MAX_DAYS_PER_CALL)},
+     std::make_shared<MonthStrategy>()},
     {"express",
      "express_vip",
      {"ann_date"},
      {"ts_code", "end_date"},
-     std::make_shared<RangeStrategy>(::config::TUSHARE_FETCH_MAX_DAYS_PER_CALL)},
+     std::make_shared<MonthStrategy>()},
     {"disclosure",
      "disclosure_date",
      {"ann_date"},

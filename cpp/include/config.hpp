@@ -43,21 +43,23 @@ inline constexpr int TUSHARE_HTTP_RETRY_MAX = 4;        // 共 5 次尝试
 inline constexpr int TUSHARE_HTTP_RETRY_INTERVAL_SECONDS = 30;
 
 // ============================================================================
-// C. 抓取流水线 (main.cpp 主入口; 公共参数 + per-source 单段拉取上限)
+// C. 抓取流水线 (main.cpp 主入口; 公共参数)
 //   PIPELINE_START_DATE              首日; A 股财报电子化从 2015 起逐渐完整
 //   PIPELINE_LOOKBACK_DAYS           最近 N 日历日强制重拉 (PK upsert 幂等); ≥5 交易日兜底
 //   PIPELINE_DEDUP_WINDOW_SECONDS    单 itf 去重窗口: 上次成功距今 < 该值则跳过整段
 //                                    (时间戳落 data/_meta/<name>.lastupdate)
-//   <SRC>_FETCH_MAX_DAYS_PER_CALL    单次 fetch 跨度上限:
-//     BigQuant: DAI 无明显行限, 单年事件/财务 ~ 几万-几十万行, 1 年安全
-//     Tushare:  单次 8000 行硬限, 按月拉全市场仅几千行, 1 月安全
+// 单段切分语义 (bigquant Day + 所有 tushare 共用 misc::plan_fetch_segments):
+//   range-capable (bigquant Day / tushare MonthStrategy):
+//       missing 按自然月聚合, 月内 (clamp 到 outer) 全缺失 → 整月段; 否则 → 每个缺失日单段.
+//       lookback 强拉最近 N 个日历日, 通常落在当前月, 形成 N 个单日段, 避免为补 7 天拉一整月.
+//   per-day-only (tushare PerDayStrategy):
+//       scheduler 强制 [d, d] 单日段, strategy 按 day_params 数量倍增 task.
+//   bigquant DAI MonthFirst (industry_component): scan_missing_months → 整月段 (独立路径).
+//   bigquant Static: 全量整刷, 不走调度.
 // ============================================================================
 inline constexpr const char *PIPELINE_START_DATE = "20150101";
 inline constexpr int PIPELINE_LOOKBACK_DAYS = 7;
 inline constexpr int PIPELINE_DEDUP_WINDOW_SECONDS = 60 * 60;
-
-inline constexpr int BIGQUANT_FETCH_MAX_DAYS_PER_CALL = 365;
-inline constexpr int TUSHARE_FETCH_MAX_DAYS_PER_CALL = 31;
 
 // ============================================================================
 // C.1 BigQuant parquet 月数据库导入 (独立阶段, 与 DAI 完全解耦)
@@ -77,7 +79,12 @@ inline constexpr int TUSHARE_FETCH_MAX_DAYS_PER_CALL = 31;
 //   完整性: 整月原子 (中断不留脏月) + 整月覆盖 (已有月先删后写).
 // ============================================================================
 inline constexpr bool BIGQUANT_IMPORT = false;
-inline constexpr const char *BIGQUANT_DATABASE = "output/parquet";
+inline constexpr const char *BIGQUANT_DATABASE = "import/parquet";
+
+// BigQuant DAI 拉取的最早允许 visible_date (dashed, "YYYY-MM-DD"; prepare_query 处校验).
+//   API 额度有限按日刷新, 此日期之前的历史数据必须走 BIGQUANT_IMPORT 压缩 archive 通道,
+//   不再消耗在线调用配额. 任何 start < 本阈值的 DAI 查询在 prepare_query 直接 assert fail.
+inline constexpr const char *BIGQUANT_API_MIN_DATE = "2026-01-01";
 
 // ============================================================================
 // D. Pool (basic + universe)

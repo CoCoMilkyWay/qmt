@@ -1,6 +1,9 @@
 #include "api/bigquant/spec.hpp"
 
+#include "config.hpp"
+
 #include <cassert>
+#include <iostream>
 #include <string>
 #include <string_view>
 
@@ -85,6 +88,22 @@ PreparedQuery prepare_query(const TableSpec &spec, std::string_view start, std::
   // 非 Static: 必须有 visible_date + 完整 [start, end]
   assert(!spec.visible_date.empty() && "非 Static 表必须配 visible_date");
   assert(!start.empty() && !end.empty() && "非 Static 表必须传 [start, end]");
+
+  // 配额护栏: pre-cutoff 日期一律拒绝走 DAI (按日刷新的额度只留给近端增量).
+  //   start/end 已是 "YYYY-MM-DD" dashed 形式 (pipeline.cpp::to_dashed 保证),
+  //   字典序与时间序一致, 直接 string 比较即可.
+  if (start < ::config::BIGQUANT_API_MIN_DATE) {
+    std::cerr
+        << "[bigquant.spec] BLOCK pre-cutoff DAI 调用: table=" << spec.name
+        << " start=" << start << " end=" << end << "\n"
+        << "  BigQuant DAI API 额度有限 (按日刷新), "
+        << ::config::BIGQUANT_API_MIN_DATE
+        << " 之前的历史数据不得走在线接口.\n"
+        << "  应使用 doc/bigquant/fetch.py 在 BigQuant AI Studio 内离线导出 parquet 压缩 archive,\n"
+        << "  置于 config::BIGQUANT_DATABASE (= " << ::config::BIGQUANT_DATABASE
+        << ") 后, 启用 config::BIGQUANT_IMPORT=true 整月导入." << std::endl;
+    assert(false && "BigQuant DAI pre-cutoff access blocked");
+  }
 
   if (spec.kind == FetchKind::Partition) {
     // 分区裁剪走 filters; SQL 不带 WHERE.

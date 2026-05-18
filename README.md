@@ -29,7 +29,7 @@ qmt/
 │   │   │   │   └── pipeline.hpp     # scan → plan → fetch (DAI) → write
 │   │   │   └── tushare/             # 3 张事件表 (forecast / express / disclosure) HTTP+JSON
 │   │   │       ├── http.hpp         # boost.beast HTTP 客户端 (走 80 端口, 无 SSL)
-│   │   │       ├── spec.hpp         # 3 个 SPECS + RangeStrategy / PerDayStrategy
+│   │   │       ├── spec.hpp         # 3 个 SPECS + MonthStrategy / PerDayStrategy
 │   │   │       ├── store.hpp        # write_by_visible_date (PK upsert + _empty.json, 行式 JSON)
 │   │   │       └── pipeline.hpp     # scan → plan → fetch (HTTP) → write
 │   │   └── feature/                 # feature 子系统头文件 (张量出)

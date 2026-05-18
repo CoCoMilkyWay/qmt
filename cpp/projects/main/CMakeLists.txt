@@ -125,6 +125,7 @@ set(SOURCES
     ../../src/misc/fs.cpp
     ../../src/misc/store.cpp
     ../../src/misc/journal.cpp
+    ../../src/misc/schedule.cpp
     ../../src/api/bigquant/signer.cpp
     ../../src/api/bigquant/https.cpp
     ../../src/api/bigquant/dai.cpp
@@ -161,6 +162,7 @@ set(HEADERS
     ../../include/misc/fs.hpp
     ../../include/misc/store.hpp
     ../../include/misc/journal.hpp
+    ../../include/misc/schedule.hpp
     ../../include/api/bigquant/signer.hpp
     ../../include/api/bigquant/https.hpp
     ../../include/api/bigquant/dai.hpp
