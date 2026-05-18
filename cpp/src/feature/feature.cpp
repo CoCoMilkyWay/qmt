@@ -13,8 +13,10 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <span>
 #include <string>
 #include <string_view>
@@ -227,14 +229,16 @@ void ts_mcap_raw(int a, const Axes &axes, const PitPool &pool,
   fill_after_delist(out, a, axes, meta);
 }
 
-// fmcap_raw = close_raw[d] × shares.total_float_shares[a, d]  ([元])
+// fmcap_raw = close_raw[d] × shares.a_float_shares[a, d]  ([元])
+//   BigQuant `float_market_cap` 实测口径 = close × a_float (A 股流通);
+//   total_float 含 H 股, 002594/BYD 等 H+A 双重上市股大幅偏差.
 void ts_fmcap_raw(int a, const Axes &axes, const PitPool &pool,
                   const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto cl = T.ts_row(F::close_raw, a);
   auto out = T.ts_row(F::fmcap_raw, a);
-  const auto &sh = pool.shares.total_float_shares;
+  const auto &sh = pool.shares.a_float_shares;
   for (int d = 0; d < n_d; ++d) {
     float c = cl[d];
     float s = sh[base + static_cast<std::size_t>(d)];
@@ -251,28 +255,154 @@ void ts_share_raw(int a, const Axes &axes, const PitPool &pool,
             [&]() -> const std::vector<float> & { return pool.shares.total_shares; });
 }
 
-// 财务相关 raw (pb / ps / dy): 数据源 BigQuant cn_stock_financial_* 暂未迁移
-//   到 PitPool, 这里先输出全 NaN — 下游 cs_pb_ttm3 / cs_ps_ttm12 / cs_dy_ttm12 的
-//   factor_pipeline 会跳 NaN, 等价于 disable 该 factor (横截面无可用样本 → 全 NaN).
-void ts_pb_raw(int a, const Axes &axes, const PitPool &,
-               const StockMeta &, Tensor &T) {
-  auto out = T.ts_row(F::pb_raw, a);
-  std::fill(out.begin(), out.end(), std::nanf(""));
-  (void)axes;
+// ----------------------------------------------------------------------------
+// 财务 raw 共享 helper (BigQuant cn_stock_financial_*).
+//
+// 设计:
+//   - ttm 流 (cn_stock_financial_ttm_shift, shift=0): per-A 沿 v 升序, 取 latest event
+//     (max v); shift=0 已锁定"该 visible_date 的最新报告期 TTM", 跨披露天直接 max v.
+//   - balance 流 (cn_stock_financial_balance_general_pit): per-A 沿 v 升序, 维护
+//     map<report_date, latest_ev>; 取 max(report_date) 当 latest event (MRQ snapshot).
+//     反例: max v 可能取到对旧 report_date 的修正 (低于新 quarter), 会错位.
+//   - income annual 流 (cn_stock_financial_income_general_pit, fs_quarter_index=4):
+//     per-A 沿 v 升序, 维护 map<report_date, {val, last_v}>; ni_raw 取 last_v 最大
+//     的 2 条均值, 用于 dividend_st 阈值稳定 (单年 NI 波动大易误触发).
+//
+// PIT 安全: 网格 / 事件 ev.v 已在 pit.cpp parse 时应用 raw cutoff, ev.v <= d 即
+//   "T 当日已可见". 所有 helper / ts_* 不再做时间偏移.
+// ----------------------------------------------------------------------------
+
+// per-A 走 ttm 事件流, 对每个 d 拿到 latest event 指针 (或 nullptr 没就绪).
+// compute(d, ev*) 写 out[d]; ev==nullptr 时 helper 自动写 NaN.
+template <class Compute>
+inline void scan_latest_ttm(int a, const Axes &axes, const PitPool &pool,
+                            const StockMeta &meta, Tensor &T, F dst,
+                            Compute compute) {
+  int n_d = axes.n_d();
+  auto out = T.ts_row(dst, a);
+  const auto &events = pool.financial_ttm[a];
+  std::size_t ep = 0;
+  int last_idx = -1;
+  for (int d = 0; d < n_d; ++d) {
+    while (ep < events.size() && events[ep].v <= d) {
+      last_idx = static_cast<int>(ep);
+      ++ep;
+    }
+    out[d] = (last_idx >= 0) ? compute(d, events[last_idx]) : std::nanf("");
+  }
+  fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
-void ts_ps_raw(int a, const Axes &axes, const PitPool &,
-               const StockMeta &, Tensor &T) {
-  auto out = T.ts_row(F::ps_raw, a);
-  std::fill(out.begin(), out.end(), std::nanf(""));
-  (void)axes;
+// per-A 走 balance 事件流, 维护 map<rd, ev>; 对每个 d 拿到 max(report_date) event.
+template <class Compute>
+inline void scan_latest_balance(int a, const Axes &axes, const PitPool &pool,
+                                const StockMeta &meta, Tensor &T, F dst,
+                                Compute compute) {
+  int n_d = axes.n_d();
+  auto out = T.ts_row(dst, a);
+  const auto &events = pool.financial_balance[a];
+  std::map<std::string, FinancialBalanceEv> latest_by_rd;
+  std::size_t ep = 0;
+  for (int d = 0; d < n_d; ++d) {
+    while (ep < events.size() && events[ep].v <= d) {
+      latest_by_rd[events[ep].report_date] = events[ep];
+      ++ep;
+    }
+    if (latest_by_rd.empty()) {
+      out[d] = std::nanf("");
+      continue;
+    }
+    out[d] = compute(d, latest_by_rd.rbegin()->second);
+  }
+  fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
-void ts_dy_raw(int a, const Axes &axes, const PitPool &,
-               const StockMeta &, Tensor &T) {
+// pb_raw = mcap_raw / balance.total_owner_equity (含少数股东, BigQuant 实测口径)
+void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
+               const StockMeta &meta, Tensor &T) {
+  auto mcap = T.ts_row(F::mcap_raw, a);
+  scan_latest_balance(a, axes, pool, meta, T, F::pb_raw,
+                      [&](int d, const FinancialBalanceEv &e) -> float {
+                        float m = mcap[d];
+                        float eq = e.total_owner_equity;
+                        return (is_finite(m) && is_finite(eq) && eq > 0.0f)
+                                   ? m / eq
+                                   : std::nanf("");
+                      });
+}
+
+// ps_raw = mcap_raw / ttm.total_operating_revenue_ttm
+//   分母用 total_operating_revenue_ttm (含利息/保费; BigQuant 实测口径) 而非
+//   operating_revenue_ttm; 600519 茅台等 2% 误差排查得.
+void ts_ps_raw(int a, const Axes &axes, const PitPool &pool,
+               const StockMeta &meta, Tensor &T) {
+  auto mcap = T.ts_row(F::mcap_raw, a);
+  scan_latest_ttm(a, axes, pool, meta, T, F::ps_raw,
+                  [&](int d, const FinancialTtmEv &e) -> float {
+                    float m = mcap[d];
+                    float r = e.total_operating_revenue_ttm;
+                    return (is_finite(m) && is_finite(r) && r > 0.0f)
+                               ? m / r
+                               : std::nanf("");
+                  });
+}
+
+// dy_raw = Σ(dividend.cash_after_tax for ex_date ∈ (D-365d, D]) × share_raw[D] / mcap_raw[D]
+//   窗口走 ex_date 日历日 (BigQuant 实测口径: 累计每股分红 × 当前股本, 不是 ex_date
+//   当日股本; CATL / BYD 误差排查得).
+//   PIT: ex_date >= publish_date 一定 ⇒ ex_date <= T ⇒ publish_date <= T 自洽
+//   (极少数 publish == ex == T 的边缘情况忽略).
+//   无事件 → 0 (不是 NaN; 0 = "无近期分红", 横截面排最低位); mcap 缺/≤0 → NaN.
+void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
+               const StockMeta &meta, Tensor &T) {
+  int n_d = axes.n_d();
+  auto mcap = T.ts_row(F::mcap_raw, a);
   auto out = T.ts_row(F::dy_raw, a);
-  std::fill(out.begin(), out.end(), std::nanf(""));
-  (void)axes;
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  const auto &shares = pool.shares.total_shares;
+  const auto &divs = pool.dividend[a];
+
+  struct Item {
+    std::chrono::sys_days ex;
+    float cash;
+  };
+  std::vector<Item> items;
+  items.reserve(divs.size());
+  for (const auto &e : divs) {
+    if (e.ex_date.size() != 8)
+      continue;
+    if (!is_finite(e.cash_after_tax) || e.cash_after_tax <= 0.0f)
+      continue;
+    items.push_back({misc::parse_yyyymmdd(e.ex_date), e.cash_after_tax});
+  }
+  std::sort(items.begin(), items.end(),
+            [](const Item &x, const Item &y) { return x.ex < y.ex; });
+
+  std::size_t lo = 0, hi = 0;
+  float cash_sum = 0.0f;
+  for (int d = 0; d < n_d; ++d) {
+    auto Td = axes.date_days[d];
+    auto Tlo = Td - std::chrono::days{365};
+    while (hi < items.size() && items[hi].ex <= Td) {
+      cash_sum += items[hi].cash;
+      ++hi;
+    }
+    while (lo < hi && items[lo].ex <= Tlo) {
+      cash_sum -= items[lo].cash;
+      ++lo;
+    }
+    float m = mcap[d];
+    float ts = shares[base + static_cast<std::size_t>(d)];
+    if (!is_finite(m) || m <= 0.0f || !is_finite(ts)) {
+      out[d] = std::nanf("");
+    } else {
+      out[d] = (cash_sum * ts) / m;
+    }
+  }
+  fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
 // up_lim / dn_lim 主动 -1: limit_price (CUTOFF=0) 取的是 row D 当日盘前公布
@@ -363,23 +493,21 @@ void ts_industry_l1(int a, const Axes &axes, const PitPool &pool,
 }
 
 // ============================================================================
-// TS: raw 自算 — ttm12 拼接 (依赖 mcap_raw 已就绪 → enum 顺序保证)
+// TS: raw 自算 — BigQuant 财务 itf 直读 (依赖 mcap_raw 已就绪 → enum 顺序保证)
 // ============================================================================
 
+// rev_raw ← ttm.total_operating_revenue_ttm; 给 revenue_st 过滤用 (同 ps_raw 分母).
 void ts_rev_raw(int a, const Axes &axes, const PitPool &pool,
                 const StockMeta &meta, Tensor &T) {
-  auto out = T.ts_row(F::rev_raw, a);
-  ttm12_compute(
-      pool.income[a], axes.n_d(),
-      [](const IncomeEv &e) -> const std::string & { return e.report_type; },
-      [](const IncomeEv &e) { return e.revenue; },
-      out);
-  fill_before_list(out, a, axes, meta);
-  fill_after_delist(out, a, axes, meta);
+  scan_latest_ttm(a, axes, pool, meta, T, F::rev_raw,
+                  [](int /*d*/, const FinancialTtmEv &e) -> float {
+                    return e.total_operating_revenue_ttm;
+                  });
 }
 
-// ni_raw: 仅 income.end_date.M==12 ∧ report_type=='1'; 同 end_date 后到覆盖前;
-//   降级: 有 2+ 条年报取最新 2 条均值; 只有 1 条则用 1 条; 0 条才 NaN.
+// ni_raw: 仅取 fs_quarter_index==4 年报 (parse 已过滤);
+//   维护 map<report_date, {val, last_v}>, 取 last_v 最大 2 条均值 (smooth 阈值);
+//   单条退 1 条; 0 条 NaN. 给 dividend_st 阈值用.
 void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
@@ -390,9 +518,9 @@ void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
     float val;
     int last_v;
   };
-  std::vector<std::pair<std::string, Cell>> annuals; // 用 vector 维护 (small N, linear scan 即可)
+  std::vector<std::pair<std::string, Cell>> annuals;
   std::size_t ev_ptr = 0;
-  const auto &events = pool.income[a];
+  const auto &events = pool.financial_income_annual[a];
 
   auto annuals_find = [&](const std::string &k) -> int {
     for (std::size_t i = 0; i < annuals.size(); ++i)
@@ -403,23 +531,19 @@ void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
 
   for (int d = 0; d < n_d; ++d) {
     while (ev_ptr < events.size() && events[ev_ptr].v <= d) {
-      const IncomeEv &e = events[ev_ptr++];
-      if (e.report_type != "1")
+      const auto &e = events[ev_ptr++];
+      if (!is_finite(e.net_profit_to_parent_shareholders))
         continue;
-      if (e.end_date.size() < 6 || month_of(e.end_date) != 12)
-        continue;
-      if (!is_finite(e.n_income_attr_p))
-        continue;
-      int idx = annuals_find(e.end_date);
+      int idx = annuals_find(e.report_date);
       if (idx < 0)
-        annuals.emplace_back(e.end_date, Cell{e.n_income_attr_p, e.v});
+        annuals.emplace_back(e.report_date,
+                             Cell{e.net_profit_to_parent_shareholders, e.v});
       else
-        annuals[idx].second = Cell{e.n_income_attr_p, e.v};
+        annuals[idx].second = Cell{e.net_profit_to_parent_shareholders, e.v};
     }
     if (annuals.empty())
       continue;
 
-    // 找 last_v 最大 2 条 (或 1 条)
     int i0 = -1, i1 = -1;
     int v0 = -1, v1 = -1;
     for (std::size_t i = 0; i < annuals.size(); ++i) {
@@ -434,57 +558,73 @@ void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
         i1 = static_cast<int>(i);
       }
     }
-    // 降级: 有 2 条取均值, 只有 1 条用 1 条
-    if (i0 >= 0 && i1 >= 0) {
+    if (i0 >= 0 && i1 >= 0)
       out[d] = (annuals[i0].second.val + annuals[i1].second.val) * 0.5f;
-    } else if (i0 >= 0) {
+    else if (i0 >= 0)
       out[d] = annuals[i0].second.val;
-    }
   }
   fill_before_list(out, a, axes, meta);
   fill_after_delist(out, a, axes, meta);
 }
 
-// pe_raw: 自己算 mcap_raw / ttm12(n_income_attr_p)，支持负 PE（亏损）
+// pe_raw = mcap_raw / ttm.net_profit_to_parent_shareholders_ttm
+//   支持负 PE (亏损); n==0 → NaN.
 void ts_pe_raw(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
-  int n_d = axes.n_d();
-  std::vector<float> ni_ttm(n_d, std::nanf(""));
-  ttm12_compute(
-      pool.income[a], n_d,
-      [](const IncomeEv &e) -> const std::string & { return e.report_type; },
-      [](const IncomeEv &e) { return e.n_income_attr_p; },
-      std::span<float>(ni_ttm.data(), ni_ttm.size()));
-
   auto mcap = T.ts_row(F::mcap_raw, a);
-  auto out = T.ts_row(F::pe_raw, a);
-  for (int d = 0; d < n_d; ++d) {
-    float m = mcap[d];
-    float n = ni_ttm[d];
-    out[d] = (is_finite(m) && is_finite(n) && n != 0.0f) ? m / n : std::nanf("");
-  }
-  fill_before_list(out, a, axes, meta);
-  fill_after_delist(out, a, axes, meta);
+  scan_latest_ttm(a, axes, pool, meta, T, F::pe_raw,
+                  [&](int d, const FinancialTtmEv &e) -> float {
+                    float m = mcap[d];
+                    float n = e.net_profit_to_parent_shareholders_ttm;
+                    return (is_finite(m) && is_finite(n) && n != 0.0f)
+                               ? m / n
+                               : std::nanf("");
+                  });
 }
 
+// pcf_raw = mcap_raw / ttm.net_cffoa_ttm; 经营性现金流可负, 不剔; n==0 → NaN.
 void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool,
                 const StockMeta &meta, Tensor &T) {
-  int n_d = axes.n_d();
-  std::vector<float> denom(n_d, std::nanf(""));
-  ttm12_compute(
-      pool.cashflow[a], n_d,
-      [](const CashflowEv &e) -> const std::string & { return e.report_type; },
-      [](const CashflowEv &e) { return e.n_cashflow_act; },
-      std::span<float>(denom.data(), denom.size()));
-
   auto mcap = T.ts_row(F::mcap_raw, a);
-  auto out = T.ts_row(F::pcf_raw, a);
+  scan_latest_ttm(a, axes, pool, meta, T, F::pcf_raw,
+                  [&](int d, const FinancialTtmEv &e) -> float {
+                    float m = mcap[d];
+                    float c = e.net_cffoa_ttm;
+                    return (is_finite(m) && is_finite(c) && c != 0.0f)
+                               ? m / c
+                               : std::nanf("");
+                  });
+}
+
+// roe_raw / roa_raw: 同时读 ttm + balance 两路事件流; 单独 helper 处理 dual scan.
+//   ROE = NP_parent_ttm / equity_to_parent × 100  (经典归母 ROE)
+//   ROA = NP_parent_ttm / total_assets × 100      (分子归母, 分母总资产)
+template <class Compute>
+inline void scan_latest_ttm_and_balance(int a, const Axes &axes,
+                                        const PitPool &pool,
+                                        const StockMeta &meta, Tensor &T, F dst,
+                                        Compute compute) {
+  int n_d = axes.n_d();
+  auto out = T.ts_row(dst, a);
+  const auto &ttms = pool.financial_ttm[a];
+  const auto &bals = pool.financial_balance[a];
+  std::map<std::string, FinancialBalanceEv> latest_by_rd;
+  std::size_t tp = 0, bp = 0;
+  int last_ttm = -1;
   for (int d = 0; d < n_d; ++d) {
-    float m = mcap[d];
-    float c = denom[d];
-    out[d] = (is_finite(m) && m != 0.0f && is_finite(c) && c != 0.0f)
-                 ? m / c
-                 : std::nanf("");
+    while (tp < ttms.size() && ttms[tp].v <= d) {
+      last_ttm = static_cast<int>(tp);
+      ++tp;
+    }
+    while (bp < bals.size() && bals[bp].v <= d) {
+      latest_by_rd[bals[bp].report_date] = bals[bp];
+      ++bp;
+    }
+    if (last_ttm < 0 || latest_by_rd.empty()) {
+      out[d] = std::nanf("");
+      continue;
+    }
+    out[d] = compute(d, ttms[last_ttm], latest_by_rd.rbegin()->second);
   }
   fill_before_list(out, a, axes, meta);
   fill_after_delist(out, a, axes, meta);
@@ -492,28 +632,30 @@ void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool,
 
 void ts_roe_raw(int a, const Axes &axes, const PitPool &pool,
                 const StockMeta &meta, Tensor &T) {
-  static const std::string kEmpty;
-  auto out = T.ts_row(F::roe_raw, a);
-  ttm12_compute(
-      pool.fina_indicator[a], axes.n_d(),
-      [&](const FinaIndEv &) -> const std::string & { return kEmpty; },
-      [](const FinaIndEv &e) { return e.roe; },
-      out);
-  fill_before_list(out, a, axes, meta);
-  fill_after_delist(out, a, axes, meta);
+  scan_latest_ttm_and_balance(
+      a, axes, pool, meta, T, F::roe_raw,
+      [](int /*d*/, const FinancialTtmEv &t,
+         const FinancialBalanceEv &b) -> float {
+        float n = t.net_profit_to_parent_shareholders_ttm;
+        float eq = b.total_equity_to_parent_shareholders;
+        return (is_finite(n) && is_finite(eq) && eq > 0.0f)
+                   ? (n / eq) * 100.0f
+                   : std::nanf("");
+      });
 }
 
 void ts_roa_raw(int a, const Axes &axes, const PitPool &pool,
                 const StockMeta &meta, Tensor &T) {
-  static const std::string kEmpty;
-  auto out = T.ts_row(F::roa_raw, a);
-  ttm12_compute(
-      pool.fina_indicator[a], axes.n_d(),
-      [&](const FinaIndEv &) -> const std::string & { return kEmpty; },
-      [](const FinaIndEv &e) { return e.roa; },
-      out);
-  fill_before_list(out, a, axes, meta);
-  fill_after_delist(out, a, axes, meta);
+  scan_latest_ttm_and_balance(
+      a, axes, pool, meta, T, F::roa_raw,
+      [](int /*d*/, const FinancialTtmEv &t,
+         const FinancialBalanceEv &b) -> float {
+        float n = t.net_profit_to_parent_shareholders_ttm;
+        float as = b.total_assets;
+        return (is_finite(n) && is_finite(as) && as > 0.0f)
+                   ? (n / as) * 100.0f
+                   : std::nanf("");
+      });
 }
 
 // ============================================================================

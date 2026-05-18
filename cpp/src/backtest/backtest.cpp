@@ -7,6 +7,7 @@
 #include "misc/fs.hpp"
 #include "misc/npy.hpp"
 #include "misc/timer.hpp"
+#include "package/yyjson/yyjson.h"
 
 #include <algorithm>
 #include <cassert>
@@ -67,44 +68,12 @@ inline void wi(const fs::path &p, const std::vector<std::int32_t> &v) {
                      std::span<const std::size_t>(shape, 1));
 }
 
-// PIT 名 (namechange 切段): 给定 (a, today=YYYYMMDD), 返回当天生效的标的名.
-//   语义: 段 = [start_date_i, start_date_{i+1}), name = hist[i].name; 最大 i 满足
-//        hist[i].start_date <= today; 否则 (今日早于所有 namechange) 退回 meta.name
-//        (stock_basic.name = 最新名; tushare namechange 不含 IPO 原名, 只能 best-effort).
-inline std::string_view name_at(const feature::StockMeta &meta, int a,
-                                std::string_view today) {
-  const auto &hist = meta.name_history[static_cast<std::size_t>(a)];
-  if (hist.empty())
-    return meta.name[static_cast<std::size_t>(a)];
-  auto it = std::upper_bound(
-      hist.begin(), hist.end(), today,
-      [](std::string_view x, const feature::NameChange &nc) {
-        return x < nc.start_date;
-      });
-  if (it == hist.begin())
-    return meta.name[static_cast<std::size_t>(a)];
-  --it;
-  return it->name;
-}
-
-// 最小 JSON 字符串转义: 仅 " 和 \ (其它 UTF-8 字节直通; 名称无控制符).
-inline void json_escape_to(std::string &buf, std::string_view s) {
-  for (char c : s) {
-    if (c == '"' || c == '\\') buf.push_back('\\');
-    buf.push_back(c);
-  }
-}
-
-inline void json_str_arr(std::string &buf,
-                         const std::vector<std::string> &v) {
-  buf.push_back('[');
-  for (std::size_t i = 0; i < v.size(); ++i) {
-    if (i) buf.push_back(',');
-    buf.push_back('"');
-    json_escape_to(buf, v[i]);
-    buf.push_back('"');
-  }
-  buf.push_back(']');
+// 标的名: 新架构已删 namechange 历史, meta.name[a] 是 stock_basic 当前简称.
+//   PIT 含义: 退化为 best-effort "当前名" (整个回测期间用同一个名). 实盘 trades 与
+//   historical holdings 的显示名因此跟不上 ST 翻转 / IPO 重命名 — 仅诊断/展示用,
+//   不影响策略本身的 PIT clean. 想恢复历史名需重新引入 namechange itf.
+inline std::string_view name_of(const feature::StockMeta &meta, int a) {
+  return meta.name[static_cast<std::size_t>(a)];
 }
 
 } // namespace
@@ -166,10 +135,8 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     tr_close_d.push_back(static_cast<std::int32_t>(d));
     tr_open_px.push_back(rec.open_px);
     tr_close_px.push_back(close_px);
-    tr_open_names.emplace_back(
-        name_at(meta, a, axes.dates[static_cast<std::size_t>(rec.open_d)]));
-    tr_close_names.emplace_back(
-        name_at(meta, a, axes.dates[static_cast<std::size_t>(d)]));
+    tr_open_names.emplace_back(name_of(meta, a));
+    tr_close_names.emplace_back(name_of(meta, a));
   };
 
   // pool benchmark NAV
@@ -456,7 +423,6 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
                             static_cast<float>(intent);
 
     // CSR 持仓 (按 d 写一段; 段内权重降序 — 便于 py 直接显示)
-    const std::string &today_str = axes.dates[static_cast<std::size_t>(d)];
     std::vector<std::pair<int, double>> sorted_hold; // (a, weight)
     sorted_hold.reserve(holdings.size());
     for (auto &kv : holdings) {
@@ -469,7 +435,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     for (auto &kv : sorted_hold) {
       hold_codes.push_back(static_cast<std::int32_t>(kv.first));
       hold_weights.push_back(static_cast<float>(kv.second));
-      hold_names.emplace_back(name_at(meta, kv.first, today_str));
+      hold_names.emplace_back(name_of(meta, kv.first));
     }
     hold_off[i + 1] = static_cast<std::int32_t>(hold_codes.size());
   }
@@ -497,21 +463,27 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   wf(out / "trades_open_px.npy", tr_open_px);
   wf(out / "trades_close_px.npy", tr_close_px);
 
-  // labels.json: 3 个 PIT 字符串数组, 与对应 npy 同长 (按 trades / hold_codes 顺序).
+  // labels.json: 3 个标的名字符串数组, 与对应 npy 同长 (按 trades / hold_codes 顺序).
+  //   yyjson 落盘, 与 BigQuant / Tushare store 共享 PRETTY_TWO_SPACES 风格.
   {
-    std::string buf;
-    buf.reserve(64 +
-                tr_open_names.size() * 32 +
-                tr_close_names.size() * 32 +
-                hold_names.size() * 32);
-    buf += "{\n  \"trades_open_names\": ";
-    json_str_arr(buf, tr_open_names);
-    buf += ",\n  \"trades_close_names\": ";
-    json_str_arr(buf, tr_close_names);
-    buf += ",\n  \"holdings_names\": ";
-    json_str_arr(buf, hold_names);
-    buf += "\n}\n";
-    misc::atomic_write(out / "labels.json", buf.data(), buf.size());
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+
+    auto add_str_arr = [&](const char *key,
+                           const std::vector<std::string> &v) {
+      yyjson_mut_val *arr = yyjson_mut_arr(doc);
+      for (const std::string &s : v) {
+        yyjson_mut_arr_add_strn(doc, arr, s.data(), s.size());
+      }
+      yyjson_mut_obj_add_val(doc, root, key, arr);
+    };
+    add_str_arr("trades_open_names", tr_open_names);
+    add_str_arr("trades_close_names", tr_close_names);
+    add_str_arr("holdings_names", hold_names);
+
+    misc::atomic_write_json(out / "labels.json", doc);
+    yyjson_mut_doc_free(doc);
   }
 
   auto t1 = std::chrono::high_resolution_clock::now();

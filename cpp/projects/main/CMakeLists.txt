@@ -102,8 +102,9 @@ include_directories(SYSTEM ${ARROW_INCLUDE})
 # ============================================================================
 # Source Files
 # ============================================================================
-# Phase 1 (数据接入) + Phase 2 (feature build): 串到 main.cpp 的 bigquant::update →
-# tushare::update → feature::build. backtest / analysis 待后续启用.
+# 完整闭环串到 main.cpp: bigquant::update → tushare::update → feature::build →
+# backtest::run → analysis::run → write_meta. 输出 <git_root>/output/{meta.json,
+# backtest/*.npy + labels.json, analysis/*.npy}; py/report.py 直读生成报告.
 set(SOURCES
     ../../src/main.cpp
     ../../src/misc/date.cpp
@@ -133,10 +134,9 @@ set(SOURCES
     ../../src/feature/cs.cpp
     ../../src/feature/build.cpp
     ../../src/feature/describe.cpp
+    ../../src/backtest/backtest.cpp
+    ../../src/analysis/analysis.cpp
     ../../include/package/yyjson/yyjson.c
-    # --- backtest / analysis 待后续启用 ---
-    # ../../src/backtest/backtest.cpp
-    # ../../src/analysis/analysis.cpp
 )
 
 set(HEADERS
@@ -175,9 +175,8 @@ set(HEADERS
     ../../include/feature/cs.hpp
     ../../include/feature/build.hpp
     ../../include/feature/describe.hpp
-    # --- backtest / analysis 待后续启用 ---
-    # ../../include/backtest/backtest.hpp
-    # ../../include/analysis/analysis.hpp
+    ../../include/backtest/backtest.hpp
+    ../../include/analysis/analysis.hpp
 )
 
 add_executable(app_main ${SOURCES} ${HEADERS})

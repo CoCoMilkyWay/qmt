@@ -28,11 +28,13 @@ void compute_ts(const Axes &, const PitPool &, const StockMeta &, Tensor &);
 // 注: 事件 ev.v 已在 pit.cpp parse 时应用 raw cutoff, 即 ev.v = 首次可见的 row D.
 //   下游直接 `ev.v <= d` 判可见, 不再 +1.
 //
-// 1) ttm12_compute<Ev>:
+// 1) ttm12_compute<Ev>: (deprecated, 当前无调用方; 旧 Tushare income/cashflow 自拼 TTM 用过)
 //      按 v 升序回放 events, 维护 map<end_date, value> (latest version per end_date,
-//      可选 report_type=='1' 过滤; fina_indicator 不带 type → get_rt 返回空串接受全部);
+//      可选 report_type=='1' 过滤; 不带 type 时 get_rt 返回空串接受全部);
 //      自动降级: 完整 X(t)+X(Y-1,12)-X(Y-1,M) → 缺同期 X(t)+X(Y-1,12)*(12-M)/12 → 缺年报 X(t)*12/M.
 //      M==12 退化为 X(t).
+//      新基建 (BigQuant cn_stock_financial_ttm_shift shift=0) 已直给 TTM, 由 feature.cpp
+//      内的 scan_latest_ttm 直接取, 不再需要拼接. 保留模板以备日历漂移修正等扩展.
 //
 // 2) state_machine_intervals<TEv>:
 //      按 v 升序遍历 trigger_events, 每 trigger 用 find_off(trigger) 求终止 d,

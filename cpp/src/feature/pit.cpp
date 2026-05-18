@@ -216,7 +216,7 @@ void prealloc(const Axes &axes, PitPool &p) {
   std::size_t n = static_cast<std::size_t>(axes.n_a()) *
                   static_cast<std::size_t>(axes.n_d());
   grid_prealloc_float(p.shares.total_shares, n);
-  grid_prealloc_float(p.shares.total_float_shares, n);
+  grid_prealloc_float(p.shares.a_float_shares, n);
 }
 
 void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
@@ -241,15 +241,15 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
                       base_off;
     pool.shares.total_shares[off] =
         positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "total_shares")));
-    pool.shares.total_float_shares[off] = positive_or_inf(
-        as_float_or_nan(yyjson_obj_get(item, "total_float_shares")));
+    pool.shares.a_float_shares[off] = positive_or_inf(
+        as_float_or_nan(yyjson_obj_get(item, "a_float_shares")));
   }
 }
 
 void post_ffill(const Axes &axes, PitPool &p) {
   int n_a = axes.n_a(), n_d = axes.n_d();
   grid_ffill(p.shares.total_shares, n_a, n_d);
-  grid_ffill(p.shares.total_float_shares, n_a, n_d);
+  grid_ffill(p.shares.a_float_shares, n_a, n_d);
 }
 
 } // namespace itf_cn_stock_shares
@@ -515,7 +515,8 @@ void post_sort(PitPool &p) { event_post_sort(p.industry_change); }
 namespace itf_cn_stock_dividend {
 
 // cn_stock_dividend: 分红事件 (Where on publish_date, CUTOFF=-1).
-//   字段: instrument / report_date / cash_after_tax (税后每股分红 [元/股]).
+//   字段: instrument / report_date / ex_date / cash_after_tax (税后每股分红 [元/股]).
+//   ex_date 必入 — dy_raw 走 trailing 12M ex_date 日历窗口 (BigQuant `dividend_yield_ratio` 实测口径).
 constexpr int CUTOFF = -1;
 
 void prealloc(const Axes &axes, PitPool &p) {
@@ -541,6 +542,7 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
     DividendEv ev;
     ev.v = row;
     ev.report_date = as_str(yyjson_obj_get(item, "report_date"));
+    ev.ex_date = as_str(yyjson_obj_get(item, "ex_date"));
     ev.cash_after_tax = as_float_or_nan(yyjson_obj_get(item, "cash_after_tax"));
     {
       std::lock_guard<std::mutex> lk((*mu)[a]);
@@ -552,6 +554,151 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
 void post_sort(PitPool &p) { event_post_sort(p.dividend); }
 
 } // namespace itf_cn_stock_dividend
+
+namespace itf_cn_stock_financial_ttm_shift {
+
+// cn_stock_financial_ttm_shift: 财务 TTM 时序 (only shift=0 入 EventStore).
+//   parse 过滤 shift!=0; shift=0 = BigQuant 给定的"该 visible_date 最新报告期 TTM"
+//   (含意随披露季节漂移). per-A 沿 v 升序, 同 (instrument, visible_date) 该次披露
+//   shift=0 单条; 跨 visible_date 多条 ⇒ feature 层走 max v.
+constexpr int CUTOFF = -1;
+
+void prealloc(const Axes &axes, PitPool &p) {
+  event_prealloc(p.financial_ttm, static_cast<std::size_t>(axes.n_a()));
+}
+
+void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
+           std::vector<std::mutex> *mu) {
+  assert(arr && yyjson_is_arr(arr));
+  assert(mu);
+  if (v_idx < 0)
+    return;
+  int row = v_idx - CUTOFF;
+  if (row >= axes.n_d())
+    return;
+
+  size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(arr, i, n, item) {
+    int shift = as_int_or_default(yyjson_obj_get(item, "shift"), -1);
+    if (shift != 0)
+      continue;
+    int a = lookup_a(axes, item, "instrument");
+    if (a < 0)
+      continue;
+    FinancialTtmEv ev;
+    ev.v = row;
+    ev.report_date = as_str(yyjson_obj_get(item, "report_date"));
+    ev.total_operating_revenue_ttm = as_float_or_nan(
+        yyjson_obj_get(item, "total_operating_revenue_ttm"));
+    ev.net_profit_to_parent_shareholders_ttm = as_float_or_nan(
+        yyjson_obj_get(item, "net_profit_to_parent_shareholders_ttm"));
+    ev.net_cffoa_ttm = as_float_or_nan(yyjson_obj_get(item, "net_cffoa_ttm"));
+    {
+      std::lock_guard<std::mutex> lk((*mu)[a]);
+      pool.financial_ttm[a].push_back(std::move(ev));
+    }
+  }
+}
+
+void post_sort(PitPool &p) { event_post_sort(p.financial_ttm); }
+
+} // namespace itf_cn_stock_financial_ttm_shift
+
+namespace itf_cn_stock_financial_balance_general_pit {
+
+// cn_stock_financial_balance_general_pit: 资产负债表 PIT (MRQ snapshot).
+//   不过滤 fs_quarter_index — 季报 / 半年报 / 年报均入; 同 (visible_date, instrument)
+//   可多 report_date 行 (历史 + 修正), feature 层维护 map<report_date, latest by v>
+//   取 max report_date.
+constexpr int CUTOFF = -1;
+
+void prealloc(const Axes &axes, PitPool &p) {
+  event_prealloc(p.financial_balance, static_cast<std::size_t>(axes.n_a()));
+}
+
+void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
+           std::vector<std::mutex> *mu) {
+  assert(arr && yyjson_is_arr(arr));
+  assert(mu);
+  if (v_idx < 0)
+    return;
+  int row = v_idx - CUTOFF;
+  if (row >= axes.n_d())
+    return;
+
+  size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(arr, i, n, item) {
+    int a = lookup_a(axes, item, "instrument");
+    if (a < 0)
+      continue;
+    FinancialBalanceEv ev;
+    ev.v = row;
+    ev.report_date = as_str(yyjson_obj_get(item, "report_date"));
+    ev.total_owner_equity = as_float_or_nan(
+        yyjson_obj_get(item, "total_owner_equity"));
+    ev.total_equity_to_parent_shareholders = as_float_or_nan(
+        yyjson_obj_get(item, "total_equity_to_parent_shareholders"));
+    ev.total_assets = as_float_or_nan(yyjson_obj_get(item, "total_assets"));
+    {
+      std::lock_guard<std::mutex> lk((*mu)[a]);
+      pool.financial_balance[a].push_back(std::move(ev));
+    }
+  }
+}
+
+void post_sort(PitPool &p) { event_post_sort(p.financial_balance); }
+
+} // namespace itf_cn_stock_financial_balance_general_pit
+
+namespace itf_cn_stock_financial_income_general_pit {
+
+// cn_stock_financial_income_general_pit: 利润表 PIT.
+//   parse 过滤 fs_quarter_index != 4 (只入年报), 给 ni_raw 用 (dividend_st 阈值).
+//   字段 net_profit_to_parent_shareholders (归母年度 NI; 与 pe_raw / roe_raw 分子对仗).
+//   同 report_date 多版本 (修正) 取 max v.
+constexpr int CUTOFF = -1;
+
+void prealloc(const Axes &axes, PitPool &p) {
+  event_prealloc(p.financial_income_annual,
+                 static_cast<std::size_t>(axes.n_a()));
+}
+
+void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
+           std::vector<std::mutex> *mu) {
+  assert(arr && yyjson_is_arr(arr));
+  assert(mu);
+  if (v_idx < 0)
+    return;
+  int row = v_idx - CUTOFF;
+  if (row >= axes.n_d())
+    return;
+
+  size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(arr, i, n, item) {
+    int q = as_int_or_default(yyjson_obj_get(item, "fs_quarter_index"), -1);
+    if (q != 4)
+      continue;
+    int a = lookup_a(axes, item, "instrument");
+    if (a < 0)
+      continue;
+    FinancialIncomeAnnualEv ev;
+    ev.v = row;
+    ev.report_date = as_str(yyjson_obj_get(item, "report_date"));
+    ev.net_profit_to_parent_shareholders = as_float_or_nan(
+        yyjson_obj_get(item, "net_profit_to_parent_shareholders"));
+    {
+      std::lock_guard<std::mutex> lk((*mu)[a]);
+      pool.financial_income_annual[a].push_back(std::move(ev));
+    }
+  }
+}
+
+void post_sort(PitPool &p) { event_post_sort(p.financial_income_annual); }
+
+} // namespace itf_cn_stock_financial_income_general_pit
 
 // ============================================================================
 // 事件 itf (Tushare 保留)
@@ -599,9 +746,9 @@ void post_sort(PitPool &p) { event_post_sort(p.forecast); }
 } // namespace itf_forecast
 
 // ============================================================================
-// 事件 itf (财务 Tushare 占位 — 用户决策: 财务先不管, 暂保留旧实现)
-//   实际新基建未落地这几张表, parse 不会被触发, EventStore 永远空.
-//   留作占位, 待后续 BigQuant cn_stock_financial_* 迁移.
+// 事件 itf (Tushare 占位 — 待 cn_stock_financial_changedate 迁移后清理)
+//   实际新基建未落地, parse 不会被触发, EventStore 永远空 →
+//   find_forecast_off_d 退化为只用 (Y+1, 4, 30) deadline_d (4 月底安全网兜底).
 // ============================================================================
 
 namespace itf_report {
@@ -642,127 +789,6 @@ void post_sort(PitPool &p) { event_post_sort(p.report); }
 
 } // namespace itf_report
 
-namespace itf_income {
-
-constexpr int CUTOFF = -1;
-
-void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.income, static_cast<std::size_t>(axes.n_a()));
-}
-
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> *mu) {
-  assert(arr && yyjson_is_arr(arr));
-  assert(mu);
-  if (v_idx < 0)
-    return;
-  int row = v_idx - CUTOFF;
-  if (row >= axes.n_d())
-    return;
-
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, item, "ts_code");
-    if (a < 0)
-      continue;
-    IncomeEv ev;
-    ev.v = row;
-    ev.end_date = as_str(yyjson_obj_get(item, "end_date"));
-    ev.report_type = as_str(yyjson_obj_get(item, "report_type"));
-    ev.revenue = as_float_or_nan(yyjson_obj_get(item, "revenue"));
-    ev.n_income_attr_p = as_float_or_nan(yyjson_obj_get(item, "n_income_attr_p"));
-    {
-      std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.income[a].push_back(std::move(ev));
-    }
-  }
-}
-
-void post_sort(PitPool &p) { event_post_sort(p.income); }
-
-} // namespace itf_income
-
-namespace itf_cashflow {
-
-constexpr int CUTOFF = -1;
-
-void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.cashflow, static_cast<std::size_t>(axes.n_a()));
-}
-
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> *mu) {
-  assert(arr && yyjson_is_arr(arr));
-  assert(mu);
-  if (v_idx < 0)
-    return;
-  int row = v_idx - CUTOFF;
-  if (row >= axes.n_d())
-    return;
-
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, item, "ts_code");
-    if (a < 0)
-      continue;
-    CashflowEv ev;
-    ev.v = row;
-    ev.end_date = as_str(yyjson_obj_get(item, "end_date"));
-    ev.report_type = as_str(yyjson_obj_get(item, "report_type"));
-    ev.n_cashflow_act = as_float_or_nan(yyjson_obj_get(item, "n_cashflow_act"));
-    {
-      std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.cashflow[a].push_back(std::move(ev));
-    }
-  }
-}
-
-void post_sort(PitPool &p) { event_post_sort(p.cashflow); }
-
-} // namespace itf_cashflow
-
-namespace itf_fina_indicator {
-
-constexpr int CUTOFF = -1;
-
-void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.fina_indicator, static_cast<std::size_t>(axes.n_a()));
-}
-
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> *mu) {
-  assert(arr && yyjson_is_arr(arr));
-  assert(mu);
-  if (v_idx < 0)
-    return;
-  int row = v_idx - CUTOFF;
-  if (row >= axes.n_d())
-    return;
-
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, item, "ts_code");
-    if (a < 0)
-      continue;
-    FinaIndEv ev;
-    ev.v = row;
-    ev.end_date = as_str(yyjson_obj_get(item, "end_date"));
-    ev.roe = as_float_or_nan(yyjson_obj_get(item, "roe"));
-    ev.roa = as_float_or_nan(yyjson_obj_get(item, "roa"));
-    {
-      std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.fina_indicator[a].push_back(std::move(ev));
-    }
-  }
-}
-
-void post_sort(PitPool &p) { event_post_sort(p.fina_indicator); }
-
-} // namespace itf_fina_indicator
-
 // ============================================================================
 // ITFS[] 表 — 单点真理
 //   file_name = data/YYYY/MM/DD/<file_name>.json basename, 也是日志/标识用名.
@@ -795,20 +821,26 @@ const ItfDesc ITFS[] = {
      &itf_cn_stock_industry_change::post_sort, nullptr},
     {"cn_stock_dividend", true, &itf_cn_stock_dividend::prealloc,
      &itf_cn_stock_dividend::parse, &itf_cn_stock_dividend::post_sort, nullptr},
+    {"cn_stock_financial_ttm_shift", true,
+     &itf_cn_stock_financial_ttm_shift::prealloc,
+     &itf_cn_stock_financial_ttm_shift::parse,
+     &itf_cn_stock_financial_ttm_shift::post_sort, nullptr},
+    {"cn_stock_financial_balance_general_pit", true,
+     &itf_cn_stock_financial_balance_general_pit::prealloc,
+     &itf_cn_stock_financial_balance_general_pit::parse,
+     &itf_cn_stock_financial_balance_general_pit::post_sort, nullptr},
+    {"cn_stock_financial_income_general_pit", true,
+     &itf_cn_stock_financial_income_general_pit::prealloc,
+     &itf_cn_stock_financial_income_general_pit::parse,
+     &itf_cn_stock_financial_income_general_pit::post_sort, nullptr},
 
     // ---- 事件 itf (Tushare 保留) ----
     {"forecast", true, &itf_forecast::prealloc, &itf_forecast::parse,
      &itf_forecast::post_sort, nullptr},
 
-    // ---- 事件 itf (财务 Tushare 占位; 数据未落地, parse 不会触发) ----
+    // ---- 事件 itf (Tushare 占位; 数据未落地, parse 不会触发) ----
     {"report", true, &itf_report::prealloc, &itf_report::parse,
      &itf_report::post_sort, nullptr},
-    {"income", true, &itf_income::prealloc, &itf_income::parse,
-     &itf_income::post_sort, nullptr},
-    {"cashflow", true, &itf_cashflow::prealloc, &itf_cashflow::parse,
-     &itf_cashflow::post_sort, nullptr},
-    {"fina_indicator", true, &itf_fina_indicator::prealloc,
-     &itf_fina_indicator::parse, &itf_fina_indicator::post_sort, nullptr},
 };
 
 const int ITFS_COUNT = static_cast<int>(sizeof(ITFS) / sizeof(ITFS[0]));

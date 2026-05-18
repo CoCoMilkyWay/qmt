@@ -54,11 +54,15 @@ struct Axes; // fwd decl
 //     industry_component    ← cn_stock_industry_component (sw2021)  CUTOFF=-1 (normal, 月初快照)
 //     industry_change       ← cn_stock_industry_change (sw2021 L1)  CUTOFF=-1 (normal)
 //     dividend              ← cn_stock_dividend                     CUTOFF=-1 (normal)
+//     financial_ttm         ← cn_stock_financial_ttm_shift (shift=0)CUTOFF=-1 (normal)
+//     financial_balance     ← cn_stock_financial_balance_general_pitCUTOFF=-1 (normal)
+//     financial_income_annual ← cn_stock_financial_income_general_pit (fs_quarter_index=4)
+//                                                                   CUTOFF=-1 (normal)
 //     forecast              ← Tushare forecast                      CUTOFF=-1 (normal)
 //
-//   财务事件 (用户决策: 财务部分暂保留旧 Tushare itf 不动, 实际数据未在新基建落地,
-//   parse 不会被触发; EventStore 永远空, 财务 raw feature 全 NaN — 后续单独迁移):
-//     report / income / cashflow / fina_indicator (旧 Tushare 字段)
+//   保留的旧 Tushare 占位 (用户决策, 待 cn_stock_financial_changedate 迁移后清):
+//     report (Tushare 信披计划占位; 当前 EventStore 永远空, find_forecast_off_d
+//             退化为只用 4 月底 deadline_d, 不影响新 profit_st/revenue_st 子集)
 // ============================================================================
 
 // ========== 网格 ==========
@@ -82,10 +86,12 @@ struct GridBar1d {
 };
 
 // cn_stock_shares (CUTOFF=-1): 各类股本 [股].
-//   当前张量层只用 total_shares + total_float_shares; a_float / free_float 备用.
+//   张量层用 total_shares (mcap_raw) + a_float_shares (fmcap_raw, BigQuant 实测口径
+//     `float_market_cap` = close × a_float_shares; total_float 含 H 股, 002594/BYD 误差排查得).
+//   total_float / free_float 暂不入张量, 后续如需可加.
 struct GridShares {
   std::vector<float> total_shares;
-  std::vector<float> total_float_shares;
+  std::vector<float> a_float_shares;
 };
 
 // cn_stock_limit_price (CUTOFF=-1, normal): 当日适用涨跌停价 [元/股].
@@ -141,10 +147,13 @@ struct IndustryChangeEv {
 
 // cn_stock_dividend (CUTOFF=-1, Where on publish_date): 分红事件.
 //   同 (instrument, publish_date, report_date) 单条.
-//   dividend_st 用 cash_after_tax × share_raw[ev.v] 推 3y 累计现金分红.
+//   dividend_st 用 cash_after_tax × share_raw[ev.v] 推 3y 累计现金分红 (按 report_date.Y 窗口).
+//   dy_raw 用 cash_after_tax × share_raw[D] 推 trailing 12M 累计现金分红 (按 ex_date 日历窗口).
+//   ex_date ≥ publish_date 一定 (公告早于除权), 故 ex_date ≤ T ⇒ publish_date ≤ T (PIT 自洽).
 struct DividendEv {
   int v;
   std::string report_date;
+  std::string ex_date;
   float cash_after_tax;
 };
 
@@ -157,35 +166,60 @@ struct ForecastEv {
   float last_parent_net;
 };
 
-// ----- 以下 4 个事件 itf 是旧 Tushare 财务 (用户决策: 财务先不管, 暂保留) -----
-// 实际新基建未落地这几张表, parse 不会被触发, EventStore 保持空状态.
-// 留作占位; 财务部分迁移后会被新 BigQuant cn_stock_financial_* 替代.
+// ----- BigQuant 财务事件 (PIT, 盘后 17:00–20:00 入库, CUTOFF=-1 normal) -----
+
+// cn_stock_financial_ttm_shift: 财务 TTM 时序 (shift∈{0..76}).
+//   每次披露一次发完整 shift 历史 (~77 期); 我们只取 shift=0 = 该 visible_date 的最新报告期 TTM.
+//   shift=0 含意随披露时间漂移: 4 月底 ≈ 年报, 5 月初 ≈ Q1, 8 月底 ≈ 半年报, 11 月初 ≈ Q3.
+//   字段 (BigQuant 实测口径, 见 doc/research/verify_valuation.py 验证):
+//     total_operating_revenue_ttm                   ps_raw / rev_raw 分母 (含利息/保费,
+//                                                                          ≠ operating_revenue_ttm)
+//     net_profit_to_parent_shareholders_ttm         pe_raw / roe_raw / roa_raw 分子 (归母)
+//     net_cffoa_ttm                                 pcf_raw 分母 (经营性现金流)
+//   per-A 沿 v 单调推进取 latest event 即可 (shift=0 已锁"该 visible 最新报告期";
+//   同 report_date 在新 visible_date 的 shift=0 行覆盖旧值, max v 自然取新).
+struct FinancialTtmEv {
+  int v;
+  std::string report_date;
+  float total_operating_revenue_ttm;
+  float net_profit_to_parent_shareholders_ttm;
+  float net_cffoa_ttm;
+};
+
+// cn_stock_financial_balance_general_pit: 资产负债表 PIT (MRQ snapshot).
+//   同 visible_date 可见多个 report_date (历史报告期 + 修正), 取 max(report_date).
+//   字段 (BigQuant 实测口径):
+//     total_owner_equity                            pb_raw 分母 (含少数股东, ≠ parent equity;
+//                                                                CATL/茅台 误差排查得)
+//     total_equity_to_parent_shareholders           roe_raw 分母 (归母, 教科书 ROE 口径)
+//     total_assets                                  roa_raw 分母
+//   per-A 走 latest event 维护 map<report_date, latest_row by v>, 取 max report_date 即可.
+struct FinancialBalanceEv {
+  int v;
+  std::string report_date;
+  float total_owner_equity;
+  float total_equity_to_parent_shareholders;
+  float total_assets;
+};
+
+// cn_stock_financial_income_general_pit: 利润表 PIT.
+//   只入 fs_quarter_index == 4 的年报 (parse 时过滤); 给 ni_raw 用 (dividend_st 阈值).
+//   字段:
+//     net_profit_to_parent_shareholders             ni_raw 数值 (归母年度 NI; 全栈对仗)
+//   同 report_date 多版本取 latest visible (修正语义).
+struct FinancialIncomeAnnualEv {
+  int v;
+  std::string report_date;
+  float net_profit_to_parent_shareholders;
+};
+
+// ----- Tushare 保留占位 (财务变更日, 待 cn_stock_financial_changedate 迁移) -----
+// 实际新基建该表未落地, parse 不被触发, EventStore 保持空 →
+// find_forecast_off_d 退化为只用 (Y+1, 4, 30) deadline_d, 4 月底安全网兜底.
 
 struct ReportEv {
   int v;
   std::string end_date;
-};
-
-struct IncomeEv {
-  int v;
-  std::string end_date;
-  std::string report_type;
-  float revenue;
-  float n_income_attr_p;
-};
-
-struct CashflowEv {
-  int v;
-  std::string end_date;
-  std::string report_type;
-  float n_cashflow_act;
-};
-
-struct FinaIndEv {
-  int v;
-  std::string end_date;
-  float roe;
-  float roa;
 };
 
 template <class Ev>
@@ -203,15 +237,15 @@ struct PitPool {
   EventStore<IndustryComponentEv> industry_component;
   EventStore<IndustryChangeEv> industry_change;
   EventStore<DividendEv> dividend;
+  EventStore<FinancialTtmEv> financial_ttm;
+  EventStore<FinancialBalanceEv> financial_balance;
+  EventStore<FinancialIncomeAnnualEv> financial_income_annual;
 
   // 事件 (Tushare 保留)
   EventStore<ForecastEv> forecast;
 
-  // 事件 (财务旧 Tushare 占位, 暂保留待后续迁移)
+  // 事件 (Tushare 占位, 暂保留待 cn_stock_financial_changedate 迁移)
   EventStore<ReportEv> report;
-  EventStore<IncomeEv> income;
-  EventStore<CashflowEv> cashflow;
-  EventStore<FinaIndEv> fina_indicator;
 };
 
 // ============================================================================

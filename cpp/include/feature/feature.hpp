@@ -35,7 +35,7 @@ enum class F : int {
   // raw 网格 — PitPool dense 直读 / 由 raw 直接相乘 (per-A 动态)
   close_raw = 0, // bar1d.close (不复权 [元/股]; ← cn_stock_real_bar1d.close)
   mcap_raw,      // close_raw × shares.total_shares  ([元])
-  fmcap_raw,     // close_raw × shares.total_float_shares  ([元])
+  fmcap_raw,     // close_raw × shares.a_float_shares  ([元]; BigQuant 实测口径 = A 股流通市值, 不含 H 股)
   share_raw,     // shares.total_shares  ([股])
   pb_raw,        // (财务: 暂保留 NaN 输出, 待 BigQuant 财务表迁移后实现)
   ps_raw,        // (财务: 暂保留 NaN)

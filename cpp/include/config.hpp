@@ -202,8 +202,8 @@ inline constexpr int ANALYSIS_IC_MA_WINDOW = 250;
 //   DESCRIBE_ENABLE   总开关
 //   DESCRIBE_BY_YEAR  关闭则只 "all"; 开启则额外按自然年 (axes.dates 前 4 位) 展开
 // ============================================================================
-inline constexpr bool DESCRIBE_ENABLE = false;
-inline constexpr bool DESCRIBE_BY_YEAR = false;
+inline constexpr bool DESCRIBE_ENABLE = true;
+inline constexpr bool DESCRIBE_BY_YEAR = true;
 
 // ============================================================================
 // I. Build 契约 (build 末尾必须全 finite 的 feature 白名单; fail fast)

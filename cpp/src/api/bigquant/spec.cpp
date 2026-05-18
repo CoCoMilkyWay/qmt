@@ -117,6 +117,26 @@ std::shared_ptr<arrow::Table> fetch(DaiClient &client, const TableSpec &spec,
 
   std::string ds = to_dashed(start);
   std::string de = to_dashed(end);
+
+  if (spec.kind == FetchKind::Snapshot) {
+    // Snapshot: 取窗口内最新一天的全量行 (假日则顺延前; 与 MonthFirst MIN 对仗).
+    //   start 仅决定服务端分区扫描下界, 不影响 MAX(<vd>) 结果. 调度器传进来的 start
+    //   可能远早于 BIGQUANT_API_MIN_DATE (= 历史回测起点), 这里 clamp 到 API 最小日;
+    //   保证 _meta 单文件 refresh 始终命中近端 (最新一天的真盘前快照).
+    //   clamp 后若 ds > de, sub-select 自然返回空集, write_meta 落 0 行 (实盘前夕
+    //   首日跑可能出现; 后续天有数据即恢复).
+    assert(spec.freq == FetchFreq::Day && "Snapshot 当前仅支持 FetchFreq::Day");
+    if (ds < ::config::BIGQUANT_API_MIN_DATE)
+      ds = ::config::BIGQUANT_API_MIN_DATE;
+    assert_post_cutoff(spec, ds, de);
+    std::string sql = "SELECT * FROM " + spec.name + " WHERE " +
+                      spec.visible_date + " = (SELECT MAX(" +
+                      spec.visible_date + ") FROM " + spec.name + " WHERE " +
+                      spec.visible_date + " >= '" + ds + "' AND " +
+                      spec.visible_date + " <= '" + de + "')";
+    return client.query(sql, {{"date", {ds, de}}});
+  }
+
   assert_post_cutoff(spec, ds, de);
 
   if (spec.kind == FetchKind::Partition) {
@@ -131,17 +151,6 @@ std::shared_ptr<arrow::Table> fetch(DaiClient &client, const TableSpec &spec,
             " WHERE " + spec.visible_date + " >= '" + ds + "' AND " +
             spec.visible_date + " <= '" + de + "')";
     }
-    return client.query(sql, {{"date", {ds, de}}});
-  }
-
-  if (spec.kind == FetchKind::Snapshot) {
-    // Snapshot: 取窗口内最新一天的全量行 (假日则顺延前; 与 MonthFirst MIN 对仗).
-    assert(spec.freq == FetchFreq::Day && "Snapshot 当前仅支持 FetchFreq::Day");
-    std::string sql = "SELECT * FROM " + spec.name + " WHERE " +
-                      spec.visible_date + " = (SELECT MAX(" +
-                      spec.visible_date + ") FROM " + spec.name + " WHERE " +
-                      spec.visible_date + " >= '" + ds + "' AND " +
-                      spec.visible_date + " <= '" + de + "')";
     return client.query(sql, {{"date", {ds, de}}});
   }
 
