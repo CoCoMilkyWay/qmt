@@ -24,30 +24,14 @@ namespace flight = arrow::flight;
 
 namespace {
 
-inline constexpr const char *kSchemaPathFmt = "/bigapis/data/v1/spacedatasources/spaces/{space}/datasources/{id}";
-
-// 简化字符串模板 — 仅替换 "{space}" 和 "{id}" 两个占位符.
-std::string format_schema_path(std::string_view space_id, std::string_view datasource_id) {
-  std::string s = kSchemaPathFmt;
-  auto replace = [&](std::string_view from, std::string_view to) {
-    auto pos = s.find(from);
-    assert(pos != std::string::npos);
-    s.replace(pos, from.size(), to);
-  };
-  replace("{space}", space_id);
-  replace("{id}", datasource_id);
-  return s;
-}
-
 // 构造 DAI Flight ticket JSON. yyjson 比手拼字符串安全 (escape 自动处理).
-std::string build_ticket_json(std::string_view sql, const DaiFilters &filters,
-                              bool full_db_scan) {
+std::string build_ticket_json(std::string_view sql, const DaiFilters &filters) {
   yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
   yyjson_mut_val *root = yyjson_mut_obj(doc);
   yyjson_mut_doc_set_root(doc, root);
 
   yyjson_mut_obj_add_strncpy(doc, root, "sql", sql.data(), sql.size());
-  yyjson_mut_obj_add_bool(doc, root, "full_db_scan", full_db_scan);
+  yyjson_mut_obj_add_bool(doc, root, "full_db_scan", false);
 
   yyjson_mut_val *fil_obj = yyjson_mut_obj(doc);
   for (auto &[k, vs] : filters) {
@@ -79,29 +63,14 @@ T unwrap(arrow::Result<T> &&r, const char *what) {
   return std::move(r).ValueUnsafe();
 }
 
-void check(const arrow::Status &s, const char *what) {
-  if (!s.ok()) {
-    std::cerr << "[bigquant.dai] arrow " << what << " failed: " << s.ToString() << std::endl;
-    assert(false);
-  }
-}
-
 } // namespace
 
 DaiClient::DaiClient(std::string ak, std::string sk)
-    : ak_(std::move(ak)), sk_(std::move(sk)), https_(ak_, sk_) {
+    : ak_(std::move(ak)), sk_(std::move(sk)) {
   assert(!ak_.empty() && !sk_.empty());
 }
 
 DaiClient::DaiClient() : DaiClient(::config::BIGQUANT_AK, ::config::BIGQUANT_SK) {}
-
-yyjson_doc *DaiClient::whoami() { return https_.get("/bigapis/auth/v1/users/me"); }
-
-yyjson_doc *DaiClient::get_datasource_schema(std::string_view datasource_id,
-                                             std::string_view space_id) {
-  std::string path = format_schema_path(space_id, datasource_id);
-  return https_.get(path);
-}
 
 void DaiClient::ensure_flight() {
   if (flight_)
@@ -129,10 +98,10 @@ void DaiClient::ensure_flight() {
 }
 
 std::shared_ptr<arrow::Table>
-DaiClient::query(std::string_view sql, const DaiFilters &filters, bool full_db_scan) {
+DaiClient::query(std::string_view sql, const DaiFilters &filters) {
   ensure_flight();
 
-  std::string ticket_json = build_ticket_json(sql, filters, full_db_scan);
+  std::string ticket_json = build_ticket_json(sql, filters);
 
   flight::FlightCallOptions opts;
   opts.headers.emplace_back(flight_auth_.first, flight_auth_.second);

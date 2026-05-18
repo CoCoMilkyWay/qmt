@@ -34,8 +34,7 @@ void format_ts_yyyymmdd(int64_t ns, char out[9]) {
   assert(n == 8);
 }
 
-} // namespace
-
+// arrow::Array[i] -> yyjson 单值 (按 type_id dispatch)
 yyjson_mut_val *array_value_to_json(yyjson_mut_doc *doc, const arrow::Array &a,
                                     int64_t i) {
   if (a.IsNull(i))
@@ -66,32 +65,24 @@ yyjson_mut_val *array_value_to_json(yyjson_mut_doc *doc, const arrow::Array &a,
     return yyjson_mut_real(doc, v);
   }
   case T::INT8:
-    return yyjson_mut_int(
-        doc, static_cast<const arrow::Int8Array &>(a).Value(i));
+    return yyjson_mut_int(doc, static_cast<const arrow::Int8Array &>(a).Value(i));
   case T::INT16:
-    return yyjson_mut_int(
-        doc, static_cast<const arrow::Int16Array &>(a).Value(i));
+    return yyjson_mut_int(doc, static_cast<const arrow::Int16Array &>(a).Value(i));
   case T::INT32:
-    return yyjson_mut_int(
-        doc, static_cast<const arrow::Int32Array &>(a).Value(i));
+    return yyjson_mut_int(doc, static_cast<const arrow::Int32Array &>(a).Value(i));
   case T::INT64:
-    return yyjson_mut_int(
-        doc, static_cast<const arrow::Int64Array &>(a).Value(i));
+    return yyjson_mut_int(doc, static_cast<const arrow::Int64Array &>(a).Value(i));
   case T::UINT8:
-    return yyjson_mut_uint(
-        doc, static_cast<const arrow::UInt8Array &>(a).Value(i));
+    return yyjson_mut_uint(doc, static_cast<const arrow::UInt8Array &>(a).Value(i));
   case T::UINT16:
-    return yyjson_mut_uint(
-        doc, static_cast<const arrow::UInt16Array &>(a).Value(i));
+    return yyjson_mut_uint(doc, static_cast<const arrow::UInt16Array &>(a).Value(i));
   case T::UINT32:
-    return yyjson_mut_uint(
-        doc, static_cast<const arrow::UInt32Array &>(a).Value(i));
+    return yyjson_mut_uint(doc, static_cast<const arrow::UInt32Array &>(a).Value(i));
   case T::UINT64:
-    return yyjson_mut_uint(
-        doc, static_cast<const arrow::UInt64Array &>(a).Value(i));
+    return yyjson_mut_uint(doc, static_cast<const arrow::UInt64Array &>(a).Value(i));
   case T::BOOL:
-    return yyjson_mut_bool(
-        doc, static_cast<const arrow::BooleanArray &>(a).Value(i));
+    return yyjson_mut_bool(doc,
+                           static_cast<const arrow::BooleanArray &>(a).Value(i));
   case T::NA:
     return yyjson_mut_null(doc);
   default:
@@ -103,6 +94,7 @@ yyjson_mut_val *array_value_to_json(yyjson_mut_doc *doc, const arrow::Array &a,
   }
 }
 
+// arrow::Array[i] -> 字符串 (PK key 构造; PK 字段不应为浮点)
 std::string array_value_to_string(const arrow::Array &a, int64_t i) {
   if (a.IsNull(i))
     return std::string{};
@@ -144,38 +136,50 @@ std::string array_value_to_string(const arrow::Array &a, int64_t i) {
   }
 }
 
-// ============================================================================
-// ChunkLoc — 行式定位 (declared in parse.hpp)
-// ============================================================================
+// row_idx (全表) → (chunk_idx, in_chunk_idx) 二分映射. 预先构表 (offsets, 单调递增),
+// 每行 locate O(log num_chunks). Arrow ChunkedArray 由若干 chunk 拼成, 单一 row 由
+// (chunk, offset) 定位.
+struct ChunkLoc {
+  std::vector<int64_t> offsets; // size = num_chunks + 1
 
-void ChunkLoc::build(const arrow::ChunkedArray &c) {
-  offsets.clear();
-  offsets.reserve(c.num_chunks() + 1);
-  int64_t acc = 0;
-  offsets.push_back(0);
-  for (int k = 0; k < c.num_chunks(); ++k) {
-    acc += c.chunk(k)->length();
-    offsets.push_back(acc);
+  void build(const arrow::ChunkedArray &c) {
+    offsets.clear();
+    offsets.reserve(c.num_chunks() + 1);
+    int64_t acc = 0;
+    offsets.push_back(0);
+    for (int k = 0; k < c.num_chunks(); ++k) {
+      acc += c.chunk(k)->length();
+      offsets.push_back(acc);
+    }
+  }
+
+  std::pair<int, int64_t> locate(int64_t row) const {
+    int lo = 0, hi = static_cast<int>(offsets.size()) - 1;
+    while (lo + 1 < hi) {
+      int mid = (lo + hi) / 2;
+      if (offsets[mid] <= row)
+        lo = mid;
+      else
+        hi = mid;
+    }
+    return {lo, row - offsets[lo]};
+  }
+};
+
+// 预构造列定位表 + 列名
+void prep_cols(const std::shared_ptr<arrow::Table> &t,
+               std::vector<ChunkLoc> &locs,
+               std::vector<std::string> &col_names) {
+  const int n_cols = t->num_columns();
+  const auto &fields = t->schema()->fields();
+  locs.assign(n_cols, ChunkLoc{});
+  col_names.clear();
+  col_names.reserve(n_cols);
+  for (int c = 0; c < n_cols; ++c) {
+    locs[c].build(*t->column(c));
+    col_names.push_back(fields[c]->name());
   }
 }
-
-std::pair<int, int64_t> ChunkLoc::locate(int64_t row) const {
-  int lo = 0, hi = static_cast<int>(offsets.size()) - 1;
-  while (lo + 1 < hi) {
-    int mid = (lo + hi) / 2;
-    if (offsets[mid] <= row)
-      lo = mid;
-    else
-      hi = mid;
-  }
-  return {lo, row - offsets[lo]};
-}
-
-// ============================================================================
-// 行式落盘共用 helpers
-// ============================================================================
-
-namespace {
 
 // 构造单行 obj: 每列调 array_value_to_json + obj_add (key 拷贝, 解耦 table 生命周期)
 yyjson_mut_val *build_row_obj(yyjson_mut_doc *doc,
@@ -196,18 +200,34 @@ yyjson_mut_val *build_row_obj(yyjson_mut_doc *doc,
   return obj;
 }
 
-void prep_cols(const std::shared_ptr<arrow::Table> &t,
-               std::vector<ChunkLoc> &locs,
-               std::vector<std::string> &col_names) {
-  const int n_cols = t->num_columns();
-  const auto &fields = t->schema()->fields();
-  locs.assign(n_cols, ChunkLoc{});
-  col_names.clear();
-  col_names.reserve(n_cols);
-  for (int c = 0; c < n_cols; ++c) {
-    locs[c].build(*t->column(c));
-    col_names.push_back(fields[c]->name());
+int field_index_of(const arrow::Table &t, const std::string &name) {
+  const auto &fields = t.schema()->fields();
+  for (int i = 0; i < static_cast<int>(fields.size()); ++i) {
+    if (fields[i]->name() == name)
+      return i;
   }
+  assert(false && "bigquant::parse::bucket: 字段名不在 schema 中");
+  return -1;
+}
+
+std::string make_pk_key(const arrow::Table &t,
+                        const std::vector<int> &pk_idxs,
+                        const std::vector<ChunkLoc> &pk_locs, int64_t row) {
+  std::string key;
+  for (size_t k = 0; k < pk_idxs.size(); ++k) {
+    const auto &col = *t.column(pk_idxs[k]);
+    auto [ck, ci] = pk_locs[k].locate(row);
+    key += array_value_to_string(*col.chunk(ck), ci);
+    key += '|';
+  }
+  return key;
+}
+
+std::string get_visible_date(const arrow::Table &t, int vd_idx,
+                             const ChunkLoc &vd_loc, int64_t row) {
+  const auto &col = *t.column(vd_idx);
+  auto [ck, ci] = vd_loc.locate(row);
+  return array_value_to_string(*col.chunk(ck), ci);
 }
 
 } // namespace
@@ -257,43 +277,8 @@ yyjson_mut_doc *table_subset_to_json(const std::shared_ptr<arrow::Table> &t,
 }
 
 // ============================================================================
-// bucket_by_visible_date — 共用桶分逻辑 (store / import 复用)
+// bucket_by_visible_date — store / import 共用 (PK upsert + 范围裁剪)
 // ============================================================================
-
-namespace {
-
-int field_index_of(const arrow::Table &t, const std::string &name) {
-  const auto &fields = t.schema()->fields();
-  for (int i = 0; i < static_cast<int>(fields.size()); ++i) {
-    if (fields[i]->name() == name)
-      return i;
-  }
-  assert(false && "bigquant::parse::bucket: 字段名不在 schema 中");
-  return -1;
-}
-
-std::string make_pk_key(const arrow::Table &t,
-                        const std::vector<int> &pk_idxs,
-                        const std::vector<ChunkLoc> &pk_locs, int64_t row) {
-  std::string key;
-  for (size_t k = 0; k < pk_idxs.size(); ++k) {
-    int col_idx = pk_idxs[k];
-    const auto &col = *t.column(col_idx);
-    auto [ck, ci] = pk_locs[k].locate(row);
-    key += array_value_to_string(*col.chunk(ck), ci);
-    key += '|';
-  }
-  return key;
-}
-
-std::string get_visible_date(const arrow::Table &t, int vd_idx,
-                             const ChunkLoc &vd_loc, int64_t row) {
-  const auto &col = *t.column(vd_idx);
-  auto [ck, ci] = vd_loc.locate(row);
-  return array_value_to_string(*col.chunk(ck), ci);
-}
-
-} // namespace
 
 std::map<std::string, std::vector<int64_t>>
 bucket_by_visible_date(const std::shared_ptr<arrow::Table> &t,

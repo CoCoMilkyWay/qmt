@@ -6,34 +6,21 @@
 namespace tushare {
 
 // ============================================================================
-// 通用 fetch：task.params 已是完整 query
-// ============================================================================
-
-yyjson_doc *FetchStrategy::fetch(Http &http, const FetchTask &task,
-                                 const InterfaceSpec &spec) const {
-  return http.call(spec.api, task.params);
-}
-
-// ============================================================================
-// MonthStrategy — 段 [s, e] → 1 task (range query)
+// FetchStrategy::segment_to_tasks — 单一判别式 dispatch
 // ============================================================================
 
 std::vector<FetchTask>
-MonthStrategy::segment_to_tasks(const misc::FetchSegment &seg) const {
-  return {{seg.start, seg.end,
-           {{"start_date", seg.start}, {"end_date", seg.end}}}};
-}
-
-// ============================================================================
-// PerDayStrategy — 段必为 [d, d]; 每个 day_param 一次 task
-// ============================================================================
-
-std::vector<FetchTask>
-PerDayStrategy::segment_to_tasks(const misc::FetchSegment &seg) const {
-  assert(seg.start == seg.end && "PerDay 段必为单日 (scheduler 已用 can_range=false 强制)");
+FetchStrategy::segment_to_tasks(const misc::FetchSegment &seg) const {
+  // range-capable: 段 [s, e] → 1 task (start_date / end_date 闭区间)
+  if (day_params.empty()) {
+    return {{seg.start, seg.end,
+             {{"start_date", seg.start}, {"end_date", seg.end}}}};
+  }
+  // per-day-only: 段必为 [d, d] (scheduler 已用 can_range=false 强制); 每 day_param 一 task
+  assert(seg.start == seg.end);
   std::vector<FetchTask> tasks;
-  tasks.reserve(day_params_.size());
-  for (auto &p : day_params_) {
+  tasks.reserve(day_params.size());
+  for (auto &p : day_params) {
     tasks.push_back({seg.start, seg.end, {{p, seg.start}}});
   }
   return tasks;
@@ -48,22 +35,18 @@ PerDayStrategy::segment_to_tasks(const misc::FetchSegment &seg) const {
 // ============================================================================
 
 const std::vector<InterfaceSpec> SPECS = {
-    {"forecast",
-     "forecast_vip",
-     {"ann_date"},
-     {"ts_code", "end_date"},
-     std::make_shared<MonthStrategy>()},
-    {"express",
-     "express_vip",
-     {"ann_date"},
-     {"ts_code", "end_date"},
-     std::make_shared<MonthStrategy>()},
-    {"disclosure",
-     "disclosure_date",
-     {"ann_date"},
-     {"ts_code", "end_date"},
-     std::make_shared<PerDayStrategy>(std::vector<std::string>{"ann_date"}),
-     {"actual_date", "modify_date"}},
+    {"forecast",   "forecast_vip",   {"ann_date"}, {"ts_code", "end_date"}, /*strategy=*/{}},
+    {"express",    "express_vip",    {"ann_date"}, {"ts_code", "end_date"}, /*strategy=*/{}},
+    {"disclosure", "disclosure_date", {"ann_date"}, {"ts_code", "end_date"},
+     /*strategy=*/{{"ann_date"}}, /*drop=*/{"actual_date", "modify_date"}},
 };
+
+// ============================================================================
+// fetch — 一步式 HTTP 查询 (与 bigquant::fetch 对仗)
+// ============================================================================
+
+yyjson_doc *fetch(Http &http, const InterfaceSpec &spec, const FetchTask &task) {
+  return http.call(spec.api, task.params);
+}
 
 } // namespace tushare

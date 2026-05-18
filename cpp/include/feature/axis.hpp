@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -8,10 +9,12 @@
 
 namespace feature {
 
+// ============================================================================
 // D 轴 + A 轴 + 反向索引. 由 load_axes() 一次性构造, 此后只读.
-//   dates: SSE ∪ SZSE 且 is_open=1 的交易日 YYYYMMDD, 升序去重
-//   codes: _meta/stock_basic.json 全量 ts_code, 升序 (含已退市)
+//   dates: data/_meta/trading_days.json 中 market_code='CN' 的 date 升序去重
+//   codes: data/_meta/cn_stock_basic_info.json 全量 instrument (含已退市) 升序
 //   date_days: dates[i] 的 sys_days 缓存 (list_age / rolling 等场合避免重复 parse)
+// ============================================================================
 struct Axes {
   std::vector<std::string> dates;
   std::vector<std::string> codes;
@@ -27,28 +30,29 @@ struct Axes {
   int floor_date(std::string_view d) const;
 };
 
+// ============================================================================
 // per-A 静态信息 (asset 维), 与 Axes.codes 同序同长.
-//   list_date / delist_date: YYYYMMDD; delist_date 空串 = 未退市
-//   market: 主板 / 创业板 / 科创板 / ...
-//   exchange: SSE / SZSE / BSE
-//   industry_l1: 申万 SW2021 一级行业中文名 (来自 _meta/index_member_all.json::l1_name);
-//                未覆盖的 ts_code 留空串 (新股未入指数 / B 股 / 退市等)
-// 单次改名记录 (PIT-safe: start_date 为新名生效日, 公告之后).
-struct NameChange {
-  std::string start_date; // YYYYMMDD, 新名生效日 (升序排列)
-  std::string name;       // 新名字 (含 ST/*ST/退 等关键字时触发 risk_warn)
-};
-
+//   来源: data/_meta/cn_stock_basic_info.json (BigQuant Static 全量 snapshot)
+//
+//   name        — instrument 当前简称 (诊断/日志用, 非 PIT — 历史改名走时变 feature)
+//   list_date   — YYYYMMDD; 空串 = 未上市 (理论不应出现)
+//   delist_date — YYYYMMDD; 空串 = 未退市
+//   list_sector — int8 板块编码 (源数据值): 1=主板 / 2=创业板 / 3=科创板 / 4=北交所
+//                 0 = 未知 (源数据为 null 或缺失). 内部 ID 即源数据值, 不再做中文映射.
+//   exchange    — 中文全称: "上海证券交易所" / "深圳证券交易所" / "北京证券交易所"
+//
+//   注: industry_l1 不再是 meta 静态 — 由 ts_industry_l1 inter feature 从
+//       cn_stock_industry_component (月初快照) + cn_stock_industry_change (日内
+//       增量) per-(D, A) 计算, 编码为 SW2021 一级行业 ID (见 feature/industry.hpp).
+//   注: name_history 已删除 — risk_warn 简化版直接读 cn_stock_status.st_status,
+//       无需再用 namechange 修正 ST 状态边界.
+// ============================================================================
 struct StockMeta {
-  std::vector<std::string> name; // stock_basic.name (最新名, 仅用于日志/诊断, 非 PIT)
+  std::vector<std::string> name;
   std::vector<std::string> list_date;
   std::vector<std::string> delist_date;
-  std::vector<std::string> market;
+  std::vector<int8_t> list_sector;
   std::vector<std::string> exchange;
-  std::vector<std::string> industry_l1;
-  // per-A 改名时间线 (按 start_date 升序). 段语义: [start_date_i, start_date_{i+1}) 内名 = records[i].name.
-  // 用于 ts_risk_warn 区分 "撤销 ST 转正常" (name 不含 ST/退) vs "退市整理期" (name 含 退).
-  std::vector<std::vector<NameChange>> name_history;
 };
 
 Axes load_axes();

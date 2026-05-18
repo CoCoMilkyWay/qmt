@@ -5,23 +5,29 @@
 #include <vector>
 
 // ============================================================================
-// 统一抓取调度器 (bigquant DAI Day + tushare 共用)
+// 统一抓取调度器 — bigquant DAI + tushare 共用入口.
 //
-// 输入: 表名 / outer [start, end] / lookback_days / 该 API 是否支持区间查询.
-// 输出: 升序的 FetchSegment 列表, 每段 = [seg.start, seg.end] (闭区间).
+// 输入: 表名 / outer [start, end] / lookback_days.
+// 输出: 升序的 FetchSegment 列表, 每段 = [seg.start, seg.end] (闭区间, "YYYYMMDD").
 //
-// 算法 (与 misc::store::scan_missing_days 串联):
-//   1. scan_missing_days → 拿到 [start, end] 内 (3 态判定 + lookback 强拉) 的缺失日.
-//   2. can_range = false  → 每个缺失日各自一段 [d, d] (per-day API 强制).
-//   3. can_range = true   → 按自然月聚合:
-//        - 月内 (clamp 到 outer 后) 每个日历日都在 missing → 一段 [clamp_first, clamp_last]
-//        - 否则月内每个 missing 日 → 单日段 [d, d]
-//      该规则在 "整月空洞" 与 "近端 lookback 补丁" 之间自动取舍, 避免为补 7 天而拉一年.
+// 三态判定 (与 misc::store::_empty.json 串联):
+//   day file 存在 → 拉过有数据
+//   day file 不存在 + 在 _empty → 拉过无数据 (跳过)
+//   day file 不存在 + 不在 _empty → 未拉 (必拉)
+// 加上 lookback (最近 N 个日历日) 强拉, 兜住当日未结算的累积缺失.
 //
-// 注:
-//   - 只服务 Day 频率. bigquant Static 不走调度, MonthFirst 仍用 scan_missing_months.
-//   - lookback 是 "日历日" (不是交易日), 直接 misc::store::scan_missing_days 行为.
-//   - 段日期格式与 scan_missing_days 一致, 即 "YYYYMMDD" (8 字符).
+// 两个对仗 planner:
+//
+//   plan_day_segments(name, [s, e], lookback, can_range)
+//     - can_range = true:  整月空洞 → 月段 [m_first, m_last] (clamp 到 outer);
+//                          否则该月每个缺失日 → 单日段 [d, d].
+//     - can_range = false: 每个缺失日单独一段 [d, d] (per-day API 强制).
+//     用例: bigquant Day, tushare 所有 strategy.
+//
+//   plan_month_segments(name, [s, e], lookback)
+//     - 该月任一 day file 存在 → 整月跳过; 进入 lookback 窗口的月 → 必拉;
+//       否则 → 一段 [m_first, m_last] (clamp 到 outer).
+//     用例: bigquant MonthFirst (cn_stock_industry_component).
 // ============================================================================
 namespace misc {
 
@@ -31,7 +37,11 @@ struct FetchSegment {
 };
 
 std::vector<FetchSegment>
-plan_fetch_segments(std::string_view name, std::string_view start,
-                    std::string_view end, int lookback_days, bool can_range);
+plan_day_segments(std::string_view name, std::string_view start,
+                  std::string_view end, int lookback_days, bool can_range);
+
+std::vector<FetchSegment>
+plan_month_segments(std::string_view name, std::string_view start,
+                    std::string_view end, int lookback_days);
 
 } // namespace misc

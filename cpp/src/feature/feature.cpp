@@ -2,6 +2,7 @@
 
 #include "feature/axis.hpp"
 #include "feature/cs.hpp"
+#include "feature/industry.hpp"
 #include "feature/pit.hpp"
 #include "feature/tensor.hpp"
 #include "feature/ts.hpp"
@@ -57,6 +58,33 @@ inline bool in_whitelist(std::string_view v,
       return true;
   }
   return false;
+}
+
+// list_sector 整数白名单查表 (config::POOL_LIST_SECTOR_WHITELIST 是 int8 集合).
+template <std::size_t N>
+inline bool in_int_whitelist(int8_t v, const std::array<int8_t, N> &wl) {
+  for (auto w : wl) {
+    if (v == w)
+      return true;
+  }
+  return false;
+}
+
+// industry_l1 ID 白名单 mask: 把 config::POOL_INDUSTRY_L1_WHITELIST (中文 string_view)
+//   转 array<bool, 32> mask, mask[id]=true 表该 SW2021 一级行业 ID 在白名单内.
+//   首次调用 lazy 构建, 后续只读. 失败的中文名 (拼写不在 SW2021_L1_NAMES 内) → id=0
+//   被忽略 (不会触发 mask[0], 因为 industry_l1=0 = "未知" 永远不该入白名单).
+inline const std::array<bool, SW2021_L1_COUNT> &industry_l1_whitelist_mask() {
+  static const auto mask = []() {
+    std::array<bool, SW2021_L1_COUNT> m{};
+    for (auto name : ::config::POOL_INDUSTRY_L1_WHITELIST) {
+      uint8_t id = sw2021_l1_name_to_id(name);
+      if (id != 0)
+        m[id] = true;
+    }
+    return m;
+  }();
+  return mask;
 }
 
 // 计算股票 a 的上市日索引 (在 axes.dates 中的 lower_bound)
@@ -170,46 +198,86 @@ inline void grid_copy_bool(int a, const Axes &axes, Tensor &T, F dst,
 
 } // namespace
 
+// close_raw ← cn_stock_bar1d.close (后复权 [元/股]). row D = D-1 实际收盘 (CUTOFF=-1).
 void ts_close_raw(int a, const Axes &axes, const PitPool &pool,
                   const StockMeta &meta, Tensor &T) {
   grid_copy(a, axes, meta, T, F::close_raw,
-            [&]() -> const std::vector<float> & { return pool.daily_basic.close; });
+            [&]() -> const std::vector<float> & { return pool.bar1d.close; });
 }
 
+// mcap_raw = close_raw[d] × shares.total_shares[a, d]  ([元])
+//   注: close_raw 是后复权; total_shares 是当前总股本快照.
+//       严格按 README §字段表"close_raw × share_raw"字面口径; 历史送股多的老票
+//       后复权 close 累积放大, 横截面对比会有偏差 (TODO 待与字段表一并 review).
 void ts_mcap_raw(int a, const Axes &axes, const PitPool &pool,
                  const StockMeta &meta, Tensor &T) {
-  grid_copy(a, axes, meta, T, F::mcap_raw, [&]() -> const std::vector<float> & { return pool.daily_basic.total_mv; }, 1e4f);
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto cl = T.ts_row(F::close_raw, a);
+  auto out = T.ts_row(F::mcap_raw, a);
+  const auto &sh = pool.shares.total_shares;
+  for (int d = 0; d < n_d; ++d) {
+    float c = cl[d];
+    float s = sh[base + static_cast<std::size_t>(d)];
+    out[d] = (is_finite(c) && is_finite(s)) ? c * s : std::nanf("");
+  }
+  fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
+// fmcap_raw = close_raw[d] × shares.total_float_shares[a, d]  ([元])
 void ts_fmcap_raw(int a, const Axes &axes, const PitPool &pool,
                   const StockMeta &meta, Tensor &T) {
-  grid_copy(a, axes, meta, T, F::fmcap_raw, [&]() -> const std::vector<float> & { return pool.daily_basic.circ_mv; }, 1e4f);
+  int n_d = axes.n_d();
+  std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
+  auto cl = T.ts_row(F::close_raw, a);
+  auto out = T.ts_row(F::fmcap_raw, a);
+  const auto &sh = pool.shares.total_float_shares;
+  for (int d = 0; d < n_d; ++d) {
+    float c = cl[d];
+    float s = sh[base + static_cast<std::size_t>(d)];
+    out[d] = (is_finite(c) && is_finite(s)) ? c * s : std::nanf("");
+  }
+  fill_before_list(out, a, axes, meta);
+  fill_after_delist(out, a, axes, meta);
 }
 
+// share_raw ← cn_stock_shares.total_shares ([股]; 直读, 无单位换算)
 void ts_share_raw(int a, const Axes &axes, const PitPool &pool,
                   const StockMeta &meta, Tensor &T) {
-  grid_copy(a, axes, meta, T, F::share_raw, [&]() -> const std::vector<float> & { return pool.daily_basic.total_share; }, 1e4f);
+  grid_copy(a, axes, meta, T, F::share_raw,
+            [&]() -> const std::vector<float> & { return pool.shares.total_shares; });
 }
 
-void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
-               const StockMeta &meta, Tensor &T) {
-  grid_copy(a, axes, meta, T, F::pb_raw,
-            [&]() -> const std::vector<float> & { return pool.daily_basic.pb; });
+// 财务相关 raw (pb / ps / dy): 数据源 BigQuant cn_stock_financial_* 暂未迁移
+//   到 PitPool, 这里先输出全 NaN — 下游 cs_pb_ttm1 / cs_ps_ttm4 / cs_dy_ttm4 的
+//   factor_pipeline 会跳 NaN, 等价于 disable 该 factor (横截面无可用样本 → 全 NaN).
+void ts_pb_raw(int a, const Axes &axes, const PitPool &,
+               const StockMeta &, Tensor &T) {
+  auto out = T.ts_row(F::pb_raw, a);
+  std::fill(out.begin(), out.end(), std::nanf(""));
+  (void)axes;
 }
 
-void ts_ps_raw(int a, const Axes &axes, const PitPool &pool,
-               const StockMeta &meta, Tensor &T) {
-  grid_copy(a, axes, meta, T, F::ps_raw,
-            [&]() -> const std::vector<float> & { return pool.daily_basic.ps_ttm; });
+void ts_ps_raw(int a, const Axes &axes, const PitPool &,
+               const StockMeta &, Tensor &T) {
+  auto out = T.ts_row(F::ps_raw, a);
+  std::fill(out.begin(), out.end(), std::nanf(""));
+  (void)axes;
 }
 
-void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
-               const StockMeta &meta, Tensor &T) {
-  grid_copy(a, axes, meta, T, F::dy_raw,
-            [&]() -> const std::vector<float> & { return pool.daily_basic.dv_ttm; });
+void ts_dy_raw(int a, const Axes &axes, const PitPool &,
+               const StockMeta &, Tensor &T) {
+  auto out = T.ts_row(F::dy_raw, a);
+  std::fill(out.begin(), out.end(), std::nanf(""));
+  (void)axes;
 }
 
-// up_lim / dn_lim feature 主动 -1 与 close_raw (post-market) 对齐; 同期未复权价比对.
+// up_lim / dn_lim 主动 -1: limit_price (CUTOFF=0) 取的是 row D 当日盘前公布
+//   = D 日适用涨跌停 (基于 D-1 close × 1.1/1.2 来的); close_raw[D] (CUTOFF=-1)
+//   = D-1 日实际收盘. 想判 "D-1 日是否封板" 应用 D-1 适用涨跌停, 即 limit_price[D-1]
+//   = pool.limit_price.upper_limit[a, d-1]. ts_up_lim 主动 -1 完成此对齐.
+//   d=0 处无前一交易日 → NaN.
 void ts_up_lim(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
   int n_d = axes.n_d();
@@ -218,7 +286,7 @@ void ts_up_lim(int a, const Axes &axes, const PitPool &pool,
   if (n_d > 0)
     out[0] = std::nanf("");
   for (int d = 1; d < n_d; ++d) {
-    out[d] = pool.stk_limit.up_limit[base + static_cast<std::size_t>(d - 1)];
+    out[d] = pool.limit_price.upper_limit[base + static_cast<std::size_t>(d - 1)];
   }
   fill_before_list(out, a, axes, meta);
   fill_after_delist(out, a, axes, meta);
@@ -232,34 +300,64 @@ void ts_dn_lim(int a, const Axes &axes, const PitPool &pool,
   if (n_d > 0)
     out[0] = std::nanf("");
   for (int d = 1; d < n_d; ++d) {
-    out[d] = pool.stk_limit.down_limit[base + static_cast<std::size_t>(d - 1)];
+    out[d] = pool.limit_price.lower_limit[base + static_cast<std::size_t>(d - 1)];
   }
   fill_before_list(out, a, axes, meta);
   fill_after_delist(out, a, axes, meta);
 }
 
+// susp ← cn_stock_status.suspended (盘前 09:20 全量快照, CUTOFF=0)
 void ts_susp(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
              Tensor &T) {
   grid_copy_bool(a, axes, T, F::susp,
-                 [&]() -> const std::vector<uint8_t> & { return pool.suspend_d.susp; });
+                 [&]() -> const std::vector<uint8_t> & { return pool.status.suspended; });
 }
 
+// is_margin ← margin_detail (D, A) 存在性 (CUTOFF=0)
 void ts_is_margin(int a, const Axes &axes, const PitPool &pool,
                   const StockMeta &, Tensor &T) {
   grid_copy_bool(a, axes, T, F::is_margin,
-                 [&]() -> const std::vector<uint8_t> & { return pool.margin_secs.is_margin; });
+                 [&]() -> const std::vector<uint8_t> & { return pool.margin_detail.is_margin; });
 }
 
 void ts_mr_bal_raw(int a, const Axes &axes, const PitPool &pool,
                    const StockMeta &meta, Tensor &T) {
   grid_copy(a, axes, meta, T, F::mr_bal_raw,
-            [&]() -> const std::vector<float> & { return pool.margin_detail.mr_bal; });
+            [&]() -> const std::vector<float> & { return pool.margin_detail.financing_balance; });
 }
 
 void ts_ms_bal_raw(int a, const Axes &axes, const PitPool &pool,
                    const StockMeta &meta, Tensor &T) {
   grid_copy(a, axes, meta, T, F::ms_bal_raw,
-            [&]() -> const std::vector<float> & { return pool.margin_detail.ms_bal; });
+            [&]() -> const std::vector<float> & { return pool.margin_detail.securities_lending_balance; });
+}
+
+// industry_l1: SW2021 一级行业 ID per (D, A), 0=未知, 1..31 见 industry.hpp.
+//   合并 industry_component (月初快照) + industry_change (月内 change_flag=1 进入)
+//   两个事件流, per-A 按 v 升序回放, last_l1_id 写每行. 上市前/无事件期保持 0.
+//   退市后 last_l1_id 残留 (pool_b 已用 ¬is_finite(delist_age) 兜底排除, 不影响下游).
+void ts_industry_l1(int a, const Axes &axes, const PitPool &pool,
+                    const StockMeta &, Tensor &T) {
+  int n_d = axes.n_d();
+  auto out = T.ts_row(F::industry_l1, a);
+  std::fill(out.begin(), out.end(), 0.0f);
+
+  const auto &comp = pool.industry_component[a];
+  const auto &chg = pool.industry_change[a];
+  std::size_t ic = 0, ig = 0;
+  uint8_t last_id = 0;
+
+  for (int d = 0; d < n_d; ++d) {
+    while (ic < comp.size() && comp[ic].v <= d) {
+      last_id = comp[ic].l1_id;
+      ++ic;
+    }
+    while (ig < chg.size() && chg[ig].v <= d) {
+      last_id = chg[ig].l1_id;
+      ++ig;
+    }
+    out[d] = static_cast<float>(last_id);
+  }
 }
 
 // ============================================================================
@@ -485,13 +583,14 @@ void ts_low_p(int a, const Axes &axes, const PitPool &, const StockMeta &,
   }
 }
 
-// low_mc: 主板阈值 5e8, 非主板 3e8. mb 判定直接 inline meta.market[a] (asset 静态, 全 D 同值).
+// low_mc: 主板阈值 5e8, 非主板 3e8. mb 判定 = meta.list_sector[a]==1 (asset 静态).
+//   list_sector 编码: 1=主板, 2=创业板, 3=科创板, 4=北交所, 0=未知.
 void ts_low_mc(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
                Tensor &T) {
   int n_d = axes.n_d();
   auto mc = T.ts_row(F::mcap_raw, a);
   auto out = T.ts_row(F::low_mc, a);
-  float thr = (meta.market[a] == "主板") ? 5e8f : 3e8f;
+  float thr = (meta.list_sector[a] == 1) ? 5e8f : 3e8f;
   for (int d = 0; d < n_d; ++d) {
     out[d] = (is_finite(mc[d]) && mc[d] < thr) ? 1.0f : 0.0f;
   }
@@ -559,7 +658,7 @@ void ts_revenue_st(int a, const Axes &axes, const PitPool &pool,
   auto rev_raw = T.ts_row(F::rev_raw, a);
   std::fill(out.begin(), out.end(), 0.0f);
 
-  bool mb_a = (meta.market[a] == "主板"); // 仅主板适用 (asset 静态, 全 D 同值)
+  bool mb_a = (meta.list_sector[a] == 1); // 仅主板适用 (asset 静态, 1=主板)
   if (!mb_a)
     return;
 
@@ -593,8 +692,8 @@ void ts_revenue_st(int a, const Axes &axes, const PitPool &pool,
 }
 
 // dividend_st: 阶梯 forward fill — 每 dividend event 重算 3y_sum,
-//   3y_sum = Σ over 历史 events with end_date.Y in [ann_y-3, ann_y-1]
-//            的 cash_div_tax × share_raw[event.v]; 区间 [e.v, next.v) 填.
+//   3y_sum = Σ over 历史 events with report_date.Y in [ann_y-3, ann_y-1]
+//            的 cash_after_tax × share_raw[event.v]; 区间 [e.v, next.v) 填.
 //   注: e.v 已是首次可见 row D; ann_y 用 axes.dates[e.v - 1] 还原 visible 日期年份.
 //
 // 暖机期 (warmup_d 之前) 一律不命中, 避免 3y 回望不完整时偏严:
@@ -609,7 +708,7 @@ void ts_dividend_st(int a, const Axes &axes, const PitPool &pool,
   auto ni_raw = T.ts_row(F::ni_raw, a);
   std::fill(out.begin(), out.end(), 0.0f);
 
-  bool mb_a = (meta.market[a] == "主板"); // 仅主板适用 (asset 静态, 全 D 同值)
+  bool mb_a = (meta.list_sector[a] == 1); // 仅主板适用 (asset 静态, 1=主板)
   if (!mb_a)
     return;
 
@@ -669,62 +768,39 @@ void ts_dividend_st(int a, const Axes &axes, const PitPool &pool,
     float sum = 0.0f;
     for (std::size_t j = 0; j <= ev_idx; ++j) {
       const auto &p = divs[j];
-      int py = year_of(p.end_date);
+      int py = year_of(p.report_date);
       if (py < lo || py > hi)
         continue;
-      if (!is_finite(p.cash_div_tax))
+      if (!is_finite(p.cash_after_tax))
         continue;
       int p_d = p.v;
       float sh = (p_d >= 0 && p_d < n_d) ? share_raw[p_d] : std::nanf("");
       if (!is_finite(sh))
         continue;
-      sum += p.cash_div_tax * sh;
+      sum += p.cash_after_tax * sh;
     }
     current_3ysum = sum;
   }
   apply_segment(next_apply_d, n_d, current_3ysum);
 }
 
-// risk_warn: stock_st 每日快照 (含 ffill 0→1/2) + namechange 段修正.
-//   输出 0=正常, 1=ST (name 不含 '*'), 2=*ST (name 含 '*').
-//
-//   单一 stock_st 不准: tushare "票今天不在 ST 名单" 二义 — ① 撤销 ST 转正常 (应=0)
-//   ② 进入退市整理期 "退市XX"/"XX退", tushare 不再 list (应保留 *ST 等级).
-//   ffill 无法区分这两种情况. 用 namechange 派生的 "当段 name" 做边界修正:
-//     段 = [start_date_i, start_date_{i+1}), name = records[i].name
-//     段 name 含 "ST" 或 "退" → 信 stock_st (保留 ffill 后的 1/2)
-//     段 name 不含 "ST" 也不含 "退" → 强制 0 (撤销 ST 转正常段, 抹掉 ffill 误延续)
-//     最早 start_date 之前 (无 namechange 记录段) → 信 stock_st (上市初期 / 未改名票)
-//
-//   关键字检测: std::string::find 字节级匹配, "退" 在 UTF-8 是 0xE9 0x80 0x80, 不与 ASCII "ST" 冲突.
+// risk_warn: 直读 cn_stock_status.st_status (盘前 09:20 全量快照, CUTOFF=0).
+//   输出 0=正常, 1=ST, 2=*ST (int8 → float 直接 cast). 数据起点前一律 0
+//   (parse 时 prealloc 为 0, 文件不存在时不写, 保持初值).
+//   注: 旧版本走 stock_st (Tushare 每日 ST 名单 + ffill + namechange 段修正) 是
+//       为了兜住 tushare 票"今天不在 ST 名单"的二义性 (撤销 ST vs 退市整理期);
+//       新数据 cn_stock_status 是交易所盘前快照, st_status 字段语义明确, 无需修正.
+//   下游 cs_tradable 把 risk_warn > 0.5 视为排除 (1.0 ST / 2.0 *ST 都触发).
 void ts_risk_warn(int a, const Axes &axes, const PitPool &pool,
-                  const StockMeta &meta, Tensor &T) {
+                  const StockMeta &, Tensor &T) {
   int n_d = axes.n_d();
   auto out = T.ts_row(F::risk_warn, a);
   std::size_t base =
       static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
-
-  const auto &hist = meta.name_history[static_cast<std::size_t>(a)];
-
-  // 段游标 cur: -1 = 早于所有 namechange (信 stock_st); 否则 = 当前段索引.
-  int cur = -1;
-  bool keep_st = true; // 当前段是否允许 stock_st 值 (cur=-1 时为 true)
-  std::size_t next_i = 0;
-
   for (int d = 0; d < n_d; ++d) {
-    const std::string &today = axes.dates[static_cast<std::size_t>(d)];
-    // 推进游标到包含 d 的段
-    while (next_i < hist.size() && hist[next_i].start_date <= today) {
-      cur = static_cast<int>(next_i);
-      const std::string &nm = hist[next_i].name;
-      keep_st = (nm.find("ST") != std::string::npos) ||
-                (nm.find("\xe9\x80\x80") != std::string::npos); // "退" UTF-8
-      ++next_i;
-    }
-    uint8_t raw = pool.stock_st.state[base + static_cast<std::size_t>(d)];
-    out[d] = keep_st ? static_cast<float>(raw) : 0.0f;
+    int8_t st = pool.status.st_status[base + static_cast<std::size_t>(d)];
+    out[d] = static_cast<float>(st);
   }
-  (void)cur; // cur 仅用于语义/调试, 可省
 }
 
 // trading_st: rolling 20D (low_p ∨ low_mc).all(). 单调连续计数即可.
@@ -759,22 +835,36 @@ void ts_new_list(int a, const Axes &axes, const PitPool &, const StockMeta &,
   }
 }
 
+// pool_b = exchange ∈ wl ∧ list_sector ∈ wl ∧ industry_l1 ∈ wl
+//          ∧ ¬susp ∧ ¬退市 ∧ (true if include_margin else ¬is_margin)
+//   exchange / list_sector 是 asset 静态 (全 D 同值, 启动期判一次);
+//   industry_l1 是时变 (per-D 读 T.ts_row(F::industry_l1, a) → ID → mask 查白名单).
+//   industry_l1 ID 0 (未知) 不在 mask 任何位 → ¬ind_ok, 自然排除.
 void ts_pool_b(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
                Tensor &T) {
   int n_d = axes.n_d();
   auto susp_ = T.ts_row(F::susp, a);
   auto is_marg_ = T.ts_row(F::is_margin, a);
   auto delist_age_ = T.ts_row(F::delist_age, a);
+  auto industry_l1_ = T.ts_row(F::industry_l1, a);
   auto out = T.ts_row(F::pool_b, a);
+
   bool ex_ok = in_whitelist(meta.exchange[a], ::config::POOL_EXCHANGE_WHITELIST);
-  bool mk_ok = in_whitelist(meta.market[a], ::config::POOL_MARKET_WHITELIST);
-  bool ind_ok =
-      in_whitelist(meta.industry_l1[a], ::config::POOL_INDUSTRY_L1_WHITELIST);
-  bool asset_ok = ex_ok && mk_ok && ind_ok;
+  bool sec_ok = in_int_whitelist(meta.list_sector[a],
+                                 ::config::POOL_LIST_SECTOR_WHITELIST);
+  bool asset_ok = ex_ok && sec_ok;
+  const auto &mask = industry_l1_whitelist_mask();
   constexpr bool incl_margin = ::config::POOL_INCLUDE_MARGIN;
+
   for (int d = 0; d < n_d; ++d) {
-    // 已退市 (退市当日含) ↔ delist_age finite (PIT 契约保证 finite ⇒ ≥ 0).
-    bool b = asset_ok && !(susp_[d] > 0.5f) && !is_finite(delist_age_[d]);
+    bool ind_ok = false;
+    if (asset_ok) {
+      int id = static_cast<int>(industry_l1_[d]);
+      if (id > 0 && id < static_cast<int>(SW2021_L1_COUNT))
+        ind_ok = mask[static_cast<std::size_t>(id)];
+    }
+    bool b = asset_ok && ind_ok && !(susp_[d] > 0.5f) &&
+             !is_finite(delist_age_[d]);
     if (!incl_margin)
       b = b && !(is_marg_[d] > 0.5f);
     out[d] = b ? 1.0f : 0.0f;
@@ -915,6 +1005,8 @@ const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES = {{
     {"is_margin", Kind::Inter, Axis::TimeSeries, &impl::ts_is_margin, nullptr},
     {"mr_bal_raw", Kind::Inter, Axis::TimeSeries, &impl::ts_mr_bal_raw, nullptr},
     {"ms_bal_raw", Kind::Inter, Axis::TimeSeries, &impl::ts_ms_bal_raw, nullptr},
+    // industry_l1 — sw2021 一级行业 ID per (D, A) (component 月初 + change 月内回放)
+    {"industry_l1", Kind::Inter, Axis::TimeSeries, &impl::ts_industry_l1, nullptr},
     // raw 自算 — ttm4_ytd 拼接 (依赖 mcap_raw)
     {"rev_raw", Kind::Inter, Axis::TimeSeries, &impl::ts_rev_raw, nullptr},
     {"ni_raw", Kind::Inter, Axis::TimeSeries, &impl::ts_ni_raw, nullptr},

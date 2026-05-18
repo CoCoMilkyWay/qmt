@@ -1,5 +1,7 @@
-// Phase 1: 数据接入子系统 (bigquant DAI + tushare HTTP) → 落地 data/
-// feature / backtest / analysis 暂停, 待 Phase 2 迁移到 bigquant itf 后串联.
+// 主入口: bigquant::update → tushare::update → feature::build.
+//   数据接入 (Phase 1) 把 26 张 BigQuant + 3 张 Tushare 表落 data/, 然后
+//   feature::build 在 PIT-clean cutoff 下产出 Tensor T[F][A][D].
+//   backtest / analysis 后续启用.
 
 #include "api/bigquant/import.hpp"
 #include "api/bigquant/pipeline.hpp"
@@ -7,6 +9,9 @@
 #include "api/tushare/pipeline.hpp"
 #include "api/tushare/spec.hpp"
 #include "config.hpp"
+#include "feature/axis.hpp"
+#include "feature/build.hpp"
+#include "feature/tensor.hpp"
 #include "misc/date.hpp"
 
 int main() {
@@ -22,6 +27,12 @@ int main() {
 
   tushare::update(::config::PIPELINE_START_DATE, today, tushare::SPECS,
                   ::config::PIPELINE_LOOKBACK_DAYS);
+
+  // ---- Phase 2: feature build → Tensor T[F][A][D] ----
+  feature::Axes axes;
+  feature::StockMeta meta;
+  feature::Tensor T = feature::build(axes, meta);
+  (void)T; // 待 backtest / analysis 启用后消费
 
   return 0;
 }

@@ -1,26 +1,25 @@
 #pragma once
 
+#include "package/yyjson/yyjson.h"
+
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
 
 // ============================================================================
 // 通用数据落地存储 — 不绑定具体数据源 (bigquant / tushare 共用)
 //
-// 设计原则:
-//   - 按 visible_date 切日: data/YYYY/MM/DD/<name>.json
-//   - 单文件全量 (axis / static): data/_meta/<name>.json
-//   - 反向稀疏标记: data/YYYY/MM/_empty.json {name: [DD,...]} = 拉过且为空
-//   - 单 itf 去重: data/_meta/<name>.lastupdate (unix epoch s 文本)
+// 仅持久化原语:
+//   - 路径生成: day_data_path / meta_data_path / lastupdate_path / empty_month_path
+//   - 反向稀疏标记: _empty.json {name: [DD,...]} = 拉过且为空
+//   - 单 itf lastupdate 去重: data/_meta/<name>.lastupdate (unix epoch s 文本)
+//   - 整段 write: write_day_docs (写所有 day file + _empty.json 维护, 两侧 store 共用尾段)
 //
-// 三态判定 (单源、互斥):
-//   day file 存在            → 拉过有数据
-//   day file 不存在 + 在 set → 拉过无数据
-//   day file 不存在 + 不在 set → 未拉
+// 调度 (缺失扫描 / 段切分) 见 misc/schedule.hpp.
 // ============================================================================
 namespace misc::store {
 
@@ -61,37 +60,28 @@ void update_empty_for_range(std::string_view name, std::string_view start,
                             const std::function<bool(const std::string &)> &has_data);
 
 // ============================================================================
+// write_day_docs — bigquant / tushare store 共用尾段
+//   - 对 docs 中每个 (vd, doc) 原子写到 data/YYYY/MM/DD/<name>.json
+//   - 末端 update_empty_for_range(name, [start, end]) 维护稀疏标记
+//   - docs 内每个 yyjson_mut_doc* 写后释放 (本函数接管所有权)
+// ============================================================================
+void write_day_docs(std::string_view name, std::string_view start,
+                    std::string_view end,
+                    std::map<std::string, yyjson_mut_doc *> docs);
+
+// ============================================================================
 // 单 itf lastupdate 去重 (内容 = unix epoch seconds 文本)
 //   调用方语义: should_skip_api 命中 → 跳过整段; 否则跑完后 mark_api_updated.
 //   粒度 = 数据文件名 (data/.../<name>.json), 不同 itf 共用 api 但走独立 key.
+//
+//   verify_exists 可选: 非空时, 该路径必须存在才能 skip; 不存在 → 强制重抓.
+//   用途: Static 表的 _meta 单文件输出在 lastupdate 已 mark 但文件丢失时,
+//        若仅看 lastupdate 会永久跳过 (Static 无 day file 兜底).
+//        emit_meta 表的 _meta 是从 day file 聚合的产物, pipeline 每轮无脑重建,
+//        不依赖 verify, 此处不传.
 // ============================================================================
-bool should_skip_api(std::string_view name, int window_seconds);
+bool should_skip_api(std::string_view name, int window_seconds,
+                     const std::filesystem::path &verify_exists = {});
 void mark_api_updated(std::string_view name);
-
-// ============================================================================
-// 缺失日扫描 — Day 频率
-//   - 文件不存在 ∧ 不在 _empty → 必拉
-//   - 进入 lookback 窗口 (最近 N 个日历日) → 必拉 (PK upsert / 整段覆盖吃增量/订正)
-// 日历 7 天约等于 5 个交易日, 避免当日数据未结算导致累积缺失.
-// ============================================================================
-std::vector<std::string> scan_missing_days(std::string_view name,
-                                           std::string_view start,
-                                           std::string_view end,
-                                           int lookback_days);
-
-// ============================================================================
-// 缺失月扫描 — MonthFirst 频率
-//   - 该月任一 day file 存在 → 整月跳过
-//   - 进入 lookback 窗口的月 → 必拉
-//   - 否则 → 加入 segments, 每段 = [该月首日, 该月末日] (闭区间)
-// ============================================================================
-struct MonthSeg {
-  std::string start; // YYYYMMDD, 该月首日 (clamp 到 outer [start, end])
-  std::string end;   // YYYYMMDD, 该月末日 (clamp 到 outer [start, end])
-};
-std::vector<MonthSeg> scan_missing_months(std::string_view name,
-                                          std::string_view start,
-                                          std::string_view end,
-                                          int lookback_days);
 
 } // namespace misc::store

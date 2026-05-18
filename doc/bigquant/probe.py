@@ -100,9 +100,9 @@ PROBES = [
     ),
     Probe(
         "行业日线数据",
-        "cn_stock_industry_bar1d",
-        "cn_stock_industry_bar1d",
-        "SELECT * FROM cn_stock_industry_bar1d LIMIT 5",
+        "cn_stock_industry_real_bar1d",
+        "cn_stock_industry_real_bar1d",
+        "SELECT * FROM cn_stock_industry_real_bar1d LIMIT 5",
         {"date": [D, D]},
         "行业 OHLCV; instrument=行业代码",
     ),
@@ -213,10 +213,10 @@ PROBES = [
         "上榜事件, 非每股每日有",
     ),
     Probe(
-        "股票后复权日行情 (OHLCV)",
-        "bar1d (后复权)",
-        "cn_stock_bar1d",
-        f"SELECT date,instrument,adjust_factor,pre_close,open,close,high,low,volume,amount,change_ratio,turn,upper_limit,lower_limit FROM cn_stock_bar1d WHERE instrument='{INST}'",
+        "股票不复权日行情 (OHLCV)",
+        "cn_stock_real_bar1d",
+        "cn_stock_real_bar1d",
+        f"SELECT date,instrument,adjust_factor,pre_close,open,close,high,low,volume,amount,change_ratio,turn,upper_limit,lower_limit FROM cn_stock_real_bar1d WHERE instrument='{INST}'",
         {"date": [D, D]},
         "项目前复权口径需切换或自算",
     ),
@@ -337,13 +337,12 @@ if __name__ == "__main__":
 
 
 """
-/bin/python /home/chuyin/work/qmt/doc/bigquant/probe.py
 chuyin@chuyin:~/work/qmt$ /bin/python /home/chuyin/work/qmt/doc/bigquant/probe.py
-BigQuant DAI 接口探测  (28/28)  D=2024-12-31  INST=000001.SZ
+BigQuant DAI 接口探测  (26/26)  D=2024-12-31  INST=000001.SZ
 
-[1/28] 交易日历 SSE/SZSE
-  itf=trade_cal  table=trading_days
-  note: 替代 trade_cal; market_code 过滤 SSE/SZSE
+[1/26] 交易日历
+  itf=trading_days  table=trading_days
+  note: 全球交易市场日历; market_code 过滤 SSE/SZSE
   SQL: SELECT * FROM trading_days WHERE date='2024-12-31'
   OK
     | date                | market_code   |
@@ -353,42 +352,31 @@ BigQuant DAI 接口探测  (28/28)  D=2024-12-31  INST=000001.SZ
     | 2024-12-31 00:00:00 | US            |
     | 2024-12-31 00:00:00 | SG            |
 
-[2/28] 股票全量主表 (含退市)
-  itf=stock_basic / _meta  table=cn_stock_basic_info
-  note: L+D+P+G; list_sector 表征 主板/创业板/科创板
-  SQL: SELECT instrument,name,exchange,list_sector,list_date,delist_date,industry,corp_nature FROM cn_stock_basic_info WHERE instrument='000001.SZ'
+[2/26] 节假日
+  itf=holidays  table=holidays
+  note: 更新频率日频
+  SQL: SELECT * FROM holidays LIMIT 5
   OK
-    | instrument   | name     | exchange       | list_sector   | list_date           | delist_date   | industry            | corp_nature   |
-    |--------------|----------|----------------|---------------|---------------------|---------------|---------------------|---------------|
-    | 000001.SZ    | 平安银行 | 深圳证券交易所 | 1             | 1991-04-03 00:00:00 | NaT           | 金融业-货币金融服务 | 其他          |
+    | date                | market_code   |
+    |---------------------|---------------|
+    | 2005-01-03 00:00:00 | CN            |
+    | 2005-02-07 00:00:00 | CN            |
+    | 2005-02-08 00:00:00 | CN            |
+    | 2005-02-09 00:00:00 | CN            |
 
-[3/28] 代码 ID 映射 (辅助)
-  itf=all_instruments  table=all_instruments
-  note: instrument <-> instrument_id 双向
-  SQL: SELECT * FROM all_instruments LIMIT 5
+[3/26] 中国股票代码列表
+  itf=cn_stock_instruments  table=cn_stock_instruments
+  note: 全市场股票代码 + 中文简称 + type
+  SQL: SELECT * FROM cn_stock_instruments WHERE instrument='000001.SZ'
+  filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK
-    | instrument   | instrument_id   | product_code   | product_name   |
-    |--------------|-----------------|----------------|----------------|
-    | 000001.SZ    | 1               | 1              | 股票           |
-    | 000002.SZ    | 2               | 1              | 股票           |
-    | 000003.SZ    | 3               | 1              | 股票           |
-    | 000004.SZ    | 4               | 1              | 股票           |
+    | date                | instrument   | name     | type   |
+    |---------------------|--------------|----------|--------|
+    | 2024-12-31 00:00:00 | 000001.SZ    | 平安银行 | stock  |
 
-[4/28] 股票曾用名段
-  itf=namechange  table=cn_stock_name_change
-  note: (instrument, start_date, end_date, name)
-  SQL: SELECT * FROM cn_stock_name_change WHERE instrument='000001.SZ'
-  OK
-    | instrument   | start_date          | end_date            | name     |
-    |--------------|---------------------|---------------------|----------|
-    | 000001.SZ    | 2005-01-04 00:00:00 | 2006-10-08 00:00:00 | 深发展A  |
-    | 000001.SZ    | 2006-10-09 00:00:00 | 2007-06-19 00:00:00 | S深发展A |
-    | 000001.SZ    | 2007-06-20 00:00:00 | 2012-08-01 00:00:00 | 深发展A  |
-    | 000001.SZ    | 2012-08-02 00:00:00 | 2024-09-02 00:00:00 | 平安银行 |
-
-[5/28] 行业归属 SW2021 PIT
-  itf=index_member_all / _meta  table=cn_stock_industry_component
-  note: PIT 历史归属 (date 列), 优于 tushare 当前快照
+[4/26] 股票行业成分 (SW2021 PIT)
+  itf=cn_stock_industry_component  table=cn_stock_industry_component
+  note: PIT 历史归属 (date 列)
   SQL: SELECT instrument,industry_level1_code,industry_level1_name,industry_level2_name,industry_level3_name FROM cn_stock_industry_component WHERE instrument='000001.SZ'
   filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK
@@ -398,84 +386,83 @@ BigQuant DAI 接口探测  (28/28)  D=2024-12-31  INST=000001.SZ
     | 000001.SZ    | 480000                 | 银行                   | 银行                   | 银行                   |
     | 000001.SZ    | 480000                 | 银行                   | 股份制银行Ⅱ            | 股份制银行Ⅲ            |
 
-[6/28] 收盘价 后复权 + 网格 OHLCV
-  itf=bar1d (后复权)  table=cn_stock_bar1d
-  note: 项目前复权口径需切换或自算
-  SQL: SELECT date,instrument,adjust_factor,pre_close,open,close,high,low,volume,amount,change_ratio,turn,upper_limit,lower_limit FROM cn_stock_bar1d WHERE instrument='000001.SZ'
+[5/26] 行业进出记录
+  itf=cn_stock_industry_change  table=cn_stock_industry_change
+  note: 更新频率日频
+  SQL: SELECT * FROM cn_stock_industry_change WHERE instrument='000001.SZ' LIMIT 5
+  filters: {"date": ["2024-01-01", "2024-12-31"]}
+  OK
+    | date   | instrument   | industry   | industry_level   | industry_code   | industry_name   | change_flag   |
+    |--------|--------------|------------|------------------|-----------------|-----------------|---------------|
+
+[6/26] 行业日线数据
+  itf=cn_stock_industry_real_bar1d  table=cn_stock_industry_real_bar1d
+  note: 行业 OHLCV; instrument=行业代码
+  SQL: SELECT * FROM cn_stock_industry_real_bar1d LIMIT 5
   filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK
-    | date                | instrument   | adjust_factor      | pre_close          | open               | close             | high               | low               | volume    | amount        | change_ratio        | turn                 | upper_limit        | lower_limit        |
-    |---------------------|--------------|--------------------|--------------------|--------------------|-------------------|--------------------|-------------------|-----------|---------------|---------------------|----------------------|--------------------|--------------------|
-    | 2024-12-31 00:00:00 | 000001.SZ    | 127.78445003181974 | 1527.0241778802458 | 1524.4684888796096 | 1495.078065372291 | 1532.1355558815187 | 1495.078065372291 | 147536733 | 1747242074.23 | -0.0209205020920502 | 0.007602784749679933 | 1680.3655179184298 | 1374.9606823423803 |
+    | date                | instrument   | method   | pre_close          | open               | close              | high              | low                | volume    | deal_number   | amount        | change_ratio           | turn                 |
+    |---------------------|--------------|----------|--------------------|--------------------|--------------------|-------------------|--------------------|-----------|---------------|---------------|------------------------|----------------------|
+    | 2024-12-31 00:00:00 | 101010       | 1        | 9.386666666666667  | 9.413333333333334  | 9.386666666666667  | 9.53              | 9.348333333333334  | 515947360 | 278506        | 4008507876.87 | 0.0                    | 0.016096247062480026 |
+    | 2024-12-31 00:00:00 | 101010       | 2        | 12.545940395138766 | 12.574209446499589 | 12.504144324761146 | 12.64941215913488 | 12.466558177203202 | 515947360 | 278506        | 4008507876.87 | -0.0033314418099590856 | 0.016096247062480026 |
+    | 2024-12-31 00:00:00 | 101010       | 3        | 8.835595292818114  | 8.854686539912215  | 8.783069841260708  | 8.894762665673529 | 8.761137071392422  | 515947360 | 278506        | 4008507876.87 | -0.005944755256060721  | 0.016096247062480026 |
+    | 2024-12-31 00:00:00 | 102010       | 1        | 4.354              | 4.359999999999999  | 4.316              | 4.412             | 4.295999999999999  | 227251249 | 137517        | 1348754710.79 | -0.008727606798346407  | 0.009998506667030843 |
 
-[7/28] 收盘价 未复权
-  itf=bar1d (未复权)  table=cn_stock_real_bar1d
-  note: mcap_raw = real_close × total_shares
-  SQL: SELECT date,instrument,close,turn FROM cn_stock_real_bar1d WHERE instrument='000001.SZ'
+[7/26] 行业估值
+  itf=cn_stock_industry_valuation  table=cn_stock_industry_valuation
+  note: 申万 + 中信一二级行业 PE/PB
+  SQL: SELECT * FROM cn_stock_industry_valuation LIMIT 5
   filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK
-    | date                | instrument   | close   | turn                 |
-    |---------------------|--------------|---------|----------------------|
-    | 2024-12-31 00:00:00 | 000001.SZ    | 11.7    | 0.007602784749679933 |
+    | date                | instrument   | industry   | industry_level   | industry_code   | industry_name   | component_nums   | pe_trailing   | pe_ttm   | pb   |
+    |---------------------|--------------|------------|------------------|-----------------|-----------------|------------------|---------------|----------|------|
+    | 2024-12-31 00:00:00 | 100000       | cs         | 1                | 100000          | 石油石化        | 37               | 11.4          | 13.19    | 0.13 |
+    | 2024-12-31 00:00:00 | 101000       | cs         | 2                | 101000          | 石油开采Ⅱ       | 6                | 9.1           | 9.67     | 0.1  |
+    | 2024-12-31 00:00:00 | 102000       | cs         | 2                | 102000          | 石油化工        | 20               | 13.81         | 19.19    | 0.17 |
+    | 2024-12-31 00:00:00 | 103000       | cs         | 2                | 103000          | 油服工程        | 11               | 17.17         | 18.25    | 0.39 |
 
-[8/28] 涨跌停价
-  itf=stk_limit  table=cn_stock_limit_price
-  note: 完全对应 tushare stk_limit
-  SQL: SELECT * FROM cn_stock_limit_price WHERE instrument='000001.SZ'
-  filters: {"date": ["2024-12-31", "2024-12-31"]}
+[8/26] 股票基本信息
+  itf=stock_basic / _meta  table=cn_stock_basic_info
+  note: L+D+P+G; list_sector 表征 主板/创业板/科创板
+  SQL: SELECT instrument,name,exchange,list_sector,list_date,delist_date,industry,corp_nature FROM cn_stock_basic_info WHERE instrument='000001.SZ'
   OK
-    | date                | instrument   | upper_limit   | lower_limit   |
-    |---------------------|--------------|---------------|---------------|
-    | 2024-12-31 00:00:00 | 000001.SZ    | 13.15         | 10.76         |
+    | instrument   | name     | exchange       | list_sector   | list_date           | delist_date   | industry            | corp_nature   |
+    |--------------|----------|----------------|---------------|---------------------|---------------|---------------------|---------------|
+    | 000001.SZ    | 平安银行 | 深圳证券交易所 | 1             | 1991-04-03 00:00:00 | NaT           | 金融业-货币金融服务 | 其他          |
 
-[9/28] 停复牌记录
-  itf=suspend_d  table=cn_stock_suspend
-  note: 含 suspend_period + suspend_reason
-  SQL: SELECT * FROM cn_stock_suspend WHERE instrument='000001.SZ'
-  filters: {"date": ["2024-12-31", "2024-12-31"]}
+[9/26] 股本信息 (历史变动)
+  itf=cn_stock_capital  table=cn_stock_capital
+  note: 股本变动记录 (publish_date, change_date, reason)
+  SQL: SELECT * FROM cn_stock_capital WHERE instrument='000001.SZ' LIMIT 5
   OK
-    | date   | instrument   | suspend_period   | suspend_reason   |
-    |--------|--------------|------------------|------------------|
+    | instrument   | publish_date        | change_date         | reason   | total_shares   | float_a     | float_b   | restricted_a   | restricted_b   | prefer_shares   | shares_hk   | shares_aboard   | shares_a_total   | shares_b_total   | float_total   | rest_total   |
+    |--------------|---------------------|---------------------|----------|----------------|-------------|-----------|----------------|----------------|-----------------|-------------|-----------------|------------------|------------------|---------------|--------------|
+    | 000001.SZ    | 1991-04-03 00:00:00 | 1991-04-03 00:00:00 | 34       | 48500171.0     | 26500000.0  | 0.0       | 0.0            | 0.0            | nan             | 0.0         | 0.0             | 26500000.0       | 0.0              | 26500000.0    | 0.0          |
+    | 000001.SZ    | 1991-12-31 00:00:00 | 1991-12-31 00:00:00 | 27       | 89751643.0     | 39490723.0  | 0.0       | 0.0            | 0.0            | nan             | 0.0         | 0.0             | 39490723.0       | 0.0              | 39490723.0    | 0.0          |
+    | 000001.SZ    | 1994-06-30 00:00:00 | 1994-06-30 00:00:00 | 11       | 269417899.0    | 179122251.0 | 0.0       | 0.0            | 0.0            | nan             | 0.0         | 0.0             | 179122251.0      | 0.0              | 179122251.0   | 0.0          |
+    | 000001.SZ    | 1994-07-02 00:00:00 | 1994-08-22 00:00:00 | 21       | 431068638.0    | 286595634.0 | 0.0       | 0.0            | 0.0            | nan             | 0.0         | 0.0             | 286595634.0      | 0.0              | 286595634.0   | 0.0          |
 
-[10/28] ST 三态 + 风险警示 + 状态
-  itf=stock_st  table=cn_stock_status
-  note: ★ st_status TINYINT 0/1/2 直接 boolean
-  SQL: SELECT date,instrument,st_status,is_risk_warning,suspended,price_limit_status,exdr FROM cn_stock_status WHERE instrument='000001.SZ'
-  filters: {"date": ["2024-12-31", "2024-12-31"]}
+[10/26] 分红送股 (实施)
+  itf=dividend  table=cn_stock_dividend
+  note: PK = (instrument, report_date); 仅实施版无 div_proc 三阶段
+  SQL: SELECT * FROM cn_stock_dividend WHERE instrument='000001.SZ' LIMIT 5
   OK
-    | date                | instrument   | st_status   | is_risk_warning   | suspended   | price_limit_status   | exdr   |
-    |---------------------|--------------|-------------|-------------------|-------------|----------------------|--------|
-    | 2024-12-31 00:00:00 | 000001.SZ    | 0           | 0                 | 0           | 2                    | 0      |
+    | date                | instrument   | report_date         | publish_date        | bonus_rate   | conversed_rate   | cash_before_tax   | cash_after_tax   | register_date       | ex_date             |
+    |---------------------|--------------|---------------------|---------------------|--------------|------------------|-------------------|------------------|---------------------|---------------------|
+    | 2008-10-31 00:00:00 | 000001.SZ    | 2008-06-30 00:00:00 | 2008-08-21 00:00:00 | 0.3          | nan              | 0.0335            | 0.00015          | 2008-10-30 00:00:00 | 2008-10-31 00:00:00 |
+    | 2012-10-19 00:00:00 | 000001.SZ    | 2012-06-30 00:00:00 | 2012-08-16 00:00:00 | nan          | nan              | 0.1               | 0.09             | 2012-10-18 00:00:00 | 2012-10-19 00:00:00 |
+    | 2013-06-20 00:00:00 | 000001.SZ    | 2012-12-31 00:00:00 | 2013-03-08 00:00:00 | 0.6          | nan              | 0.17              | 0.1315           | 2013-06-19 00:00:00 | 2013-06-20 00:00:00 |
+    | 2014-06-12 00:00:00 | 000001.SZ    | 2013-12-31 00:00:00 | 2014-03-07 00:00:00 | nan          | 0.2              | 0.16              | 0.152            | 2014-06-11 00:00:00 | 2014-06-12 00:00:00 |
 
-[11/28] 股票静态信息 (盘前快照)
-  itf=static_data (盘前)  table=cn_stock_static_data
-  note: crd_buy/sell_flag 双向标识替代 margin_secs
-  SQL: SELECT date,instrument,pre_close,upper_limit,lower_limit,adjust_factor,suspended,st_status,exchange,in_delist,crd_buy_flag,crd_sell_flag,public_float_share FROM cn_stock_static_data WHERE instrument='000001.SZ'
-  filters: {"date": ["2024-12-31", "2024-12-31"]}
+[11/26] 配股信息
+  itf=cn_stock_allotment  table=cn_stock_allotment
+  note: 更新频率日频
+  SQL: SELECT * FROM cn_stock_allotment WHERE instrument='000001.SZ' LIMIT 5
   OK
-    | date                | instrument   | pre_close   | upper_limit   | lower_limit   | adjust_factor      | suspended   | st_status   | exchange   | in_delist   | crd_buy_flag   | crd_sell_flag   | public_float_share   |
-    |---------------------|--------------|-------------|---------------|---------------|--------------------|-------------|-------------|------------|-------------|----------------|-----------------|----------------------|
-    | 2024-12-31 00:00:00 | 000001.SZ    | 11.95       | 13.15         | 10.76         | 127.78445003181974 | 0           | 0           | SZSE       | 0           | 1              | 1               | 19405571850          |
+    | date   | instrument   | publish_date   | allotment_price   | allotment_rate   | allotment_shares   | register_date   | exright_date   | allot_listdate   |
+    |--------|--------------|----------------|-------------------|------------------|--------------------|-----------------|----------------|------------------|
 
-[12/28] 个股估值 PE/PB/PS/PCF/DY
-  itf=daily_basic (估值)  table=cn_stock_valuation
-  note: ★ 替代 daily_basic; 5 个估值 raw + 2 个市值 齐全
-  SQL: SELECT date,instrument,total_market_cap,float_market_cap,pe_ttm,pb,ps_ttm,pcf_net_ttm,dividend_yield_ratio FROM cn_stock_valuation WHERE instrument='000001.SZ'
-  filters: {"date": ["2024-12-31", "2024-12-31"]}
-  FAIL  rc=1
-  stderr: Error: 没有权限读取数据源 cn_stock_valuation
-
-[13/28] 股本数据
-  itf=shares (辅助 mcap)  table=cn_stock_shares
-  note: total_shares / a_float_shares / free_float_shares / total_float_shares
-  SQL: SELECT * FROM cn_stock_shares WHERE instrument='000001.SZ'
-  filters: {"date": ["2024-12-31", "2024-12-31"]}
-  OK
-    | date                | instrument   | total_shares   | a_float_shares   | free_float_shares   | total_float_shares   |
-    |---------------------|--------------|----------------|------------------|---------------------|----------------------|
-    | 2024-12-31 00:00:00 | 000001.SZ    | 19405918198.0  | 19405617528.0    | 8600976804.0        | 19405617528.0        |
-
-[14/28] 融资融券明细 (个股)
+[12/26] 融资融券明细 (个股)
   itf=margin_detail  table=cn_stock_margin_trading_detail
   note: financing_balance ↔ rzye, securities_lending_balance ↔ rqye
   SQL: SELECT date,instrument,financing_balance,securities_lending_balance,financing_purchase,financing_repayment,margin_trading_balance FROM cn_stock_margin_trading_detail WHERE instrument='000001.SZ'
@@ -485,9 +472,9 @@ BigQuant DAI 接口探测  (28/28)  D=2024-12-31  INST=000001.SZ
     |---------------------|--------------|---------------------|------------------------------|----------------------|-----------------------|--------------------------|
     | 2024-12-31 00:00:00 | 000001.SZ    | 4580936570.0        | 5566860.0                    | 333627972.0          | 231734584.0           | 4586503430.0             |
 
-[15/28] 融资融券市场统计 (辅助)
+[13/26] 融资融券市场统计
   itf=margin_market  table=cn_stock_margin_trading_market
-  note: 全市场总融资融券, 备查
+  note: 全市场总融资融券; method=sum/mean
   SQL: SELECT * FROM cn_stock_margin_trading_market
   filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK
@@ -496,84 +483,93 @@ BigQuant DAI 接口探测  (28/28)  D=2024-12-31  INST=000001.SZ
     | 2024-12-31 00:00:00 | sum      | 1740224404220.0     | 138904462467.0       | 0.024312097710502648      | 108846357821.0       | 8566037449.0                  | 124619080070.0        | 9562855619.0                   | -15772722249.0           | -996818170.0                      | 5927380657.440001            | 479141239.0                   | 449084702.46999997         | 35571390.0                          | 398489841.21999997             | 33673813.0                              | 50594861.24999999              | 1897577.0                               | 1746151784877.44         |
     | 2024-12-31 00:00:00 | mean     | 474822484.0982265   | 37900262.61036835    | 6.6335873698506546e-06    | 29698869.801091406   | 2337254.4199181446            | 34002477.508867666    | 2609237.5495225103             | -4303607.7077762615      | -271983.1296043656                | 1617293.4945266033           | 130734.30804911323            | 122533.34310231922         | 9705.699863574351                   | 108728.46963710777             | 9187.943519781718                       | 13804.873465211458             | 517.7563437926331                       | 476439777.59275305       |
 
-[16/28] 业绩预告 (公司发)
-  itf=forecast_vip  table=cn_stock_profit_estimate
-  note: ★ profit_st/revenue_st 触发源
-  SQL: SELECT date,instrument,begin_date,end_date,fore_profit_min,fore_profit_max,fore_type,ex_date FROM cn_stock_profit_estimate WHERE instrument='000001.SZ'
+[14/26] 股东户数
+  itf=cn_stock_shareholder  table=cn_stock_shareholder
+  note: publish_date / end_date; 无 date 列
+  SQL: SELECT * FROM cn_stock_shareholder WHERE instrument='000001.SZ' LIMIT 5
+  OK
+    | publish_date        | instrument   | end_date            | total_shareholder   | total_shareholder_chg   | a_shareholder   | a_shareholder_chg     | avg_share_per_account_total   | avg_share_per_account_total_chg   | avg_share_ratio_per_account_total   | avg_share_ratio_per_account_total_chg   | avg_share_per_account_float   | avg_share_per_account_float_chg   | avg_share_ratio_per_account_float   | avg_share_ratio_per_account_float_chg   |
+    |---------------------|--------------|---------------------|---------------------|-------------------------|-----------------|-----------------------|-------------------------------|-----------------------------------|-------------------------------------|-----------------------------------------|-------------------------------|-----------------------------------|-------------------------------------|-----------------------------------------|
+    | 2005-04-26 00:00:00 | 000001.SZ    | 2004-12-31 00:00:00 | 666196.0            | 0.0                     | 666196.0        | 0.0                   | 2920.7953049853195            | 0.0                               | 1.5010597481822165e-06              | 0.0                                     | 2115.536516280494             | 0.0                               | 1.5010597481822167e-06              | 0.0                                     |
+    | 2005-04-26 00:00:00 | 000001.SZ    | 2005-03-31 00:00:00 | 658855.0            | -0.011019279611405697   | 658855.0        | -0.011019279611405697 | 2953.338972915133             | 0.011142057053524779              | 1.5177846415372124e-06              | 0.011142057053524779                    | 2139.1079448437063            | 0.011142057053524557              | 1.5177846415372124e-06              | 0.011142057053524779                    |
+    | 2005-08-19 00:00:00 | 000001.SZ    | 2005-06-30 00:00:00 | 645701.0            | -0.019964939174780483   | 645701.0        | -0.019964939174780483 | 3013.503384693535             | 0.020371658089425315              | 1.5487044313079894e-06              | 0.020371658089425315                    | 2182.6851205124353            | 0.020371658089425315              | 1.5487044313079894e-06              | 0.020371658089425315                    |
+    | 2005-10-29 00:00:00 | 000001.SZ    | 2005-09-30 00:00:00 | 630989.0            | -0.022784539593403097   | 630989.0        | -0.022784539593403097 | 3083.7655632665546            | 0.023315778880455884              | 1.5848136813795487e-06              | 0.023315778880455884                    | 2233.5761241479645            | 0.023315778880455884              | 1.5848136813795485e-06              | 0.023315778880455884                    |
+
+[15/26] 股本数据 (日频)
+  itf=shares (辅助 mcap)  table=cn_stock_shares
+  note: total_shares / a_float_shares / free_float_shares / total_float_shares
+  SQL: SELECT * FROM cn_stock_shares WHERE instrument='000001.SZ'
   filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK
-    | date   | instrument   | begin_date   | end_date   | fore_profit_min   | fore_profit_max   | fore_type   | ex_date   |
-    |--------|--------------|--------------|------------|-------------------|-------------------|-------------|-----------|
+    | date                | instrument   | total_shares   | a_float_shares   | free_float_shares   | total_float_shares   |
+    |---------------------|--------------|----------------|------------------|---------------------|----------------------|
+    | 2024-12-31 00:00:00 | 000001.SZ    | 19405918198.0  | 19405617528.0    | 8600976804.0        | 19405617528.0        |
 
-[17/28] 业绩超预期 鉴定
-  itf=express_vip (exceed appraisal)  table=cn_stock_profit_exceed_appraisal
-  note: 项目未入张量, 仅校验接口
-  SQL: SELECT date,instrument,report_date,publish_date,fore_profit,profit_exceed_rate,appraisal_result FROM cn_stock_profit_exceed_appraisal WHERE instrument='000001.SZ'
+[16/26] 股票状态 (ST/停牌/涨跌停)
+  itf=stock_st  table=cn_stock_status
+  note: ★ st_status TINYINT 0/1/2 直接 boolean
+  SQL: SELECT date,instrument,st_status,is_risk_warning,suspended,price_limit_status,exdr FROM cn_stock_status WHERE instrument='000001.SZ'
   filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK
-    | date   | instrument   | report_date   | publish_date   | fore_profit   | profit_exceed_rate   | appraisal_result   |
-    |--------|--------------|---------------|----------------|---------------|----------------------|--------------------|
+    | date                | instrument   | st_status   | is_risk_warning   | suspended   | price_limit_status   | exdr   |
+    |---------------------|--------------|-------------|-------------------|-------------|----------------------|--------|
+    | 2024-12-31 00:00:00 | 000001.SZ    | 0           | 0                 | 0           | 2                    | 0      |
 
-[18/28] 业绩超预期 (券商研报)
-  itf=express_vip (exceed expect)  table=cn_stock_profit_exceed_expect
-  SQL: SELECT date,instrument,report_date,below_type,below_desc,estimate_profit,profit FROM cn_stock_profit_exceed_expect WHERE instrument='000001.SZ'
+[17/26] 停复牌记录
+  itf=suspend_d  table=cn_stock_suspend
+  note: 含 suspend_period + suspend_reason
+  SQL: SELECT * FROM cn_stock_suspend WHERE instrument='000001.SZ'
   filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK
-    | date   | instrument   | report_date   | below_type   | below_desc   | estimate_profit   | profit   |
-    |--------|--------------|---------------|--------------|--------------|-------------------|----------|
+    | date   | instrument   | suspend_period   | suspend_reason   |
+    |--------|--------------|------------------|------------------|
 
-[19/28] 业绩低于预期
-  itf=express_vip (below)  table=cn_stock_profit_below_expect
-  SQL: SELECT date,instrument,report_date,below_type,below_desc,estimate_profit,profit FROM cn_stock_profit_below_expect WHERE instrument='000001.SZ'
+[18/26] 证券简称变更
+  itf=namechange  table=cn_stock_name_change
+  note: (instrument, start_date, end_date, name); 无 date 列
+  SQL: SELECT * FROM cn_stock_name_change WHERE instrument='000001.SZ'
+  OK
+    | instrument   | start_date          | end_date            | name     |
+    |--------------|---------------------|---------------------|----------|
+    | 000001.SZ    | 2005-01-04 00:00:00 | 2006-10-08 00:00:00 | 深发展A  |
+    | 000001.SZ    | 2006-10-09 00:00:00 | 2007-06-19 00:00:00 | S深发展A |
+    | 000001.SZ    | 2007-06-20 00:00:00 | 2012-08-01 00:00:00 | 深发展A  |
+    | 000001.SZ    | 2012-08-02 00:00:00 | 2024-09-02 00:00:00 | 平安银行 |
+
+[19/26] 龙虎榜
+  itf=cn_stock_dragon_list  table=cn_stock_dragon_list
+  note: 上榜事件, 非每股每日有
+  SQL: SELECT * FROM cn_stock_dragon_list LIMIT 5
   filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK
-    | date   | instrument   | report_date   | below_type   | below_desc   | estimate_profit   | profit   |
-    |--------|--------------|---------------|--------------|--------------|-------------------|----------|
+    | date                | instrument   | reason                                                                   | close   | price_change   | net_buy_amount   | buy_amount   | sell_amount   | deal_amount   | total_deal_amount   | net_buy_ratio   | deal_amount_ratio   | turn    | float_market_cap   | price_change_1d   | price_change_2d   | price_change_5d   |
+    |---------------------|--------------|--------------------------------------------------------------------------|---------|----------------|------------------|--------------|---------------|---------------|---------------------|-----------------|---------------------|---------|--------------------|-------------------|-------------------|-------------------|
+    | 2024-12-31 00:00:00 | 000592.SZ    | 日涨幅偏离值达到7%的前5只证券                                            | 2.87    | 9.9617         | 89172917.0       | 119600330.0  | 30427413.0    | 150027743.0   | 622541920.0         | 14.324001988493 | 24.099219374657     | 11.8092 | 5496315328.63      | 4.18118467        | 5.92334495        | 9.75609756        |
+    | 2024-12-31 00:00:00 | 000669.SZ    | 连续三个交易日内，涨幅偏离值累计达到12%的ST证券、*ST证券和未完成股改证券 | 2.11    | 4.9751         | 4893834.6        | 19795863.0   | 14902028.4    | 34697891.4    | 120205269.0         | 4.071231353428  | 28.86553284116      | 4.154   | 1435662561.67      | -5.21327014       | -0.9478673        | 7.10900474        |
+    | 2024-12-31 00:00:00 | 000670.SZ    | 日跌幅偏离值达到7%的前5只证券                                            | 8.32    | -9.9567        | 46841566.08      | 128475931.69 | 81634365.61   | 210110297.3   | 1035358342.0        | 4.524188793371  | 20.293485721488     | 16.7064 | 6007927843.84      | -9.375            | -16.22596154      | -16.70673077      |
+    | 2024-12-31 00:00:00 | 000679.SZ    | 连续三个交易日内，涨幅偏离值累计达到20%的证券                            | 6.54    | 9.7315         | 3756960.3        | 95573699.63  | 91816739.33   | 187390438.96  | 782142505.0         | 0.480342172428  | 23.958605722368     | 21.0364 | 2330856000.0       | 7.03363914        | -3.51681957       | -13.76146789      |
 
-[20/28] 财报实际披露日 (含修订)
-  itf=disclosure_date (actual)  table=cn_stock_financial_changedate
-  note: 替代 disclosure_date.actual_date; 无事先 ann_date 计划
-  SQL: SELECT * FROM cn_stock_financial_changedate WHERE instrument='000001.SZ' LIMIT 10
-  OK
-    | instrument   | report_date         | changedate            | statement_type   |
-    |--------------|---------------------|-----------------------|------------------|
-    | 000001.SZ    | 2005-03-31 00:00:00 | 2005-04-26            | balance_sheet    |
-    | 000001.SZ    | 2005-03-31 00:00:00 | 2005-04-26            | income           |
-    | 000001.SZ    | 2005-03-31 00:00:00 | 2005-04-26            | cash_flow        |
-    | 000001.SZ    | 2005-06-30 00:00:00 | 2005-08-19            | balance_sheet    |
-
-[21/28] 分红送股 (实施)
-  itf=dividend  table=cn_stock_dividend
-  note: 仅实施版无 div_proc 三阶段; PK = (instrument, report_date)
-  SQL: SELECT * FROM cn_stock_dividend WHERE instrument='000001.SZ'
-  OK
-    | date                | instrument   | report_date         | publish_date        | bonus_rate   | conversed_rate   | cash_before_tax   | cash_after_tax   | register_date       | ex_date             |
-    |---------------------|--------------|---------------------|---------------------|--------------|------------------|-------------------|------------------|---------------------|---------------------|
-    | 2008-10-31 00:00:00 | 000001.SZ    | 2008-06-30 00:00:00 | 2008-08-21 00:00:00 | 0.3          | nan              | 0.0335            | 0.00015          | 2008-10-30 00:00:00 | 2008-10-31 00:00:00 |
-    | 2012-10-19 00:00:00 | 000001.SZ    | 2012-06-30 00:00:00 | 2012-08-16 00:00:00 | nan          | nan              | 0.1               | 0.09             | 2012-10-18 00:00:00 | 2012-10-19 00:00:00 |
-    | 2013-06-20 00:00:00 | 000001.SZ    | 2012-12-31 00:00:00 | 2013-03-08 00:00:00 | 0.6          | nan              | 0.17              | 0.1315           | 2013-06-19 00:00:00 | 2013-06-20 00:00:00 |
-    | 2014-06-12 00:00:00 | 000001.SZ    | 2013-12-31 00:00:00 | 2014-03-07 00:00:00 | nan          | 0.2              | 0.16              | 0.152            | 2014-06-11 00:00:00 | 2014-06-12 00:00:00 |
-
-[22/28] 分析师一致预期 (rolling, 辅助)
-  itf=(辅助, 非 forecast 替代)  table=cn_stock_financial_forecast_consensus_rolling
-  note: 不替代 forecast_vip (公司预告), 是分析师外推
-  SQL: SELECT date,instrument,forecast_eps_fy1,forecast_np_fy1,forecast_revenue_fy1,forecast_np_yoy FROM cn_stock_financial_forecast_consensus_rolling WHERE instrument='000001.SZ'
+[20/26] 股票不复权日行情 (OHLCV)
+  itf=cn_stock_real_bar1d  table=cn_stock_real_bar1d
+  note: 项目前复权口径需切换或自算
+  SQL: SELECT date,instrument,adjust_factor,pre_close,open,close,high,low,volume,amount,change_ratio,turn,upper_limit,lower_limit FROM cn_stock_real_bar1d WHERE instrument='000001.SZ'
   filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK
-    | date                | instrument   | forecast_eps_fy1   | forecast_np_fy1   | forecast_revenue_fy1   | forecast_np_yoy   |
-    |---------------------|--------------|--------------------|-------------------|------------------------|-------------------|
-    | 2024-12-31 00:00:00 | 000001.SZ    | 2.3523             | 46806058181.818   | 146455455909.09        | 0.75569514975395  |
+    | date                | instrument   | adjust_factor      | pre_close   | open   | close   | high   | low   | volume    | amount        | change_ratio          | turn                 | upper_limit   | lower_limit   |
+    |---------------------|--------------|--------------------|-------------|--------|---------|--------|-------|-----------|---------------|-----------------------|----------------------|---------------|---------------|
+    | 2024-12-31 00:00:00 | 000001.SZ    | 127.78445003181974 | 11.95       | 11.93  | 11.7    | 11.99  | 11.7  | 147536733 | 1747242074.23 | -0.020920502092050212 | 0.007602784749679933 | 13.15         | 10.76         |
 
-[23/28] 财务分析-盈利能力 (PIT TTM)
-  itf=fina_indicator (roe/roa)  table=cn_stock_financial_profitability
-  note: ★ 直接 _ttm 字段, 砍 ttm4_ytd 自算
-  SQL: SELECT date,instrument,report_date,shift,roe_avg_ttm,roa_avg_ttm,roe_period_ttm,roic_ttm,gross_profit_rate_ttm,net_profit_rate_ttm FROM cn_stock_financial_profitability WHERE instrument='000001.SZ' AND shift=0
+[21/26] 股票涨跌停价格
+  itf=stk_limit  table=cn_stock_limit_price
+  note: 完全对应 tushare stk_limit
+  SQL: SELECT * FROM cn_stock_limit_price WHERE instrument='000001.SZ'
   filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK
-    | date   | instrument   | report_date   | shift   | roe_avg_ttm   | roa_avg_ttm   | roe_period_ttm   | roic_ttm   | gross_profit_rate_ttm   | net_profit_rate_ttm   |
-    |--------|--------------|---------------|---------|---------------|---------------|------------------|------------|-------------------------|-----------------------|
+    | date                | instrument   | upper_limit   | lower_limit   |
+    |---------------------|--------------|---------------|---------------|
+    | 2024-12-31 00:00:00 | 000001.SZ    | 13.15         | 10.76         |
 
-[24/28] 利润表 PIT 原始
+[22/26] 利润表 PIT (一般企业)
   itf=income_vip (pit raw)  table=cn_stock_financial_income_general_pit
   note: PIT 原生 (date=visible_date); change_type 修订追踪
   SQL: SELECT date,instrument,report_date,change_type,operating_revenue,net_profit,net_profit_to_parent_shareholders FROM cn_stock_financial_income_general_pit WHERE instrument='000001.SZ'
@@ -582,25 +578,7 @@ BigQuant DAI 接口探测  (28/28)  D=2024-12-31  INST=000001.SZ
     | date   | instrument   | report_date   | change_type   | operating_revenue   | net_profit   | net_profit_to_parent_shareholders   |
     |--------|--------------|---------------|---------------|---------------------|--------------|-------------------------------------|
 
-[25/28] 利润表 TTM 衍生
-  itf=income_vip (ttm)  table=cn_stock_financial_ttm_shift
-  note: ★ ttm 直接给, 砍 ttm4_ytd 自算
-  SQL: SELECT date,instrument,report_date,shift,total_operating_revenue_ttm,operating_revenue_ttm,net_profit_ttm,net_profit_to_parent_shareholders_ttm FROM cn_stock_financial_ttm_shift WHERE instrument='000001.SZ' AND shift=0
-  filters: {"date": ["2024-12-31", "2024-12-31"]}
-  OK
-    | date   | instrument   | report_date   | shift   | total_operating_revenue_ttm   | operating_revenue_ttm   | net_profit_ttm   | net_profit_to_parent_shareholders_ttm   |
-    |--------|--------------|---------------|---------|-------------------------------|-------------------------|------------------|-----------------------------------------|
-
-[26/28] 利润表 LF 衍生 (最新一期)
-  itf=income_vip (lf)  table=cn_stock_financial_lf_shift
-  note: lf_shift 用于自算 PB (净资产) 等; 大表 313 列, 仅探活
-  SQL: SELECT date,instrument,report_date,shift FROM cn_stock_financial_lf_shift WHERE instrument='000001.SZ' AND shift=0
-  filters: {"date": ["2024-12-31", "2024-12-31"]}
-  OK
-    | date   | instrument   | report_date   | shift   |
-    |--------|--------------|---------------|---------|
-
-[27/28] 现金流量表 PIT 原始
+[23/26] 现金流量表 PIT (一般企业)
   itf=cashflow_vip (pit raw)  table=cn_stock_financial_cashflow_general_pit
   note: net_cffoa = 经营性现金流净额
   SQL: SELECT date,instrument,report_date,change_type,net_cffoa,net_cffia,net_cfffa,netinc_in_cce FROM cn_stock_financial_cashflow_general_pit WHERE instrument='000001.SZ'
@@ -609,25 +587,33 @@ BigQuant DAI 接口探测  (28/28)  D=2024-12-31  INST=000001.SZ
     | date   | instrument   | report_date   | change_type   | net_cffoa   | net_cffia   | net_cfffa   | netinc_in_cce   |
     |--------|--------------|---------------|---------------|-------------|-------------|-------------|-----------------|
 
-[28/28] 现金流 TTM 衍生
-  itf=cashflow_vip (ttm)  table=cn_stock_financial_ttm_shift
-  note: pcf_raw = mcap / net_cffoa_ttm
-  SQL: SELECT date,instrument,report_date,shift,net_cffoa_ttm,net_cffia_ttm,net_cfffa_ttm FROM cn_stock_financial_ttm_shift WHERE instrument='000001.SZ' AND shift=0
+[24/26] 资产负债表 PIT (一般企业)
+  itf=balance_vip (pit raw)  table=cn_stock_financial_balance_general_pit
+  note: PIT 原生; total_equity_to_parent_shareholders 用于自算 PB
+  SQL: SELECT date,instrument,report_date,change_type,total_assets,total_liabilities,total_owner_equity,total_equity_to_parent_shareholders FROM cn_stock_financial_balance_general_pit WHERE instrument='000001.SZ'
   filters: {"date": ["2024-12-31", "2024-12-31"]}
   OK
-    | date   | instrument   | report_date   | shift   | net_cffoa_ttm   | net_cffia_ttm   | net_cfffa_ttm   |
-    |--------|--------------|---------------|---------|-----------------|-----------------|-----------------|
+    | date   | instrument   | report_date   | change_type   | total_assets   | total_liabilities   | total_owner_equity   | total_equity_to_parent_shareholders   |
+    |--------|--------------|---------------|---------------|----------------|---------------------|----------------------|---------------------------------------|
+
+[25/26] 财务衍生 TTM (利润+现金流)
+  itf=ttm_shift  table=cn_stock_financial_ttm_shift
+  note: ★ shift=0 取最新一期; ttm 直接给, 砍 ttm4_ytd 自算
+  SQL: SELECT date,instrument,report_date,shift,operating_revenue_ttm,net_profit_ttm,net_profit_to_parent_shareholders_ttm,net_cffoa_ttm,net_cffia_ttm,net_cfffa_ttm FROM cn_stock_financial_ttm_shift WHERE instrument='000001.SZ' AND shift=0
+  filters: {"date": ["2024-12-31", "2024-12-31"]}
+  OK
+    | date   | instrument   | report_date   | shift   | operating_revenue_ttm   | net_profit_ttm   | net_profit_to_parent_shareholders_ttm   | net_cffoa_ttm   | net_cffia_ttm   | net_cfffa_ttm   |
+    |--------|--------------|---------------|---------|-------------------------|------------------|-----------------------------------------|-----------------|-----------------|-----------------|
+
+[26/26] 财务衍生 (财务附注 LF/MRQ/TTM)
+  itf=notes_shift  table=cn_stock_financial_notes_shift
+  note: 财务附注 LF/MRQ/TTM 三套衍生
+  SQL: SELECT date,instrument,report_date,shift,nonrecurring_income_sum_lf,nonrecurring_income_sum_mrq,nonrecurring_income_sum_ttm FROM cn_stock_financial_notes_shift WHERE instrument='000001.SZ' AND shift=0
+  filters: {"date": ["2024-12-31", "2024-12-31"]}
+  OK
+    | date   | instrument   | report_date   | shift   | nonrecurring_income_sum_lf   | nonrecurring_income_sum_mrq   | nonrecurring_income_sum_ttm   |
+    |--------|--------------|---------------|---------|------------------------------|-------------------------------|-------------------------------|
 
 ============================================================
-通过: 27/28
-失败 (1):
-  - cn_stock_valuation                               itf=daily_basic (估值)                 个股估值 PE/PB/PS/PCF/DY
-Traceback (most recent call last):
-  File "/home/chuyin/work/qmt/doc/bigquant/probe.py", line 317, in <module>
-    main()
-  File "/home/chuyin/work/qmt/doc/bigquant/probe.py", line 313, in main
-    assert not fails, f"有 {len(fails)} 个 probe 失败"
-           ^^^^^^^^^
-AssertionError: 有 1 个 probe 失败
-chuyin@chuyin:~/work/qmt$ 
+通过: 26/26
 """

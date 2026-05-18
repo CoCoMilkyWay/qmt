@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -16,13 +15,6 @@
 namespace misc::store {
 
 namespace fs = std::filesystem;
-using std::chrono::days;
-using std::chrono::sys_days;
-using std::chrono::year;
-using std::chrono::year_month;
-using std::chrono::year_month_day;
-using std::chrono::month;
-using std::chrono::last;
 
 // ============================================================================
 // 路径
@@ -120,6 +112,17 @@ void write_empty_month(std::string_view yyyy, std::string_view mm,
   yyjson_mut_doc_free(doc);
 }
 
+void write_day_docs(std::string_view name, std::string_view start,
+                    std::string_view end,
+                    std::map<std::string, yyjson_mut_doc *> docs) {
+  for (auto &[vd, doc] : docs) {
+    atomic_write_json(day_data_path(vd, name), doc);
+    yyjson_mut_doc_free(doc);
+  }
+  update_empty_for_range(name, start, end,
+                         [&](const std::string &d) { return docs.count(d) > 0; });
+}
+
 void update_empty_for_range(std::string_view name, std::string_view start,
                             std::string_view end,
                             const std::function<bool(const std::string &)> &has_data) {
@@ -150,8 +153,12 @@ void update_empty_for_range(std::string_view name, std::string_view start,
 // lastupdate 去重
 // ============================================================================
 
-bool should_skip_api(std::string_view name, int window_seconds) {
+bool should_skip_api(std::string_view name, int window_seconds,
+                     const fs::path &verify_exists) {
   assert(window_seconds >= 0);
+  // verify 路径非空且不存在 → 输出已丢失, 强制重抓 (lastupdate 不可信).
+  if (!verify_exists.empty() && !fs::exists(verify_exists))
+    return false;
   fs::path p = lastupdate_path(name);
   if (!fs::exists(p))
     return false;
@@ -170,138 +177,6 @@ void mark_api_updated(std::string_view name) {
   int64_t now = static_cast<int64_t>(std::time(nullptr));
   std::string content = std::to_string(now) + "\n";
   atomic_write(lastupdate_path(name), content.data(), content.size());
-}
-
-// ============================================================================
-// scan_missing_days
-// ============================================================================
-
-std::vector<std::string> scan_missing_days(std::string_view name,
-                                           std::string_view start,
-                                           std::string_view end,
-                                           int lookback_days) {
-  assert(lookback_days >= 0);
-  auto all_days = iter_days(start, end);
-  std::string lookback_from = lookback_days > 0
-                                  ? add_days(end, -(lookback_days - 1))
-                                  : std::string{};
-
-  // 按月缓存 _empty.json 中本 itf 对应的 DD 集合 (key = "YYYYMM")
-  std::unordered_map<std::string, EmptySet> empty_by_month;
-  std::string name_s(name);
-  auto get_empty_set = [&](const std::string &d) -> const EmptySet & {
-    std::string ym = d.substr(0, 6);
-    auto it = empty_by_month.find(ym);
-    if (it == empty_by_month.end()) {
-      EmptyMonth m = read_empty_month(d.substr(0, 4), d.substr(4, 2));
-      it = empty_by_month.emplace(ym, std::move(m[name_s])).first;
-    }
-    return it->second;
-  };
-
-  std::vector<std::string> missing;
-  missing.reserve(all_days.size());
-  for (auto &d : all_days) {
-    bool in_lookback = lookback_days > 0 && d >= lookback_from;
-    if (in_lookback) {
-      missing.push_back(d);
-      continue;
-    }
-    if (fs::exists(day_data_path(d, name)))
-      continue;
-    if (get_empty_set(d).count(d.substr(6, 2)))
-      continue;
-    missing.push_back(d);
-  }
-  return missing;
-}
-
-// ============================================================================
-// scan_missing_months
-// ============================================================================
-
-namespace {
-
-// (yyyy, mm) 区间内所有 (yyyy_str, mm_str) 升序, 闭区间.
-struct YM { std::string yyyy; std::string mm; };
-std::vector<YM> iter_months(std::string_view start, std::string_view end) {
-  assert(start.size() == 8 && end.size() == 8);
-  std::vector<YM> out;
-  sys_days s = parse_yyyymmdd(start);
-  sys_days e = parse_yyyymmdd(end);
-  year_month_day ymd_s{s};
-  year_month_day ymd_e{e};
-  year_month cur{ymd_s.year(), ymd_s.month()};
-  year_month last_ym{ymd_e.year(), ymd_e.month()};
-  while (cur <= last_ym) {
-    char yy[5], mm[3];
-    std::snprintf(yy, sizeof(yy), "%04d", static_cast<int>(cur.year()));
-    std::snprintf(mm, sizeof(mm), "%02d", static_cast<unsigned>(cur.month()));
-    out.push_back({std::string(yy, 4), std::string(mm, 2)});
-    cur += std::chrono::months{1};
-  }
-  return out;
-}
-
-// 该月内是否存在任一 day file (data/YYYY/MM/DD/<name>.json)
-bool month_has_any_day(std::string_view yyyy, std::string_view mm,
-                       std::string_view name) {
-  fs::path dir = git_root() / "data" / std::string(yyyy) / std::string(mm);
-  if (!fs::exists(dir))
-    return false;
-  std::string fname = std::string(name) + ".json";
-  for (auto &entry : fs::directory_iterator(dir)) {
-    if (!entry.is_directory())
-      continue;
-    if (fs::exists(entry.path() / fname))
-      return true;
-  }
-  return false;
-}
-
-// 该月第一天 (YYYYMMDD)
-std::string month_first(std::string_view yyyy, std::string_view mm) {
-  return std::string(yyyy) + std::string(mm) + "01";
-}
-
-// 该月最后一天 (YYYYMMDD)
-std::string month_last(std::string_view yyyy, std::string_view mm) {
-  int y = std::stoi(std::string(yyyy));
-  unsigned m = static_cast<unsigned>(std::stoi(std::string(mm)));
-  year_month_day ymd{year{y} / month{m} / last};
-  return fmt_yyyymmdd(sys_days{ymd});
-}
-
-} // namespace
-
-std::vector<MonthSeg> scan_missing_months(std::string_view name,
-                                          std::string_view start,
-                                          std::string_view end,
-                                          int lookback_days) {
-  assert(lookback_days >= 0);
-  std::string lookback_from = lookback_days > 0
-                                  ? add_days(end, -(lookback_days - 1))
-                                  : std::string{};
-  std::vector<MonthSeg> out;
-  for (auto &ym : iter_months(start, end)) {
-    std::string mfirst = month_first(ym.yyyy, ym.mm);
-    std::string mlast = month_last(ym.yyyy, ym.mm);
-    // clamp 到 outer [start, end]
-    std::string s = std::max(mfirst, std::string(start));
-    std::string e = std::min(mlast, std::string(end));
-
-    bool in_lookback =
-        lookback_days > 0 &&
-        e >= lookback_from; // 该月任一天进 lookback → 重拉
-    if (in_lookback) {
-      out.push_back({s, e});
-      continue;
-    }
-    if (month_has_any_day(ym.yyyy, ym.mm, name))
-      continue;
-    out.push_back({s, e});
-  }
-  return out;
 }
 
 } // namespace misc::store

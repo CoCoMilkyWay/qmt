@@ -1,20 +1,23 @@
 #include "feature/pit.hpp"
 
 #include "feature/axis.hpp"
+#include "feature/industry.hpp"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
 
 // ============================================================================
-// pit.cpp 是「itf api 单点」: 每个 itf 一组 (prealloc + parse + post_sort)
-//   集中定义 ⇒ 末尾 ITFS[] 表挂载. load.cpp 仅迭代该表, 不出现具体 itf 名.
+// pit.cpp 是「itf api 单点」: 每个 itf 一组 (prealloc + parse + post_sort +
+//   post_ffill) 集中定义 ⇒ 末尾 ITFS[] 表挂载. load.cpp 仅迭代该表, 不出现
+//   具体 itf 名.
 //   增减 itf:  1) pit.hpp 加 typed Grid/Ev struct 与 PitPool 字段
-//             2) pit.cpp 加一个 namespace itf_<name> 块 (prealloc/parse/[post_sort])
+//             2) pit.cpp 加一个 namespace itf_<name> 块 (prealloc/parse/[post_sort/post_ffill])
 //             3) ITFS[] 末尾追加一行
 //
 // 【raw cutoff 单点真理】每个 itf namespace 内 constexpr CUTOFF = 0 / -1:
@@ -24,9 +27,12 @@
 //     CUTOFF=-1 (盘后 / 公告实时): row = v_idx + 1     (下一交易日生效)
 //   网格 itf 写 pool[a*n_d + row]; 事件 itf ev.v = row.
 //   pool 即「row D 已 cutoff 的合法数据」, 下游 feature 直读 pool[base + d],
-//   不再关心 cutoff. (feature 若想更保守对齐, 自己再偏移, 例: up_lim / dn_lim)
-//   业务需要原始 visible 日期 (forecast/dividend 判 ann_y) 时, axes.dates[ev.v - 1]
-//   还原 floor_date(visible_date) (仅 CUTOFF=-1 itf 适用; ev.v >= 1 由 parse 保证).
+//   不再关心 cutoff. 业务需要原始 visible 日期 (dividend 判 ann_y) 时,
+//   axes.dates[ev.v - 1] 还原 floor_date(visible_date) (仅 CUTOFF=-1 适用).
+//
+// 数据源 (lookup 字段差异):
+//   BigQuant 表统一用 "instrument";  Tushare 表 (forecast/...) 仍用 "ts_code".
+//   每个 itf 内部 inline 选择字段, 不抽公共 helper (避免运行时分支).
 // ============================================================================
 
 namespace feature {
@@ -46,13 +52,19 @@ inline float as_float_or_nan(yyjson_val *v) {
   return std::nanf("");
 }
 
-// 校验: 值必须 > 0，否则返回 +inf
+// NaN (数据缺失: JSON null / 字段不存在) → NaN 透传, 留给 grid_ffill 用前值兜;
+// finite ∧ 满足约束 → 原值; finite ∧ 违反约束 (e.g. close ≤ 0) → +inf 保留"业务异常"标记.
+// 把 NaN 也无差别转 +inf 会绕过 ffill (ffill 不兜 +inf), 导致停牌日 close=+inf 残留
+// 全程污染下游 daily_return / mcap_raw / limit_up/dn 等.
 inline float positive_or_inf(float v) {
+  if (std::isnan(v))
+    return v;
   return (std::isfinite(v) && v > 0.0f) ? v : std::numeric_limits<float>::infinity();
 }
 
-// 校验: 值必须 >= 0，否则返回 +inf
 inline float non_negative_or_inf(float v) {
+  if (std::isnan(v))
+    return v;
   return (std::isfinite(v) && v >= 0.0f) ? v : std::numeric_limits<float>::infinity();
 }
 
@@ -69,8 +81,16 @@ inline const char *as_cstr_or_null(yyjson_val *v) {
   return yyjson_get_str(v);
 }
 
-inline int lookup_a(const Axes &axes, yyjson_val *ts_code_v) {
-  const char *s = as_cstr_or_null(ts_code_v);
+inline int as_int_or_default(yyjson_val *v, int def) {
+  if (!v) return def;
+  if (yyjson_is_int(v)) return static_cast<int>(yyjson_get_int(v));
+  return def;
+}
+
+// 按字段名查 a 索引. 字段缺失 / 非 string / 不在 code_idx → -1.
+inline int lookup_a(const Axes &axes, yyjson_val *item, const char *field) {
+  yyjson_val *v = yyjson_obj_get(item, field);
+  const char *s = as_cstr_or_null(v);
   if (!s)
     return -1;
   auto it = axes.code_idx.find(s);
@@ -82,7 +102,6 @@ inline void grid_prealloc_float(std::vector<float> &v, std::size_t n) {
   v.assign(n, std::nanf(""));
 }
 
-// 事件 store prealloc: length = n_a, 空链
 template <class Ev>
 inline void event_prealloc(EventStore<Ev> &store, std::size_t n_a) {
   store.assign(n_a, {});
@@ -109,34 +128,35 @@ inline void grid_ffill(std::vector<float> &grid, int n_a, int n_d) {
       if (std::isfinite(v)) {
         last = v;
       } else if (std::isnan(v) && std::isfinite(last)) {
-        // 只填充 NaN，不填充 +inf
         grid[base + static_cast<std::size_t>(d)] = last;
       }
     }
   }
 }
 
+// 网格 int8/uint8 字段 per-A forward fill:
+//   - 非 sentinel 值记 last
+//   - sentinel 值若 last 非 sentinel → 填充
+//   注意 GridStatus.suspended 是 0/1 (无 sentinel, 不需 ffill); st_status 0/1/2
+//   每日盘前全量快照, 0 表示当日不在 ST 名单 — 按"盘前快照保底"语义不做 ffill.
+//   预留 helper, 当前未使用.
+
 } // namespace
 
 // ============================================================================
-// 网格 itf
+// 网格 itf (新基建)
 // ============================================================================
 
-namespace itf_daily_basic {
+namespace itf_cn_stock_bar1d {
 
-constexpr int CUTOFF = -1; // 盘后 15:00–17:00 入库 → 下一交易日 row 可见
+// cn_stock_bar1d: 后复权 OHLCV + adjust_factor; 当前张量层只用 close.
+//   入库时机: 盘后 17:00–19:30; CUTOFF=-1 → row D 拿 D-1 实际收盘.
+constexpr int CUTOFF = -1;
 
 void prealloc(const Axes &axes, PitPool &p) {
   std::size_t n = static_cast<std::size_t>(axes.n_a()) *
                   static_cast<std::size_t>(axes.n_d());
-  grid_prealloc_float(p.daily_basic.close, n);
-  grid_prealloc_float(p.daily_basic.total_mv, n);
-  grid_prealloc_float(p.daily_basic.circ_mv, n);
-  grid_prealloc_float(p.daily_basic.total_share, n);
-  grid_prealloc_float(p.daily_basic.pe_ttm, n);
-  grid_prealloc_float(p.daily_basic.pb, n);
-  grid_prealloc_float(p.daily_basic.ps_ttm, n);
-  grid_prealloc_float(p.daily_basic.dv_ttm, n);
+  grid_prealloc_float(p.bar1d.close, n);
 }
 
 void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
@@ -153,57 +173,134 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
   size_t i, n;
   yyjson_val *item;
   yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
+    int a = lookup_a(axes, item, "instrument");
     if (a < 0)
       continue;
     std::size_t off = static_cast<std::size_t>(a) *
                           static_cast<std::size_t>(n_d) +
                       base_off;
-    // 校验: close/total_mv/circ_mv/total_share 必须 > 0
-    pool.daily_basic.close[off] = positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "close")));
-    pool.daily_basic.total_mv[off] = positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "total_mv")));
-    pool.daily_basic.circ_mv[off] = positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "circ_mv")));
-    pool.daily_basic.total_share[off] = positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "total_share")));
-    // pe_ttm 不再使用 (自己算), 但保留读取
-    pool.daily_basic.pe_ttm[off] = as_float_or_nan(yyjson_obj_get(item, "pe_ttm"));
-    // pb 可正可负 (净资产正负), 保持原值
-    pool.daily_basic.pb[off] = as_float_or_nan(yyjson_obj_get(item, "pb"));
-    // ps_ttm: NaN 保持（无营收数据正常），仅 <=0 不合理
+    pool.bar1d.close[off] = positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "close")));
+  }
+}
+
+void post_ffill(const Axes &axes, PitPool &p) {
+  grid_ffill(p.bar1d.close, axes.n_a(), axes.n_d());
+}
+
+} // namespace itf_cn_stock_bar1d
+
+namespace itf_cn_stock_shares {
+
+// cn_stock_shares: 总股本 / 流通股 [股]; 入库盘后, CUTOFF=-1.
+constexpr int CUTOFF = -1;
+
+void prealloc(const Axes &axes, PitPool &p) {
+  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
+                  static_cast<std::size_t>(axes.n_d());
+  grid_prealloc_float(p.shares.total_shares, n);
+  grid_prealloc_float(p.shares.total_float_shares, n);
+}
+
+void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
+           std::vector<std::mutex> * /*mu*/) {
+  assert(arr && yyjson_is_arr(arr));
+  if (v_idx < 0)
+    return;
+  int n_d = axes.n_d();
+  int row = v_idx - CUTOFF;
+  if (row >= n_d)
+    return;
+  std::size_t base_off = static_cast<std::size_t>(row);
+
+  size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(arr, i, n, item) {
+    int a = lookup_a(axes, item, "instrument");
+    if (a < 0)
+      continue;
+    std::size_t off = static_cast<std::size_t>(a) *
+                          static_cast<std::size_t>(n_d) +
+                      base_off;
+    pool.shares.total_shares[off] =
+        positive_or_inf(as_float_or_nan(yyjson_obj_get(item, "total_shares")));
+    pool.shares.total_float_shares[off] = positive_or_inf(
+        as_float_or_nan(yyjson_obj_get(item, "total_float_shares")));
+  }
+}
+
+void post_ffill(const Axes &axes, PitPool &p) {
+  int n_a = axes.n_a(), n_d = axes.n_d();
+  grid_ffill(p.shares.total_shares, n_a, n_d);
+  grid_ffill(p.shares.total_float_shares, n_a, n_d);
+}
+
+} // namespace itf_cn_stock_shares
+
+namespace itf_cn_stock_limit_price {
+
+// cn_stock_limit_price: 当日适用涨跌停价 [元/股]. 盘前 08:40 入库, CUTOFF=0.
+constexpr int CUTOFF = 0;
+
+void prealloc(const Axes &axes, PitPool &p) {
+  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
+                  static_cast<std::size_t>(axes.n_d());
+  grid_prealloc_float(p.limit_price.upper_limit, n);
+  grid_prealloc_float(p.limit_price.lower_limit, n);
+}
+
+void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
+           std::vector<std::mutex> * /*mu*/) {
+  assert(arr && yyjson_is_arr(arr));
+  if (v_idx < 0)
+    return;
+  int n_d = axes.n_d();
+  int row = v_idx - CUTOFF;
+  if (row >= n_d)
+    return;
+  std::size_t base_off = static_cast<std::size_t>(row);
+
+  size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(arr, i, n, item) {
+    int a = lookup_a(axes, item, "instrument");
+    if (a < 0)
+      continue;
+    std::size_t off = static_cast<std::size_t>(a) *
+                          static_cast<std::size_t>(n_d) +
+                      base_off;
+    // 哨兵: up==0 (异常) → 1e6 (无涨停), dn==0 → 0.01 (无跌停).
     {
-      float ps = as_float_or_nan(yyjson_obj_get(item, "ps_ttm"));
-      pool.daily_basic.ps_ttm[off] = std::isnan(ps) ? ps : positive_or_inf(ps);
+      float up = as_float_or_nan(yyjson_obj_get(item, "upper_limit"));
+      pool.limit_price.upper_limit[off] = (up == 0.0f) ? 1e6f : positive_or_inf(up);
     }
-    // dv_ttm: NaN 保持（无分红数据正常），仅负数不合理
     {
-      float dv = as_float_or_nan(yyjson_obj_get(item, "dv_ttm"));
-      pool.daily_basic.dv_ttm[off] = std::isnan(dv) ? dv : non_negative_or_inf(dv);
+      float dn = as_float_or_nan(yyjson_obj_get(item, "lower_limit"));
+      pool.limit_price.lower_limit[off] = (dn == 0.0f) ? 0.01f : positive_or_inf(dn);
     }
   }
 }
 
 void post_ffill(const Axes &axes, PitPool &p) {
   int n_a = axes.n_a(), n_d = axes.n_d();
-  grid_ffill(p.daily_basic.close, n_a, n_d);
-  grid_ffill(p.daily_basic.total_mv, n_a, n_d);
-  grid_ffill(p.daily_basic.circ_mv, n_a, n_d);
-  grid_ffill(p.daily_basic.total_share, n_a, n_d);
-  grid_ffill(p.daily_basic.pe_ttm, n_a, n_d);
-  grid_ffill(p.daily_basic.pb, n_a, n_d);
-  grid_ffill(p.daily_basic.ps_ttm, n_a, n_d);
-  grid_ffill(p.daily_basic.dv_ttm, n_a, n_d);
+  grid_ffill(p.limit_price.upper_limit, n_a, n_d);
+  grid_ffill(p.limit_price.lower_limit, n_a, n_d);
 }
 
-} // namespace itf_daily_basic
+} // namespace itf_cn_stock_limit_price
 
-namespace itf_stk_limit {
+namespace itf_cn_stock_status {
 
-constexpr int CUTOFF = 0; // 盘前 08:40 入库 → 当日 row 可见
+// cn_stock_status: 盘前 09:20 全量快照. CUTOFF=0.
+//   st_status int8: 0=正常, 1=ST, 2=*ST  → 直接读, 无需 ffill (盘前每日全量).
+//   suspended uint8: 0=正常, 1=停牌      → 直接读.
+//   (is_risk_warning / price_limit_status / exdr 暂未入张量)
+constexpr int CUTOFF = 0;
 
 void prealloc(const Axes &axes, PitPool &p) {
   std::size_t n = static_cast<std::size_t>(axes.n_a()) *
                   static_cast<std::size_t>(axes.n_d());
-  grid_prealloc_float(p.stk_limit.up_limit, n);
-  grid_prealloc_float(p.stk_limit.down_limit, n);
+  p.status.st_status.assign(n, int8_t{0});
+  p.status.suspended.assign(n, uint8_t{0});
 }
 
 void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
@@ -220,170 +317,89 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
   size_t i, n;
   yyjson_val *item;
   yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
+    int a = lookup_a(axes, item, "instrument");
     if (a < 0)
       continue;
     std::size_t off = static_cast<std::size_t>(a) *
                           static_cast<std::size_t>(n_d) +
                       base_off;
-    // 涨跌停价校验 (哨兵: up>=1e6 无涨停, dn<=0.01 无跌停):
-    //   - 数据问题: up=0 (极少量) → 1e6
-    //   - 数据问题: dn=0 (北交所开市首日 20211115, 248条) → 0.01
-    {
-      float up = as_float_or_nan(yyjson_obj_get(item, "up_limit"));
-      pool.stk_limit.up_limit[off] = (up == 0.0f) ? 1e6f : positive_or_inf(up);
-    }
-    {
-      float dn = as_float_or_nan(yyjson_obj_get(item, "down_limit"));
-      pool.stk_limit.down_limit[off] = (dn == 0.0f) ? 0.01f : positive_or_inf(dn);
-    }
+    int st = as_int_or_default(yyjson_obj_get(item, "st_status"), 0);
+    int sp = as_int_or_default(yyjson_obj_get(item, "suspended"), 0);
+    pool.status.st_status[off] = static_cast<int8_t>(st);
+    pool.status.suspended[off] = (sp != 0) ? uint8_t{1} : uint8_t{0};
+  }
+}
+
+// 不做 ffill — cn_stock_status 是盘前全量快照, 缺日 (无文件) = 数据起点前/拉取漏日,
+//   一律保持 0 (按"未知=正常"处理). risk_warn / susp 直接读 row D.
+
+} // namespace itf_cn_stock_status
+
+namespace itf_cn_stock_margin_trading_detail {
+
+// cn_stock_margin_trading_detail: 当日两融明细 (盘前入库, CUTOFF=0).
+//   字段: financing_balance, securities_lending_balance ≥ 0.
+//   派生: is_margin = 1 当 (D, A) 存在记录 (= 当日两融标的).
+constexpr int CUTOFF = 0;
+
+void prealloc(const Axes &axes, PitPool &p) {
+  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
+                  static_cast<std::size_t>(axes.n_d());
+  p.margin_detail.is_margin.assign(n, uint8_t{0});
+  grid_prealloc_float(p.margin_detail.financing_balance, n);
+  grid_prealloc_float(p.margin_detail.securities_lending_balance, n);
+}
+
+void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
+           std::vector<std::mutex> * /*mu*/) {
+  assert(arr && yyjson_is_arr(arr));
+  if (v_idx < 0)
+    return;
+  int n_d = axes.n_d();
+  int row = v_idx - CUTOFF;
+  if (row >= n_d)
+    return;
+  std::size_t base_off = static_cast<std::size_t>(row);
+
+  size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(arr, i, n, item) {
+    int a = lookup_a(axes, item, "instrument");
+    if (a < 0)
+      continue;
+    std::size_t off = static_cast<std::size_t>(a) *
+                          static_cast<std::size_t>(n_d) +
+                      base_off;
+    pool.margin_detail.is_margin[off] = 1;
+    pool.margin_detail.financing_balance[off] = non_negative_or_inf(
+        as_float_or_nan(yyjson_obj_get(item, "financing_balance")));
+    pool.margin_detail.securities_lending_balance[off] = non_negative_or_inf(
+        as_float_or_nan(yyjson_obj_get(item, "securities_lending_balance")));
   }
 }
 
 void post_ffill(const Axes &axes, PitPool &p) {
   int n_a = axes.n_a(), n_d = axes.n_d();
-  grid_ffill(p.stk_limit.up_limit, n_a, n_d);
-  grid_ffill(p.stk_limit.down_limit, n_a, n_d);
+  // is_margin 不做 ffill — 缺席日 (周末/节假日已被 floor; 真正的 0 表示当日不在两融名单)
+  grid_ffill(p.margin_detail.financing_balance, n_a, n_d);
+  grid_ffill(p.margin_detail.securities_lending_balance, n_a, n_d);
 }
 
-} // namespace itf_stk_limit
-
-namespace itf_suspend_d {
-
-constexpr int CUTOFF = 0; // 不定期(通常盘前) → 当日 row 可见 (best-effort)
-
-void prealloc(const Axes &axes, PitPool &p) {
-  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
-                  static_cast<std::size_t>(axes.n_d());
-  p.suspend_d.susp.assign(n, 0u); // 0 = 无停牌
-}
-
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> * /*mu*/) {
-  assert(arr && yyjson_is_arr(arr));
-  if (v_idx < 0)
-    return;
-  int n_d = axes.n_d();
-  int row = v_idx - CUTOFF;
-  if (row >= n_d)
-    return;
-  std::size_t base_off = static_cast<std::size_t>(row);
-
-  // suspend_d 文件存在记录 = 当日有停/复牌动作; suspend_type='S' 表停牌, 'R' 复牌.
-  // susp 取 1 (停牌中) 仅当 suspend_type=='S'; 复牌 (R) 不视为停牌当日.
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
-    if (a < 0)
-      continue;
-    const char *st = as_cstr_or_null(yyjson_obj_get(item, "suspend_type"));
-    if (!st)
-      continue;
-    std::size_t off = static_cast<std::size_t>(a) *
-                          static_cast<std::size_t>(n_d) +
-                      base_off;
-    if (st[0] == 'S')
-      pool.suspend_d.susp[off] = 1;
-  }
-}
-
-} // namespace itf_suspend_d
-
-namespace itf_margin_secs {
-
-constexpr int CUTOFF = 0; // 盘前更新 (trade_date=T 当日入库) → 当日 row 可见
-
-void prealloc(const Axes &axes, PitPool &p) {
-  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
-                  static_cast<std::size_t>(axes.n_d());
-  p.margin_secs.is_margin.assign(n, 0u); // 0 = 非两融标的
-}
-
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> * /*mu*/) {
-  assert(arr && yyjson_is_arr(arr));
-  if (v_idx < 0)
-    return;
-  int n_d = axes.n_d();
-  int row = v_idx - CUTOFF;
-  if (row >= n_d)
-    return;
-  std::size_t base_off = static_cast<std::size_t>(row);
-
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
-    if (a < 0)
-      continue;
-    std::size_t off = static_cast<std::size_t>(a) *
-                          static_cast<std::size_t>(n_d) +
-                      base_off;
-    pool.margin_secs.is_margin[off] = 1;
-  }
-}
-
-// 注: is_margin 不做 ffill — 缺席日 (周末/节假日已被 floor; 真正的 0 表示当日不在名单)
-//     与 suspend_d 同语义 (稀疏存在 = 1, 否则 0).
-
-} // namespace itf_margin_secs
-
-namespace itf_margin_detail {
-
-constexpr int CUTOFF = 0; // 盘前 9:00 入库 trade_date=T-1 明细; visible_date=trade_date 自洽 → 当日 row 可见
-
-void prealloc(const Axes &axes, PitPool &p) {
-  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
-                  static_cast<std::size_t>(axes.n_d());
-  grid_prealloc_float(p.margin_detail.mr_bal, n);
-  grid_prealloc_float(p.margin_detail.ms_bal, n);
-}
-
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> * /*mu*/) {
-  assert(arr && yyjson_is_arr(arr));
-  if (v_idx < 0)
-    return;
-  int n_d = axes.n_d();
-  int row = v_idx - CUTOFF;
-  if (row >= n_d)
-    return;
-  std::size_t base_off = static_cast<std::size_t>(row);
-
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
-    if (a < 0)
-      continue;
-    std::size_t off = static_cast<std::size_t>(a) *
-                          static_cast<std::size_t>(n_d) +
-                      base_off;
-    // rzye / rqye 必须 >= 0 (余额非负, 0 表示当日无余额)
-    pool.margin_detail.mr_bal[off] = non_negative_or_inf(as_float_or_nan(yyjson_obj_get(item, "rzye")));
-    pool.margin_detail.ms_bal[off] = non_negative_or_inf(as_float_or_nan(yyjson_obj_get(item, "rqye")));
-  }
-}
-
-void post_ffill(const Axes &axes, PitPool &p) {
-  int n_a = axes.n_a(), n_d = axes.n_d();
-  grid_ffill(p.margin_detail.mr_bal, n_a, n_d);
-  grid_ffill(p.margin_detail.ms_bal, n_a, n_d);
-}
-
-} // namespace itf_margin_detail
+} // namespace itf_cn_stock_margin_trading_detail
 
 // ============================================================================
-// 事件 itf  (per-A mutex emplace; post_sort 末段 sort by v)
+// 事件 itf (新基建; per-A mutex emplace; post_sort 末段 sort by v)
 // ============================================================================
 
-namespace itf_forecast {
+namespace itf_cn_stock_industry_component {
 
-constexpr int CUTOFF = -1; // 公告实时(通常盘后) → 下一交易日 row 可见
+// cn_stock_industry_component: 月初 sw2021 一级行业归属快照 (MonthFirst, CUTOFF=0).
+//   每月仅 1 个 DD 文件 (visible_date = MIN(date) of month); 同 (D, instrument)
+//   下 industry∈{cs,sw2014,sw2021} 三套, 仅取 sw2021 入 ev.
+constexpr int CUTOFF = 0;
 
 void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.forecast, static_cast<std::size_t>(axes.n_a()));
+  event_prealloc(p.industry_component, static_cast<std::size_t>(axes.n_a()));
 }
 
 void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
@@ -399,31 +415,35 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
   size_t i, n;
   yyjson_val *item;
   yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
+    const char *ind = as_cstr_or_null(yyjson_obj_get(item, "industry"));
+    if (!ind || std::strcmp(ind, "sw2021") != 0)
+      continue;
+    int a = lookup_a(axes, item, "instrument");
     if (a < 0)
       continue;
-    ForecastEv ev;
-    ev.v = row;
-    ev.end_date = as_str(yyjson_obj_get(item, "end_date"));
-    ev.type = as_str(yyjson_obj_get(item, "type"));
-    ev.last_parent_net = as_float_or_nan(yyjson_obj_get(item, "last_parent_net"));
+    const char *l1n = as_cstr_or_null(yyjson_obj_get(item, "industry_level1_name"));
+    uint8_t l1_id = sw2021_l1_name_to_id(l1n ? std::string_view(l1n) : std::string_view());
+    IndustryComponentEv ev{row, l1_id};
     {
       std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.forecast[a].push_back(std::move(ev));
+      pool.industry_component[a].push_back(ev);
     }
   }
 }
 
-void post_sort(PitPool &p) { event_post_sort(p.forecast); }
+void post_sort(PitPool &p) { event_post_sort(p.industry_component); }
 
-} // namespace itf_forecast
+} // namespace itf_cn_stock_industry_component
 
-namespace itf_report {
+namespace itf_cn_stock_industry_change {
 
-constexpr int CUTOFF = -1; // 公告实时 (随财报实际披露) → 下一交易日 row 可见
+// cn_stock_industry_change: 月内 sw2021 L1 行业切换事件 (Day, CUTOFF=-1, 盘后).
+//   过滤: industry=='sw2021' AND industry_level==1 AND change_flag==1 (进入新行业).
+//   change_flag==0 (退出旧行业) 不入 — 行业切换日两条同 D 同 A, 只取"进"侧.
+constexpr int CUTOFF = -1;
 
 void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.report, static_cast<std::size_t>(axes.n_a()));
+  event_prealloc(p.industry_change, static_cast<std::size_t>(axes.n_a()));
 }
 
 void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
@@ -439,90 +459,37 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
   size_t i, n;
   yyjson_val *item;
   yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
+    const char *ind = as_cstr_or_null(yyjson_obj_get(item, "industry"));
+    if (!ind || std::strcmp(ind, "sw2021") != 0)
+      continue;
+    int level = as_int_or_default(yyjson_obj_get(item, "industry_level"), 0);
+    if (level != 1)
+      continue;
+    int flag = as_int_or_default(yyjson_obj_get(item, "change_flag"), -1);
+    if (flag != 1)
+      continue;
+    int a = lookup_a(axes, item, "instrument");
     if (a < 0)
       continue;
-    ReportEv ev;
-    ev.v = row;
-    ev.end_date = as_str(yyjson_obj_get(item, "end_date"));
+    const char *nm = as_cstr_or_null(yyjson_obj_get(item, "industry_name"));
+    uint8_t l1_id = sw2021_l1_name_to_id(nm ? std::string_view(nm) : std::string_view());
+    IndustryChangeEv ev{row, l1_id};
     {
       std::lock_guard<std::mutex> lk((*mu)[a]);
-      pool.report[a].push_back(std::move(ev));
+      pool.industry_change[a].push_back(ev);
     }
   }
 }
 
-void post_sort(PitPool &p) { event_post_sort(p.report); }
+void post_sort(PitPool &p) { event_post_sort(p.industry_change); }
 
-} // namespace itf_report
+} // namespace itf_cn_stock_industry_change
 
-namespace itf_stock_st {
+namespace itf_cn_stock_dividend {
 
-constexpr int CUTOFF = 0; // 盘前 9:20 入库 → 当日 row 可见
-
-// stock_st 每日返回当日全部 ST 名单, name 含 "*" ⇒ *ST (2), 否则 ⇒ ST (1).
-//   name 字段为 ST 状态名 (例: "*ST天山" / "ST联创"), 必含 "ST" 子串.
-inline uint8_t name_to_state(const char *name) {
-  assert(name && "stock_st.name missing");
-  return (std::strchr(name, '*') != nullptr) ? uint8_t{2} : uint8_t{1};
-}
-
-void prealloc(const Axes &axes, PitPool &p) {
-  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
-                  static_cast<std::size_t>(axes.n_d());
-  p.stock_st.state.assign(n, 0u); // 0 = 未知 / 正常 (post_ffill 把 0 当 miss 填)
-}
-
-void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
-           std::vector<std::mutex> * /*mu*/) {
-  assert(arr && yyjson_is_arr(arr));
-  if (v_idx < 0)
-    return;
-  int n_d = axes.n_d();
-  int row = v_idx - CUTOFF;
-  if (row >= n_d)
-    return;
-  std::size_t base_off = static_cast<std::size_t>(row);
-
-  // 只写 1/2; 不写 0. "不在 list 的票" 保持 prealloc 的 0 → 由 post_ffill 用前向最近 1/2 覆盖.
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
-    if (a < 0)
-      continue;
-    std::size_t off = static_cast<std::size_t>(a) *
-                          static_cast<std::size_t>(n_d) +
-                      base_off;
-    pool.stock_st.state[off] = name_to_state(as_cstr_or_null(yyjson_obj_get(item, "name")));
-  }
-}
-
-// ffill: 0 视为 "未知" (= 文件缺失 / 退市整理期 tushare 不再 list / 未上市), 用 per-A 前向最近 非 0 值填.
-//   首段 (未出现过任何 1/2) 保持 0.
-//   trade-off: 已撤销 ST 的票会被永久保持 *ST 状态 — 保守 false positive, 策略仅 "少买", 不主动伤害.
-void post_ffill(const Axes &axes, PitPool &p) {
-  int n_a = axes.n_a(), n_d = axes.n_d();
-  for (int a = 0; a < n_a; ++a) {
-    std::size_t base = static_cast<std::size_t>(a) *
-                       static_cast<std::size_t>(n_d);
-    uint8_t last = 0u;
-    for (int d = 0; d < n_d; ++d) {
-      uint8_t v = p.stock_st.state[base + static_cast<std::size_t>(d)];
-      if (v != 0u) {
-        last = v;
-      } else if (last != 0u) {
-        p.stock_st.state[base + static_cast<std::size_t>(d)] = last;
-      }
-    }
-  }
-}
-
-} // namespace itf_stock_st
-
-namespace itf_dividend {
-
-constexpr int CUTOFF = -1; // 公告实时 (预案/通过/实施) → 下一交易日 row 可见
+// cn_stock_dividend: 分红事件 (Where on publish_date, CUTOFF=-1).
+//   字段: instrument / report_date / cash_after_tax (税后每股分红 [元/股]).
+constexpr int CUTOFF = -1;
 
 void prealloc(const Axes &axes, PitPool &p) {
   event_prealloc(p.dividend, static_cast<std::size_t>(axes.n_a()));
@@ -541,14 +508,13 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
   size_t i, n;
   yyjson_val *item;
   yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
+    int a = lookup_a(axes, item, "instrument");
     if (a < 0)
       continue;
     DividendEv ev;
     ev.v = row;
-    ev.end_date = as_str(yyjson_obj_get(item, "end_date"));
-    ev.div_proc = as_str(yyjson_obj_get(item, "div_proc"));
-    ev.cash_div_tax = as_float_or_nan(yyjson_obj_get(item, "cash_div_tax"));
+    ev.report_date = as_str(yyjson_obj_get(item, "report_date"));
+    ev.cash_after_tax = as_float_or_nan(yyjson_obj_get(item, "cash_after_tax"));
     {
       std::lock_guard<std::mutex> lk((*mu)[a]);
       pool.dividend[a].push_back(std::move(ev));
@@ -558,11 +524,100 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
 
 void post_sort(PitPool &p) { event_post_sort(p.dividend); }
 
-} // namespace itf_dividend
+} // namespace itf_cn_stock_dividend
+
+// ============================================================================
+// 事件 itf (Tushare 保留)
+// ============================================================================
+
+namespace itf_forecast {
+
+// Tushare forecast: 业绩预告. 公告实时 (盘后), CUTOFF=-1. 字段用 ts_code.
+constexpr int CUTOFF = -1;
+
+void prealloc(const Axes &axes, PitPool &p) {
+  event_prealloc(p.forecast, static_cast<std::size_t>(axes.n_a()));
+}
+
+void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
+           std::vector<std::mutex> *mu) {
+  assert(arr && yyjson_is_arr(arr));
+  assert(mu);
+  if (v_idx < 0)
+    return;
+  int row = v_idx - CUTOFF;
+  if (row >= axes.n_d())
+    return;
+
+  size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(arr, i, n, item) {
+    int a = lookup_a(axes, item, "ts_code");
+    if (a < 0)
+      continue;
+    ForecastEv ev;
+    ev.v = row;
+    ev.end_date = as_str(yyjson_obj_get(item, "end_date"));
+    ev.type = as_str(yyjson_obj_get(item, "type"));
+    ev.last_parent_net = as_float_or_nan(yyjson_obj_get(item, "last_parent_net"));
+    {
+      std::lock_guard<std::mutex> lk((*mu)[a]);
+      pool.forecast[a].push_back(std::move(ev));
+    }
+  }
+}
+
+void post_sort(PitPool &p) { event_post_sort(p.forecast); }
+
+} // namespace itf_forecast
+
+// ============================================================================
+// 事件 itf (财务 Tushare 占位 — 用户决策: 财务先不管, 暂保留旧实现)
+//   实际新基建未落地这几张表, parse 不会被触发, EventStore 永远空.
+//   留作占位, 待后续 BigQuant cn_stock_financial_* 迁移.
+// ============================================================================
+
+namespace itf_report {
+
+constexpr int CUTOFF = -1;
+
+void prealloc(const Axes &axes, PitPool &p) {
+  event_prealloc(p.report, static_cast<std::size_t>(axes.n_a()));
+}
+
+void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
+           std::vector<std::mutex> *mu) {
+  assert(arr && yyjson_is_arr(arr));
+  assert(mu);
+  if (v_idx < 0)
+    return;
+  int row = v_idx - CUTOFF;
+  if (row >= axes.n_d())
+    return;
+
+  size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(arr, i, n, item) {
+    int a = lookup_a(axes, item, "ts_code");
+    if (a < 0)
+      continue;
+    ReportEv ev;
+    ev.v = row;
+    ev.end_date = as_str(yyjson_obj_get(item, "end_date"));
+    {
+      std::lock_guard<std::mutex> lk((*mu)[a]);
+      pool.report[a].push_back(std::move(ev));
+    }
+  }
+}
+
+void post_sort(PitPool &p) { event_post_sort(p.report); }
+
+} // namespace itf_report
 
 namespace itf_income {
 
-constexpr int CUTOFF = -1; // 公告实时 (随财报) → 下一交易日 row 可见
+constexpr int CUTOFF = -1;
 
 void prealloc(const Axes &axes, PitPool &p) {
   event_prealloc(p.income, static_cast<std::size_t>(axes.n_a()));
@@ -581,7 +636,7 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
   size_t i, n;
   yyjson_val *item;
   yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
+    int a = lookup_a(axes, item, "ts_code");
     if (a < 0)
       continue;
     IncomeEv ev;
@@ -603,7 +658,7 @@ void post_sort(PitPool &p) { event_post_sort(p.income); }
 
 namespace itf_cashflow {
 
-constexpr int CUTOFF = -1; // 公告实时 (随财报) → 下一交易日 row 可见
+constexpr int CUTOFF = -1;
 
 void prealloc(const Axes &axes, PitPool &p) {
   event_prealloc(p.cashflow, static_cast<std::size_t>(axes.n_a()));
@@ -622,7 +677,7 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
   size_t i, n;
   yyjson_val *item;
   yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
+    int a = lookup_a(axes, item, "ts_code");
     if (a < 0)
       continue;
     CashflowEv ev;
@@ -643,7 +698,7 @@ void post_sort(PitPool &p) { event_post_sort(p.cashflow); }
 
 namespace itf_fina_indicator {
 
-constexpr int CUTOFF = -1; // 公告实时 (随财报) → 下一交易日 row 可见
+constexpr int CUTOFF = -1;
 
 void prealloc(const Axes &axes, PitPool &p) {
   event_prealloc(p.fina_indicator, static_cast<std::size_t>(axes.n_a()));
@@ -662,7 +717,7 @@ void parse(yyjson_val *arr, int v_idx, const Axes &axes, PitPool &pool,
   size_t i, n;
   yyjson_val *item;
   yyjson_arr_foreach(arr, i, n, item) {
-    int a = lookup_a(axes, yyjson_obj_get(item, "ts_code"));
+    int a = lookup_a(axes, item, "ts_code");
     if (a < 0)
       continue;
     FinaIndEv ev;
@@ -683,24 +738,50 @@ void post_sort(PitPool &p) { event_post_sort(p.fina_indicator); }
 
 // ============================================================================
 // ITFS[] 表 — 单点真理
-//   增减 itf 在此追加/删除一行 + 上方 itf_<name> 块
+//   file_name = data/YYYY/MM/DD/<file_name>.json basename, 也是日志/标识用名.
+//   增减 itf 在此追加/删除一行 + 上方 itf_<name> 块.
 // ============================================================================
 
 const ItfDesc ITFS[] = {
-    // 网格 itf (无锁)
-    {"daily_basic", false, &itf_daily_basic::prealloc, &itf_daily_basic::parse, nullptr, &itf_daily_basic::post_ffill},
-    {"stk_limit", false, &itf_stk_limit::prealloc, &itf_stk_limit::parse, nullptr, &itf_stk_limit::post_ffill},
-    {"suspend_d", false, &itf_suspend_d::prealloc, &itf_suspend_d::parse, nullptr, nullptr},
-    {"margin_secs", false, &itf_margin_secs::prealloc, &itf_margin_secs::parse, nullptr, nullptr},
-    {"margin_detail", false, &itf_margin_detail::prealloc, &itf_margin_detail::parse, nullptr, &itf_margin_detail::post_ffill},
-    {"stock_st", false, &itf_stock_st::prealloc, &itf_stock_st::parse, nullptr, &itf_stock_st::post_ffill},
-    // 事件 itf (per-A mutex)
-    {"forecast", true, &itf_forecast::prealloc, &itf_forecast::parse, &itf_forecast::post_sort, nullptr},
-    {"report", true, &itf_report::prealloc, &itf_report::parse, &itf_report::post_sort, nullptr},
-    {"dividend", true, &itf_dividend::prealloc, &itf_dividend::parse, &itf_dividend::post_sort, nullptr},
-    {"income", true, &itf_income::prealloc, &itf_income::parse, &itf_income::post_sort, nullptr},
-    {"cashflow", true, &itf_cashflow::prealloc, &itf_cashflow::parse, &itf_cashflow::post_sort, nullptr},
-    {"fina_indicator", true, &itf_fina_indicator::prealloc, &itf_fina_indicator::parse, &itf_fina_indicator::post_sort, nullptr},
+    // ---- 网格 itf (新基建; 无锁) ----
+    {"cn_stock_bar1d", false, &itf_cn_stock_bar1d::prealloc,
+     &itf_cn_stock_bar1d::parse, nullptr, &itf_cn_stock_bar1d::post_ffill},
+    {"cn_stock_shares", false, &itf_cn_stock_shares::prealloc,
+     &itf_cn_stock_shares::parse, nullptr, &itf_cn_stock_shares::post_ffill},
+    {"cn_stock_limit_price", false, &itf_cn_stock_limit_price::prealloc,
+     &itf_cn_stock_limit_price::parse, nullptr,
+     &itf_cn_stock_limit_price::post_ffill},
+    {"cn_stock_status", false, &itf_cn_stock_status::prealloc,
+     &itf_cn_stock_status::parse, nullptr, nullptr},
+    {"cn_stock_margin_trading_detail", false,
+     &itf_cn_stock_margin_trading_detail::prealloc,
+     &itf_cn_stock_margin_trading_detail::parse, nullptr,
+     &itf_cn_stock_margin_trading_detail::post_ffill},
+
+    // ---- 事件 itf (新基建; per-A mutex) ----
+    {"cn_stock_industry_component", true,
+     &itf_cn_stock_industry_component::prealloc,
+     &itf_cn_stock_industry_component::parse,
+     &itf_cn_stock_industry_component::post_sort, nullptr},
+    {"cn_stock_industry_change", true, &itf_cn_stock_industry_change::prealloc,
+     &itf_cn_stock_industry_change::parse,
+     &itf_cn_stock_industry_change::post_sort, nullptr},
+    {"cn_stock_dividend", true, &itf_cn_stock_dividend::prealloc,
+     &itf_cn_stock_dividend::parse, &itf_cn_stock_dividend::post_sort, nullptr},
+
+    // ---- 事件 itf (Tushare 保留) ----
+    {"forecast", true, &itf_forecast::prealloc, &itf_forecast::parse,
+     &itf_forecast::post_sort, nullptr},
+
+    // ---- 事件 itf (财务 Tushare 占位; 数据未落地, parse 不会触发) ----
+    {"report", true, &itf_report::prealloc, &itf_report::parse,
+     &itf_report::post_sort, nullptr},
+    {"income", true, &itf_income::prealloc, &itf_income::parse,
+     &itf_income::post_sort, nullptr},
+    {"cashflow", true, &itf_cashflow::prealloc, &itf_cashflow::parse,
+     &itf_cashflow::post_sort, nullptr},
+    {"fina_indicator", true, &itf_fina_indicator::prealloc,
+     &itf_fina_indicator::parse, &itf_fina_indicator::post_sort, nullptr},
 };
 
 const int ITFS_COUNT = static_cast<int>(sizeof(ITFS) / sizeof(ITFS[0]));

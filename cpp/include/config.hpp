@@ -10,8 +10,8 @@ namespace config {
 // ============================================================================
 // A. 数据源凭据 (与官方 CLI / 控制台 token 同源)
 //   BigQuant DAI 凭据 (~/.bigquant/config.json::auth):
-//     AK: Access Key, 12 字符, 明文回传 (X-BigQuant-Access-Key)
-//     SK: Secret Key, 64 字符, 仅本地 HMAC + Flight Basic Token, 永不回传
+//     AK: Access Key, 12 字符, Flight Basic Token 用户名
+//     SK: Secret Key, 64 字符, Flight Basic Token 密码, 永不回传
 //   Tushare pro token (官网 → 个人主页 → 接口 token); *_vip 接口需 5000+ 积分
 //   想隔离不进 git: 整段挪去 cpp/include/secrets.hpp (.gitignore), 本文件改 include
 // ============================================================================
@@ -21,18 +21,11 @@ inline constexpr const char *TUSHARE_TOKEN = "439b79afc0af96f0abb32a3be27df99b9e
 
 // ============================================================================
 // B. 数据源端点 (网关 host / port / 超时 / 重试)
-//   BigQuant 控制面: HTTPS  443       — HMAC-SHA256 签名, whoami / get_datasource_schema
 //   BigQuant 数据面: Flight 17010     — 明文 gRPC + Arrow IPC RecordBatch, 零拷贝
 //   Tushare:         HTTP   80        — 明文 JSON POST, 三张事件表
 // 超时 = 单次连接+读写整体时长 (boost::system_error 触发 → retry 上层兜底)
 // 重试 = RETRY_MAX 次额外重试 (实际尝试 = RETRY_MAX + 1); RETRY_INTERVAL 为线性间隔
 // ============================================================================
-inline constexpr const char *BIGQUANT_HTTPS_HOST = "bigquant.com";
-inline constexpr const char *BIGQUANT_HTTPS_PORT = "443";
-inline constexpr int BIGQUANT_HTTPS_TIMEOUT_SECONDS = 30;
-inline constexpr int BIGQUANT_HTTPS_RETRY_MAX = 4; // 共 5 次尝试
-inline constexpr int BIGQUANT_HTTPS_RETRY_INTERVAL_SECONDS = 5;
-
 inline constexpr const char *BIGQUANT_FLIGHT_URI = "grpc+tcp://bigquant.com:17010";
 inline constexpr int BIGQUANT_FLIGHT_GRPC_MAX_METADATA_SIZE = 16 * 1024 * 1024; // 16 MiB; SDK 默认 8KB 会被 JWT 撑爆
 
@@ -48,14 +41,16 @@ inline constexpr int TUSHARE_HTTP_RETRY_INTERVAL_SECONDS = 30;
 //   PIPELINE_LOOKBACK_DAYS           最近 N 日历日强制重拉 (PK upsert 幂等); ≥5 交易日兜底
 //   PIPELINE_DEDUP_WINDOW_SECONDS    单 itf 去重窗口: 上次成功距今 < 该值则跳过整段
 //                                    (时间戳落 data/_meta/<name>.lastupdate)
-// 单段切分语义 (bigquant Day + 所有 tushare 共用 misc::plan_fetch_segments):
-//   range-capable (bigquant Day / tushare MonthStrategy):
+// 单段切分语义 (调度入口见 misc/schedule.hpp):
+//   plan_day_segments + can_range=true (bigquant Day / tushare range-capable):
 //       missing 按自然月聚合, 月内 (clamp 到 outer) 全缺失 → 整月段; 否则 → 每个缺失日单段.
 //       lookback 强拉最近 N 个日历日, 通常落在当前月, 形成 N 个单日段, 避免为补 7 天拉一整月.
-//   per-day-only (tushare PerDayStrategy):
-//       scheduler 强制 [d, d] 单日段, strategy 按 day_params 数量倍增 task.
-//   bigquant DAI MonthFirst (industry_component): scan_missing_months → 整月段 (独立路径).
-//   bigquant Static: 全量整刷, 不走调度.
+//   plan_day_segments + can_range=false (tushare per-day API: day_params 非空):
+//       每个缺失日 [d, d] 单日段, strategy 按 day_params 数量倍增 task.
+//   plan_month_segments (bigquant MonthFirst, industry_component):
+//       该月任一 day file 存在则跳过; 否则一段 [m_first, m_last] (clamp 到 outer).
+//   bigquant Static: DAI 一次响应直写 _meta, 不走调度.
+//   bigquant emit_meta (axis 源): 走 plan_day_segments 正常 day file, 末尾聚合 _meta.
 // ============================================================================
 inline constexpr const char *PIPELINE_START_DATE = "20150101";
 inline constexpr int PIPELINE_LOOKBACK_DAYS = 7;
@@ -81,32 +76,37 @@ inline constexpr int PIPELINE_DEDUP_WINDOW_SECONDS = 60 * 60;
 inline constexpr bool BIGQUANT_IMPORT = false;
 inline constexpr const char *BIGQUANT_DATABASE = "import/parquet";
 
-// BigQuant DAI 拉取的最早允许 visible_date (dashed, "YYYY-MM-DD"; prepare_query 处校验).
+// BigQuant DAI 拉取的最早允许 visible_date (dashed, "YYYY-MM-DD"; bigquant::fetch 处校验).
 //   API 额度有限按日刷新, 此日期之前的历史数据必须走 BIGQUANT_IMPORT 压缩 archive 通道,
-//   不再消耗在线调用配额. 任何 start < 本阈值的 DAI 查询在 prepare_query 直接 assert fail.
+//   不再消耗在线调用配额. 任何 start < 本阈值的 DAI 查询在 fetch 直接 assert fail.
 inline constexpr const char *BIGQUANT_API_MIN_DATE = "2026-01-01";
 
 // ============================================================================
 // D. Pool (basic + universe)
-//   pool_b (TS, asset 静态过滤):
-//     exchange    ∈ POOL_EXCHANGE_WHITELIST    匹配 _meta/stock_basic_info.json::exchange
-//                                              候选: SSE / SZSE / BSE
-//     market      ∈ POOL_MARKET_WHITELIST      匹配 _meta/stock_basic_info.json::market 中文枚举
-//                                              候选: 主板 / 创业板 / 科创板 / CDR / ...
-//     industry_l1 ∈ POOL_INDUSTRY_L1_WHITELIST 匹配 itf:industry_component 申万 SW2021 一级行业中文名
-//                                              (全量 31 个 L1, 此处保留 28 — 排除 环保/交通运输/房地产)
-//     POOL_INCLUDE_MARGIN                      是否在池子里包括两融标的 (per-D per-A 动态)
+//   pool_b (TS, asset 静态 ∩ industry_l1 时变):
+//     exchange     ∈ POOL_EXCHANGE_WHITELIST     匹配 _meta/cn_stock_basic_info.json::exchange
+//                                                 (中文全称: "上海证券交易所" / "深圳证券交易所" /
+//                                                  "北京证券交易所"; 与 BigQuant 字段值一致)
+//     list_sector  ∈ POOL_LIST_SECTOR_WHITELIST  匹配 cn_stock_basic_info.list_sector (int8)
+//                                                 编码: 1=主板 / 2=创业板 / 3=科创板 / 4=北交所
+//     industry_l1  ∈ POOL_INDUSTRY_L1_WHITELIST  匹配 itf:cn_stock_industry_component 申万 SW2021
+//                                                 一级行业中文名 (全量 31 个; 此处保留 28, 排除
+//                                                 环保/交通运输/房地产). feature.cpp 启动期一次性
+//                                                 转 ID mask, 运行期 inline 查 (industry_l1 ID 0
+//                                                 = 未知, 永远不命中).
+//     POOL_INCLUDE_MARGIN                         是否包含两融标的 (per-D per-A 动态)
 //   pool (CS): pool_b ∧ rank(mcap_raw asc) ≤ POOL_UNIVERSE_SIZE  (per D, 截面 top-N)
-//   注: feature `mb` 仍单独硬编码 "主板", 因为 low_mc / revenue_st / dividend_st 依赖
-//       板块特定阈值与适用范围 (业务规则, 非策略可调过滤).
+//   注: low_mc / revenue_st / dividend_st 仍硬编码 list_sector==1 (主板) 判定阈值, 因为
+//       这些是业务规则 (板块特定阈值与适用范围), 非策略可调过滤.
 // ============================================================================
 inline constexpr std::array<std::string_view, 2> POOL_EXCHANGE_WHITELIST = {{
-    "SSE",
-    "SZSE",
+    "上海证券交易所",
+    "深圳证券交易所",
 }};
 
-inline constexpr std::array<std::string_view, 1> POOL_MARKET_WHITELIST = {{
-    "主板",
+// list_sector int8 编码: 1=主板, 2=创业板, 3=科创板, 4=北交所; 0=未知 (不应入).
+inline constexpr std::array<int8_t, 1> POOL_LIST_SECTOR_WHITELIST = {{
+    1, // 主板
 }};
 
 inline constexpr std::array<std::string_view, 28> POOL_INDUSTRY_L1_WHITELIST = {{

@@ -46,4 +46,23 @@ void atomic_write(const fs::path &path, const char *data, std::size_t len) {
   fs::rename(tmp, path);
 }
 
+std::string serialize_json(yyjson_mut_doc *doc) {
+  assert(doc);
+  size_t len = 0;
+  char *json = yyjson_mut_write(doc, YYJSON_WRITE_PRETTY_TWO_SPACES, &len);
+  assert(json);
+  std::string s(json, len);
+  std::free(json);
+  return s;
+}
+
+void atomic_write_json(const fs::path &path, yyjson_mut_doc *doc) {
+  assert(doc);
+  size_t len = 0;
+  char *json = yyjson_mut_write(doc, YYJSON_WRITE_PRETTY_TWO_SPACES, &len);
+  assert(json);
+  atomic_write(path, json, len);
+  std::free(json);
+}
+
 } // namespace misc

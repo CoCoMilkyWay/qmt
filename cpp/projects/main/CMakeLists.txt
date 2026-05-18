@@ -100,25 +100,10 @@ include_directories(../../include)
 include_directories(SYSTEM ${ARROW_INCLUDE})
 
 # ============================================================================
-# Dependency Preflight — 提前检查系统依赖, 缺失时直接给出 install 指令
-# ============================================================================
-find_path(_OPENSSL_SSL_H openssl/ssl.h PATHS /usr/include /usr/local/include)
-find_library(_OPENSSL_SSL_LIB NAMES ssl)
-find_library(_OPENSSL_CRYPTO_LIB NAMES crypto)
-if(NOT _OPENSSL_SSL_H OR NOT _OPENSSL_SSL_LIB OR NOT _OPENSSL_CRYPTO_LIB)
-    message(FATAL_ERROR
-        "OpenSSL development files missing "
-        "(header=${_OPENSSL_SSL_H}, libssl=${_OPENSSL_SSL_LIB}, libcrypto=${_OPENSSL_CRYPTO_LIB}).\n"
-        "Install: sudo apt install libssl-dev")
-endif()
-
-find_package(OpenSSL REQUIRED)
-
-# ============================================================================
 # Source Files
 # ============================================================================
-# Phase 1: 数据接入子系统 + 落地 (misc + api/bigquant + api/tushare).
-# feature / backtest / analysis 待 Phase 2 迁移到 bigquant itf 后再启用.
+# Phase 1 (数据接入) + Phase 2 (feature build): 串到 main.cpp 的 bigquant::update →
+# tushare::update → feature::build. backtest / analysis 待后续启用.
 set(SOURCES
     ../../src/main.cpp
     ../../src/misc/date.cpp
@@ -126,8 +111,8 @@ set(SOURCES
     ../../src/misc/store.cpp
     ../../src/misc/journal.cpp
     ../../src/misc/schedule.cpp
-    ../../src/api/bigquant/signer.cpp
-    ../../src/api/bigquant/https.cpp
+    ../../src/misc/logging.cpp
+    ../../src/misc/npy.cpp
     ../../src/api/bigquant/dai.cpp
     ../../src/api/bigquant/spec.cpp
     ../../src/api/bigquant/parse.cpp
@@ -138,19 +123,18 @@ set(SOURCES
     ../../src/api/tushare/spec.cpp
     ../../src/api/tushare/store.cpp
     ../../src/api/tushare/pipeline.cpp
+    ../../src/feature/axis.cpp
+    ../../src/feature/industry.cpp
+    ../../src/feature/feature.cpp
+    ../../src/feature/tensor.cpp
+    ../../src/feature/pit.cpp
+    ../../src/feature/load.cpp
+    ../../src/feature/ts.cpp
+    ../../src/feature/cs.cpp
+    ../../src/feature/build.cpp
+    ../../src/feature/describe.cpp
     ../../include/package/yyjson/yyjson.c
-    # --- feature / backtest / analysis 待 Phase 2 启用 ---
-    # ../../src/misc/logging.cpp
-    # ../../src/misc/npy.cpp
-    # ../../src/feature/axis.cpp
-    # ../../src/feature/feature.cpp
-    # ../../src/feature/tensor.cpp
-    # ../../src/feature/pit.cpp
-    # ../../src/feature/load.cpp
-    # ../../src/feature/ts.cpp
-    # ../../src/feature/cs.cpp
-    # ../../src/feature/build.cpp
-    # ../../src/feature/describe.cpp
+    # --- backtest / analysis 待后续启用 ---
     # ../../src/backtest/backtest.cpp
     # ../../src/analysis/analysis.cpp
 )
@@ -163,8 +147,14 @@ set(HEADERS
     ../../include/misc/store.hpp
     ../../include/misc/journal.hpp
     ../../include/misc/schedule.hpp
-    ../../include/api/bigquant/signer.hpp
-    ../../include/api/bigquant/https.hpp
+    ../../include/misc/timer.hpp
+    ../../include/misc/print.hpp
+    ../../include/misc/progress_single.hpp
+    ../../include/misc/progress_parallel.hpp
+    ../../include/misc/affinity.hpp
+    ../../include/misc/logging.hpp
+    ../../include/misc/profiler.hpp
+    ../../include/misc/npy.hpp
     ../../include/api/bigquant/dai.hpp
     ../../include/api/bigquant/spec.hpp
     ../../include/api/bigquant/parse.hpp
@@ -175,37 +165,28 @@ set(HEADERS
     ../../include/api/tushare/spec.hpp
     ../../include/api/tushare/store.hpp
     ../../include/api/tushare/pipeline.hpp
-    # --- feature / backtest / analysis 待 Phase 2 启用 ---
-    # ../../include/misc/timer.hpp
-    # ../../include/misc/print.hpp
-    # ../../include/misc/progress_single.hpp
-    # ../../include/misc/progress_parallel.hpp
-    # ../../include/misc/affinity.hpp
-    # ../../include/misc/logging.hpp
-    # ../../include/misc/profiler.hpp
-    # ../../include/misc/npy.hpp
-    # ../../include/feature/axis.hpp
-    # ../../include/feature/feature.hpp
-    # ../../include/feature/tensor.hpp
-    # ../../include/feature/pit.hpp
-    # ../../include/feature/load.hpp
-    # ../../include/feature/ts.hpp
-    # ../../include/feature/cs.hpp
-    # ../../include/feature/build.hpp
-    # ../../include/feature/describe.hpp
+    ../../include/feature/axis.hpp
+    ../../include/feature/industry.hpp
+    ../../include/feature/feature.hpp
+    ../../include/feature/tensor.hpp
+    ../../include/feature/pit.hpp
+    ../../include/feature/load.hpp
+    ../../include/feature/ts.hpp
+    ../../include/feature/cs.hpp
+    ../../include/feature/build.hpp
+    ../../include/feature/describe.hpp
+    # --- backtest / analysis 待后续启用 ---
     # ../../include/backtest/backtest.hpp
     # ../../include/analysis/analysis.hpp
 )
 
 add_executable(app_main ${SOURCES} ${HEADERS})
 
-# vendored Arrow C++ Flight + Parquet + 系统 OpenSSL (HTTPS 控制面必需) + pthread
+# vendored Arrow C++ Flight + Parquet + pthread (Flight 走明文 gRPC, 无 TLS 依赖)
 target_link_libraries(app_main PRIVATE
     ${ARROW_LIB}/libarrow_flight.so
     ${ARROW_LIB}/libparquet.so
     ${ARROW_LIB}/libarrow.so
-    OpenSSL::SSL
-    OpenSSL::Crypto
     pthread
     dl
 )

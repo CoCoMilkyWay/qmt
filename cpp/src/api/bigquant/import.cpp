@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <cassert>
 #include <cctype>
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -51,17 +50,12 @@ std::shared_ptr<arrow::Table> read_parquet_table(const fs::path &path) {
 }
 
 // ----------------------------------------------------------------------------
-// (table_subset_to_json + yyjson_mut_write) → MonthTxn.day_files 一行
+// (table_subset_to_json + serialize) → MonthTxn.day_files 一行
 // ----------------------------------------------------------------------------
 std::string render_day_json(const std::shared_ptr<arrow::Table> &t,
                             const std::vector<int64_t> &row_idxs) {
   yyjson_mut_doc *doc = table_subset_to_json(t, row_idxs);
-  size_t out_len = 0;
-  char *json_str =
-      yyjson_mut_write(doc, YYJSON_WRITE_PRETTY_TWO_SPACES, &out_len);
-  assert(json_str);
-  std::string s(json_str, out_len);
-  std::free(json_str);
+  std::string s = misc::serialize_json(doc);
   yyjson_mut_doc_free(doc);
   return s;
 }
@@ -142,7 +136,9 @@ void import_parquet(std::string_view database_root,
               << " ==" << std::endl;
     for (const auto &spec : specs) {
       if (spec.kind == FetchKind::Static)
-        continue; // 静态表只走 DAI
+        continue; // 静态表只走 DAI (无 date 维度, 不切月)
+      // emit_meta 表 (trading_days/holidays) 跟普通 Partition+Day 一样切月, 下轮
+      // bigquant::update 末尾自动从 day file 聚合 _meta, 无需 import 端特判.
 
       fs::path pq = parquet_path_of(root, yyyymm, spec.name);
       if (!fs::exists(pq))

@@ -4,50 +4,31 @@
 #include "api/bigquant/spec.hpp"
 #include "api/bigquant/store.hpp"
 #include "config.hpp"
-#include "misc/date.hpp"
 #include "misc/schedule.hpp"
 #include "misc/store.hpp"
 
 #include <arrow/table.h>
 
-#include <cassert>
+#include <cstdint>
+#include <filesystem>
 #include <iostream>
-#include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 namespace bigquant {
 
 namespace {
 
-// "YYYYMMDD" -> "YYYY-MM-DD" (DAI 接受格式)
-std::string to_dashed(std::string_view yyyymmdd) {
-  assert(yyyymmdd.size() == 8);
-  std::string out;
-  out.reserve(10);
-  out.append(yyyymmdd.data(), 4);
-  out.push_back('-');
-  out.append(yyyymmdd.data() + 4, 2);
-  out.push_back('-');
-  out.append(yyyymmdd.data() + 6, 2);
-  return out;
-}
-
-// 分发 fetch 一段并落地
-void fetch_and_write_segment(DaiClient &client, const TableSpec &spec,
-                             const std::string &seg_start,
-                             const std::string &seg_end) {
-  std::string ds = to_dashed(seg_start);
-  std::string de = to_dashed(seg_end);
+// 单段 fetch + 落盘 (Day / MonthFirst 共用): 行式 day file + _empty 维护.
+void fetch_and_write(DaiClient &client, const TableSpec &spec,
+                     std::string_view seg_start, std::string_view seg_end) {
   std::cout << "  " << seg_start;
   if (seg_end != seg_start)
     std::cout << "~" << seg_end;
   std::cout << " ... " << std::flush;
-
-  auto t = fetch(client, spec, ds, de);
+  auto t = fetch(client, spec, seg_start, seg_end);
   int64_t n = t ? t->num_rows() : 0;
-  store::write_table_by_visible_date(t, spec, seg_start, seg_end);
+  store::write_by_visible_date(t, spec, seg_start, seg_end);
   std::cout << n << " rows" << std::endl;
 }
 
@@ -63,46 +44,54 @@ void update(std::string_view start, std::string_view end,
             << std::endl;
 
   for (const auto &spec : specs) {
-    if (misc::store::should_skip_api(spec.name,
-                                     ::config::PIPELINE_DEDUP_WINDOW_SECONDS)) {
-      std::cout << "\n[" << spec.name << "] skip (recently updated)"
-                << std::endl;
+    // Static 单文件输出: lastupdate + 实际 _meta 文件双保险, 任一丢失即重抓.
+    //   防止 lastupdate mark 完但 _meta 文件丢失 (磁盘/中断/外部 rm) 后永久跳过.
+    //   emit_meta 表的 _meta 是末尾从 day file 聚合的产物, 不需要 verify 兜底
+    //   (丢了下轮 update 自动重建).
+    std::filesystem::path verify =
+        (spec.kind == FetchKind::Static)
+            ? misc::store::meta_data_path(spec.name)
+            : std::filesystem::path{};
+    if (misc::store::should_skip_api(
+            spec.name, ::config::PIPELINE_DEDUP_WINDOW_SECONDS, verify)) {
+      std::cout << "\n[" << spec.name << "] skip (recently updated)";
+      // emit_meta 即使 dedup 跳过 API, 也无脑重建 _meta (day file 是真实源, 廉价).
+      if (spec.emit_meta) {
+        store::aggregate_meta(spec);
+        std::cout << " (meta rebuilt)";
+      }
+      std::cout << std::endl;
       continue;
     }
 
-    // ---- Static: 直接全量整刷到 _meta ----
+    // ---- Static: DAI 一次响应直写 _meta (无 date 维, 不走调度) ----
     if (spec.kind == FetchKind::Static) {
-      std::cout << "\n[" << spec.name << "] static refresh ..." << std::flush;
-      auto t = fetch(client, spec);
+      std::cout << "\n[" << spec.name << "] meta refresh ..." << std::flush;
+      auto t = fetch(client, spec, start, end); // Static 内部忽略 start/end
       int64_t n = t ? t->num_rows() : 0;
-      store::write_meta_table(t, spec);
+      store::write_meta(t, spec);
       std::cout << " " << n << " rows -> _meta" << std::endl;
       misc::store::mark_api_updated(spec.name);
       continue;
     }
 
-    // ---- Day 频率 (Partition + Day / Where + Day) ----
-    if (spec.freq == FetchFreq::Day) {
-      std::cout << "\n[" << spec.name << "] plan ..." << std::flush;
-      auto segments = misc::plan_fetch_segments(spec.name, start, end,
-                                                lookback_days, /*can_range=*/true);
-      std::cout << " " << segments.size() << " segment(s)" << std::endl;
-      for (auto &seg : segments) {
-        fetch_and_write_segment(client, spec, seg.start, seg.end);
-      }
-      misc::store::mark_api_updated(spec.name);
-      continue;
+    // ---- Day / MonthFirst: 走对仗的两个 planner, 同形 fetch_and_write 消费 ----
+    std::cout << "\n[" << spec.name << "] plan ..." << std::flush;
+    auto segments = (spec.freq == FetchFreq::Day)
+                        ? misc::plan_day_segments(spec.name, start, end,
+                                                  lookback_days,
+                                                  /*can_range=*/true)
+                        : misc::plan_month_segments(spec.name, start, end,
+                                                    lookback_days);
+    std::cout << " " << segments.size() << " segment(s)" << std::endl;
+    for (auto &seg : segments) {
+      fetch_and_write(client, spec, seg.start, seg.end);
     }
-
-    // ---- Partition + MonthFirst ----
-    assert(spec.freq == FetchFreq::MonthFirst);
-    assert(spec.kind == FetchKind::Partition);
-    std::cout << "\n[" << spec.name << "] scan months ..." << std::flush;
-    auto month_segs =
-        misc::store::scan_missing_months(spec.name, start, end, lookback_days);
-    std::cout << " " << month_segs.size() << " month(s) to fetch" << std::endl;
-    for (auto &seg : month_segs) {
-      fetch_and_write_segment(client, spec, seg.start, seg.end);
+    // emit_meta 表: 写完 day file 后无脑聚合 _meta (axis.cpp 的 D 轴/holidays 单文件来源).
+    if (spec.emit_meta) {
+      std::cout << "[" << spec.name << "] aggregate meta ..." << std::flush;
+      store::aggregate_meta(spec);
+      std::cout << " done" << std::endl;
     }
     misc::store::mark_api_updated(spec.name);
   }

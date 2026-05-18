@@ -32,22 +32,23 @@ struct Tensor;
 // ============================================================================
 enum class F : int {
   // ============================== TS ==============================
-  // raw 网格 — PitPool dense 直读 (per-A 动态, [元/股/%/ratio/bool])
-  close_raw = 0,
-  mcap_raw,
-  fmcap_raw,
-  share_raw,
-  pb_raw,
-  ps_raw,
-  dy_raw,
-  up_lim,
-  dn_lim,
-  susp,
-  is_margin,  // margin_secs (bool: 当日是否两融标的)
-  mr_bal_raw, // margin_detail.rzye (融资余额 [元])
-  ms_bal_raw, // margin_detail.rqye (融券余额 [元])
+  // raw 网格 — PitPool dense 直读 / 由 raw 直接相乘 (per-A 动态)
+  close_raw = 0, // bar1d.close (后复权 [元/股])
+  mcap_raw,      // close_raw × shares.total_shares  ([元])
+  fmcap_raw,     // close_raw × shares.total_float_shares  ([元])
+  share_raw,     // shares.total_shares  ([股])
+  pb_raw,        // (财务: 暂保留 NaN 输出, 待 BigQuant 财务表迁移后实现)
+  ps_raw,        // (财务: 暂保留 NaN)
+  dy_raw,        // (财务: 暂保留 NaN)
+  up_lim,        // limit_price.upper_limit (主动 -1 对齐到 close_raw[D]=D-1 收盘的同源比较)
+  dn_lim,        // limit_price.lower_limit (同上)
+  susp,          // status.suspended ([bool])
+  is_margin,     // margin_detail (D,A) 存在性 ([bool])
+  mr_bal_raw,    // margin_detail.financing_balance ([元])
+  ms_bal_raw,    // margin_detail.securities_lending_balance ([元])
+  industry_l1,   // sw2021 一级行业 ID 0..31 (industry_component 月初 + industry_change 月内回放)
 
-  // raw 自算 — ttm4_ytd 拼接 (依赖 mcap_raw 已就绪)
+  // raw 自算 — ttm4_ytd 拼接 (财务 itf 暂未落地数据 → events 空 → 全 NaN)
   rev_raw,
   ni_raw,
   pe_raw,
@@ -74,7 +75,7 @@ enum class F : int {
   trading_st,
   new_list,
 
-  // pool (TS) — asset 静态白名单 ∩ ¬susp ∩ (可选 is_margin)
+  // pool (TS) — asset 静态白名单 ∩ industry_l1 白名单 ∩ ¬susp ∩ ¬退市 ∩ (可选 ¬is_margin)
   pool_b,
 
   // ============================== CS ==============================

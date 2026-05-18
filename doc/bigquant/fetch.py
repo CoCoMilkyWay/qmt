@@ -27,6 +27,9 @@ visible_date 主键的判定:
 依赖 BigQuant AI Studio 运行时的 `dai` 模块 (与 bigtrader 同环境).
 """
 
+# rsync -ah --info=progress2 real_parquet.zip root@x.x.x.x:/root/data
+# rsync -ah --info=progress2 root@1x.x.x.x:/root/data/real_parquet.zip ./
+
 import calendar
 import json
 import os
@@ -71,45 +74,45 @@ PARQUET_COMPRESSION_LEVEL = 22  # zstd 最高级
 Table = namedtuple("Table", "name visible_date strategy freq", defaults=("day",))
 
 TABLES = [
-    # ---- 静态快照 (优先下载, 无时间维度) ----
-    Table("cn_stock_basic_info", None, "static"),
-    # ---- 通用数据 (date = 当日) ----
-    Table("trading_days", "date", "partition"),
-    Table("holidays", "date", "partition"),
-    Table("cn_stock_instruments", "date", "partition"),
-    Table("cn_index_instruments", "date", "partition"),
-    Table("cn_fund_instruments", "date", "partition"),
-    Table("cn_future_instruments", "date", "partition"),
-    Table("cn_cbond_instruments", "date", "partition"),
-    # ---- 行业 ----
-    # industry_component: 月初快照 (低频), 月内变动靠 industry_change 增量 cover
-    Table("cn_stock_industry_component", "date", "partition", "month_first"),
-    Table("cn_stock_industry_change", "date", "partition"),
-    Table("cn_stock_industry_bar1d", "date", "partition"),
-    Table("cn_stock_industry_valuation", "date", "partition"),
-    # ---- 股票日度状态/行情 ----
-    Table("cn_stock_shares", "date", "partition"),
-    Table("cn_stock_status", "date", "partition"),
-    Table("cn_stock_suspend", "date", "partition"),
-    Table("cn_stock_bar1d", "date", "partition"),
-    Table("cn_stock_limit_price", "date", "partition"),
-    Table("cn_stock_margin_trading_detail", "date", "partition"),
-    Table("cn_stock_margin_trading_market", "date", "partition"),
-    Table("cn_stock_dragon_list", "date", "partition"),
-    # ---- 事件型 (visible_date = publish_date / start_date) ----
-    Table("cn_stock_capital", "publish_date", "where"),
-    Table("cn_stock_dividend", "publish_date", "where"),
-    Table("cn_stock_allotment", "publish_date", "where"),
-    Table("cn_stock_shareholder", "publish_date", "where"),
-    Table("cn_stock_name_change", "end_date", "where"),
-    # ---- 财务 PIT (date = 首次公告可见日) ----
-    Table("cn_stock_financial_income_general_pit", "date", "partition"),
-    Table("cn_stock_financial_cashflow_general_pit", "date", "partition"),
-    Table("cn_stock_financial_balance_general_pit", "date", "partition"),
-    Table("cn_stock_financial_ttm_shift", "date", "partition"),
-    Table("cn_stock_financial_notes_shift", "date", "partition"),
-    # ---- 因子 (date = 当日) ----
-    Table("cn_stock_valuation", "date", "partition"),
+    # # ---- 静态快照 (优先下载, 无时间维度) ----
+    # Table("cn_stock_basic_info", None, "static"),
+    # # ---- 通用数据 (date = 当日) ----
+    # Table("trading_days", "date", "partition"),
+    # Table("holidays", "date", "partition"),
+    # Table("cn_stock_instruments", "date", "partition"),
+    # Table("cn_index_instruments", "date", "partition"),
+    # Table("cn_fund_instruments", "date", "partition"),
+    # Table("cn_future_instruments", "date", "partition"),
+    # Table("cn_cbond_instruments", "date", "partition"),
+    # # ---- 行业 ----
+    # # industry_component: 月初快照 (低频), 月内变动靠 industry_change 增量 cover
+    # Table("cn_stock_industry_component", "date", "partition", "month_first"),
+    # Table("cn_stock_industry_change", "date", "partition"),
+    Table("cn_stock_industry_real_bar1d", "date", "partition"),
+    # Table("cn_stock_industry_valuation", "date", "partition"),
+    # # ---- 股票日度状态/行情 ----
+    # Table("cn_stock_shares", "date", "partition"),
+    # Table("cn_stock_status", "date", "partition"),
+    # Table("cn_stock_suspend", "date", "partition"),
+    Table("cn_stock_real_bar1d", "date", "partition"),
+    # Table("cn_stock_limit_price", "date", "partition"),
+    # Table("cn_stock_margin_trading_detail", "date", "partition"),
+    # Table("cn_stock_margin_trading_market", "date", "partition"),
+    # Table("cn_stock_dragon_list", "date", "partition"),
+    # # ---- 事件型 (visible_date = publish_date / start_date) ----
+    # Table("cn_stock_capital", "publish_date", "where"),
+    # Table("cn_stock_dividend", "publish_date", "where"),
+    # Table("cn_stock_allotment", "publish_date", "where"),
+    # Table("cn_stock_shareholder", "publish_date", "where"),
+    # Table("cn_stock_name_change", "end_date", "where"),
+    # # ---- 财务 PIT (date = 首次公告可见日) ----
+    # Table("cn_stock_financial_income_general_pit", "date", "partition"),
+    # Table("cn_stock_financial_cashflow_general_pit", "date", "partition"),
+    # Table("cn_stock_financial_balance_general_pit", "date", "partition"),
+    # Table("cn_stock_financial_ttm_shift", "date", "partition"),
+    # Table("cn_stock_financial_notes_shift", "date", "partition"),
+    # # ---- 因子 (date = 当日) ----
+    # Table("cn_stock_valuation", "date", "partition"),
 ]
 
 
