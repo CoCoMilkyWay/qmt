@@ -162,4 +162,14 @@ inline int month_of(const std::string_view yyyymmdd) {
   return (yyyymmdd[4] - '0') * 10 + (yyyymmdd[5] - '0');
 }
 
+// int32 YYYYMMDD 形式 (PitPool event 内部存储).
+//   0 / 负数视为缺失, 返回 0.
+inline int year_of(std::int32_t yyyymmdd) {
+  return yyyymmdd > 0 ? yyyymmdd / 10000 : 0;
+}
+
+inline int month_of(std::int32_t yyyymmdd) {
+  return yyyymmdd > 0 ? (yyyymmdd / 100) % 100 : 0;
+}
+
 } // namespace feature

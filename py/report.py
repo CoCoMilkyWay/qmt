@@ -13,7 +13,7 @@
 
 数据全部来自:
     output/meta.json
-    output/backtest/*.npy + labels.json   (后者: PIT 名, namechange 切段)
+    output/backtest/*.npy + labels.json   (后者: 当日历史简称)
     output/analysis/*.npy
 """
 from __future__ import annotations
@@ -672,7 +672,7 @@ def fig_tag2(bt, an, meta, codes) -> list[tuple[str, go.Figure]]:
         return fig
 
     # view 1: 收益曲线 (3) + 日仓位曲线 (1), shared x.
-    #   - 收益曲线 hover: 当日持仓 (PIT 名 / code / 权重, 权重降序)
+    #   - 收益曲线 hover: 当日持仓 (历史简称 / code / 权重, 权重降序)
     #   - 同日多笔买/卖 聚合为 1 个 marker (▲买 / ▼卖), hover 列明
     nav_s_norm = nav_s / nav_s[0]
     nav_p_norm = nav_p / nav_p[0]
@@ -792,7 +792,7 @@ def fig_tag2(bt, an, meta, codes) -> list[tuple[str, go.Figure]]:
 # ============================================================================
 
 def fig_tag3(bt, codes, dates_all) -> list[tuple[str, go.Figure]]:
-    # view 1: 每天持仓 — 最近优先, 段内权重降序 (cpp 已排好), PIT 名直读
+    # view 1: 每天持仓 — 最近优先, 段内权重降序 (cpp 已排好), 历史简称直读
     off = bt["holdings_offsets"]
     hcodes = bt["holdings_codes"]
     hweights = bt["holdings_weights"]
@@ -825,7 +825,7 @@ def fig_tag3(bt, codes, dates_all) -> list[tuple[str, go.Figure]]:
                                   cells=dict(values=[[]])))
     fig1.update_layout(height=_TAG3_H, margin=_MARGIN_TBL, autosize=True)
 
-    # view 2: 交易记录 (PIT 名取平仓当日, namechange 后名字会动态切换)
+    # view 2: 交易记录 (名称取平仓当日历史简称)
     if len(bt["trades_inst"]) > 0:
         order = np.argsort(-bt["trades_close_d"])
         rows = []

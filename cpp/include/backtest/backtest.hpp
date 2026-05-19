@@ -35,7 +35,7 @@ namespace backtest {
 //   - trades_close_px.npy    [n_trades] float32
 //   - labels.json            JSON {trades_open_names[],
 //                                   trades_close_names[],
-//                                   holdings_names[]}  // PIT 名 (namechange 切段)
+//                                   holdings_names[]}  // 当日历史简称
 //
 // 同时返回 elapsed_seconds (写入 meta.json).
 double run(const feature::Axes &axes, const feature::StockMeta &meta,

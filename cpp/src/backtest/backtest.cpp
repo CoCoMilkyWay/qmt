@@ -4,6 +4,7 @@
 #include "feature/axis.hpp"
 #include "feature/feature.hpp"
 #include "feature/tensor.hpp"
+#include "misc/date.hpp"
 #include "misc/fs.hpp"
 #include "misc/npy.hpp"
 #include "misc/timer.hpp"
@@ -68,11 +69,127 @@ inline void wi(const fs::path &p, const std::vector<std::int32_t> &v) {
                      std::span<const std::size_t>(shape, 1));
 }
 
-// 标的名: 新架构已删 namechange 历史, meta.name[a] 是 stock_basic 当前简称.
-//   PIT 含义: 退化为 best-effort "当前名" (整个回测期间用同一个名). 实盘 trades 与
-//   historical holdings 的显示名因此跟不上 ST 翻转 / IPO 重命名 — 仅诊断/展示用,
-//   不影响策略本身的 PIT clean. 想恢复历史名需重新引入 namechange itf.
-inline std::string_view name_of(const feature::StockMeta &meta, int a) {
+inline std::string json_str(yyjson_val *obj, const char *key) {
+  yyjson_val *v = yyjson_obj_get(obj, key);
+  assert(v && yyjson_is_str(v));
+  return std::string(yyjson_get_str(v), yyjson_get_len(v));
+}
+
+struct NameInterval {
+  int lo;
+  int hi;
+  std::string name;
+};
+
+struct NameTimeline {
+  std::vector<std::vector<NameInterval>> by_a;
+};
+
+std::vector<fs::path> enumerate_name_change_files() {
+  std::vector<fs::path> files;
+  fs::path data_root = misc::git_root() / "data";
+  assert(fs::exists(data_root));
+
+  for (auto &y_ent : fs::directory_iterator(data_root)) {
+    if (!y_ent.is_directory()) continue;
+    std::string y = y_ent.path().filename().string();
+    if (y.size() != 4) continue;
+    for (auto &m_ent : fs::directory_iterator(y_ent.path())) {
+      if (!m_ent.is_directory()) continue;
+      std::string m = m_ent.path().filename().string();
+      if (m.size() != 2) continue;
+      for (auto &d_ent : fs::directory_iterator(m_ent.path())) {
+        if (!d_ent.is_directory()) continue;
+        fs::path p = d_ent.path() / "cn_stock_name_change.json";
+        if (fs::exists(p)) files.push_back(std::move(p));
+      }
+    }
+  }
+  std::sort(files.begin(), files.end());
+  return files;
+}
+
+void add_name_interval(const feature::Axes &axes, std::vector<NameInterval> &v,
+                       std::string_view start, std::string_view end,
+                       std::string name) {
+  assert(start.size() == 8 && end.size() == 8 && !name.empty());
+  int lo = find_d(axes, start, /*floor=*/false);
+  int hi = find_d(axes, end, /*floor=*/true);
+  if (lo < 0 || hi < lo) return;
+  v.push_back(NameInterval{lo, hi, std::move(name)});
+}
+
+NameTimeline load_name_timeline(const feature::Axes &axes) {
+  int n_a = axes.n_a();
+  NameTimeline tl;
+  tl.by_a.resize(static_cast<std::size_t>(n_a));
+  std::vector<std::string> last_end(static_cast<std::size_t>(n_a));
+
+  for (const fs::path &p : enumerate_name_change_files()) {
+    std::string buf = misc::read_file_all(p);
+    assert(!buf.empty());
+    yyjson_doc *doc = yyjson_read(buf.data(), buf.size(), 0);
+    assert(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    assert(yyjson_is_arr(root));
+
+    std::size_t i, n;
+    yyjson_val *item;
+    yyjson_arr_foreach(root, i, n, item) {
+      std::string ins = json_str(item, "instrument");
+      auto it = axes.code_idx.find(ins);
+      if (it == axes.code_idx.end()) continue;
+      int a = it->second;
+      std::string start = json_str(item, "start_date");
+      std::string end = json_str(item, "end_date");
+      std::string name = json_str(item, "name");
+      add_name_interval(axes, tl.by_a[static_cast<std::size_t>(a)], start, end,
+                        std::move(name));
+      std::string &mx = last_end[static_cast<std::size_t>(a)];
+      if (mx.empty() || end > mx) mx = std::move(end);
+    }
+    yyjson_doc_free(doc);
+  }
+
+  fs::path static_path =
+      misc::git_root() / "data" / "_meta" / "cn_stock_static_data.json";
+  assert(fs::exists(static_path));
+  std::string static_buf = misc::read_file_all(static_path);
+  assert(!static_buf.empty());
+  yyjson_doc *doc = yyjson_read(static_buf.data(), static_buf.size(), 0);
+  assert(doc);
+  yyjson_val *root = yyjson_doc_get_root(doc);
+  assert(yyjson_is_arr(root));
+
+  std::size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(root, i, n, item) {
+    std::string ins = json_str(item, "instrument");
+    auto it = axes.code_idx.find(ins);
+    if (it == axes.code_idx.end()) continue;
+    int a = it->second;
+    const std::string &mx = last_end[static_cast<std::size_t>(a)];
+    std::string start = mx.empty() ? axes.dates.front() : misc::add_days(mx, 1);
+    add_name_interval(axes, tl.by_a[static_cast<std::size_t>(a)], start,
+                      axes.dates.back(), json_str(item, "name"));
+  }
+  yyjson_doc_free(doc);
+
+  for (auto &v : tl.by_a) {
+    std::sort(v.begin(), v.end(), [](const NameInterval &x,
+                                     const NameInterval &y) {
+      return x.lo < y.lo;
+    });
+  }
+  return tl;
+}
+
+inline std::string_view name_of(const NameTimeline &tl,
+                                const feature::StockMeta &meta, int a, int d) {
+  const auto &v = tl.by_a[static_cast<std::size_t>(a)];
+  for (auto it = v.rbegin(); it != v.rend(); ++it) {
+    if (it->lo <= d && d <= it->hi) return it->name;
+  }
   return meta.name[static_cast<std::size_t>(a)];
 }
 
@@ -94,6 +211,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   int bt_d_hi = bt_d_hi_inc + 1; // half-open
   int n_d_bt = bt_d_hi - bt_d_lo;
   int n_a = axes.n_a();
+  NameTimeline name_timeline = load_name_timeline(axes);
 
   // ---- 状态 ----------------------------------------------------------------
   std::unordered_map<int, double> holdings; // a → shares (float 仓位, 不取整)
@@ -112,7 +230,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   std::vector<std::int32_t> hold_off(static_cast<std::size_t>(n_d_bt) + 1, 0);
   std::vector<std::int32_t> hold_codes;
   std::vector<float> hold_weights;
-  std::vector<std::string> hold_names; // 与 hold_codes 同序, PIT 名 (当日 namechange 切段)
+  std::vector<std::string> hold_names; // 与 hold_codes 同序, 按当日历史简称切段
   hold_codes.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BACKTEST_HOLD_N);
   hold_weights.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BACKTEST_HOLD_N);
   hold_names.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BACKTEST_HOLD_N);
@@ -126,7 +244,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
 
   std::vector<std::int32_t> tr_inst, tr_open_d, tr_close_d;
   std::vector<float> tr_open_px, tr_close_px;
-  std::vector<std::string> tr_open_names, tr_close_names; // PIT 名 (开/平仓当日)
+  std::vector<std::string> tr_open_names, tr_close_names; // 开/平仓当日历史简称
 
   // 关 trade 公用辅助 (强平 / 正常卖出 共用)
   auto close_trade = [&](int a, int d, const OpenRec &rec, float close_px) {
@@ -135,8 +253,8 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     tr_close_d.push_back(static_cast<std::int32_t>(d));
     tr_open_px.push_back(rec.open_px);
     tr_close_px.push_back(close_px);
-    tr_open_names.emplace_back(name_of(meta, a));
-    tr_close_names.emplace_back(name_of(meta, a));
+    tr_open_names.emplace_back(name_of(name_timeline, meta, a, rec.open_d));
+    tr_close_names.emplace_back(name_of(name_timeline, meta, a, d));
   };
 
   // pool benchmark NAV
@@ -434,7 +552,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     for (auto &kv : sorted_hold) {
       hold_codes.push_back(static_cast<std::int32_t>(kv.first));
       hold_weights.push_back(static_cast<float>(kv.second));
-      hold_names.emplace_back(name_of(meta, kv.first));
+      hold_names.emplace_back(name_of(name_timeline, meta, kv.first, d));
     }
     hold_off[i + 1] = static_cast<std::int32_t>(hold_codes.size());
   }

@@ -2,120 +2,99 @@
 
 #include "feature/axis.hpp"
 #include "feature/industry.hpp"
+#include "misc/affinity.hpp"
+#include "misc/date.hpp"
 #include "misc/fs.hpp"
 
+#include "package/yyjson/yyjson.h"
+
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <limits>
 #include <mutex>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <vector>
 
 // ============================================================================
-// pit.cpp 是「itf api 单点」: 每个 itf 一组 (prealloc + aggregate + replay +
-//   post_sort + post_ffill) 集中定义 ⇒ 末尾 ITFS[] 表挂载. load.cpp 仅迭代该表,
-//   不出现具体 itf 名.
-//   增减 itf:  1) pit.hpp 加 typed Grid/Ev struct 与 PitPool 字段
-//             2) pit.cpp 加一个 namespace itf_<name> 块
-//                  (prealloc / aggregate / replay [/ post_sort / post_ffill])
+// pit.cpp — itf api 单点. 每个 itf 一组 (build + cache_layout [+ post_ffill])
+//   集中定义, 末尾 ITFS[] 表挂载. load.cpp 仅迭代该表, 不出现具体 itf 名.
+//   增减 itf: 1) pit.hpp 在 PitPool 加字段 (PoolArr<T> / EventStore<Ev>)
+//             2) pit.cpp 加一个 namespace itf_<name> (build / cache_layout)
 //             3) ITFS[] 末尾追加一行
 //
-// 流水: dayfile JSON → aggregate(arr, day, raw_rows) → replay(raw_rows, axes, pool).
-//   aggregate 不依赖 Axes/PitPool, 只做 "JSON → raw rows" 字段提取 + schema-level
-//     过滤 (e.g. shift==0); 产物可缓存 (load.cpp 二进制 aggregate cache).
-//   replay 把 raw rows 落进 PitPool, 一次性消化 cutoff 到 row D 索引.
-//
-// 通用脚手架 (匿名 namespace):
-//   aggregate_rows(arr, day, code_field, out, extract) — JSON arr 行级遍历;
-//   replay_grid (rows, axes, cutoff, write)            — 网格 (a, row D) 写;
-//   replay_event(rows, axes, cutoff, mu, emit)         — 事件 per-A emplace.
+// 流水 (build, miss 路径一次): dayfile JSON → 并行解析 → 直接写入 pool 字段
+//   (网格走 (a, row) cell, 事件走 per-a chain emplace + sort + finalize).
+//   不经任何中间 row 表示 (旧 AggregateRow / replay 两段已删除). 写完即"row D
+//   已 cutoff 的合法数据", 下游 feature 直读 pool[base + d].
 //
 // 【raw cutoff 单点真理】每个 itf namespace 内 constexpr CUTOFF = 0 / -1:
 //   row D 的合法数据 = visible_date <= D + CUTOFF 的最新值
-//   ⇒ replay 时把 v_idx (= floor_date(visible_date)) 调整为 row = v_idx - CUTOFF:
-//     CUTOFF= 0: T 当日记录可见 — 适用 (a) 真盘前入库 (margin_trading_detail);
-//                                  (b) hybrid 伪装 (status 盘后入库但当日已生效),
-//                                      最后一天由 apply_meta_overlays 填充.
-//     CUTOFF=-1: 承认滞后 — 适用绝大多数盘后入库 itf (normal 模式).
-//   全局规则: 项目按业务可推出性选 hybrid; 其他全 normal -1, 详见 README §cutoff.
-//   网格 itf 写 pool[a*n_d + row]; 事件 itf ev.v = row.
-//   pool 即「row D 已 cutoff 的合法数据」, 下游 feature 直读 pool[base + d],
-//   不再关心 cutoff. 业务需要原始 visible 日期 (dividend 判 ann_y) 时,
-//   axes.dates[ev.v - 1] 还原 floor_date(visible_date) (仅 CUTOFF=-1 适用).
-//
-// 数据源 (lookup 字段差异):
-//   BigQuant 表统一用 "instrument";  Tushare 表 (forecast/...) 用 "ts_code".
+//   ⇒ replay 时 row = v_idx - CUTOFF (v_idx = floor_date(visible_date)):
+//     CUTOFF= 0: 当日记录可见 — (a) 真盘前入库 (margin_trading_detail);
+//                                (b) hybrid 伪装 (status, 末日 overlay).
+//     CUTOFF=-1: 承认滞后 — 绝大多数盘后入库 itf (normal).
 // ============================================================================
 
 namespace feature {
 
 namespace {
 
+constexpr float NaNF = std::numeric_limits<float>::quiet_NaN();
+constexpr float InfF = std::numeric_limits<float>::infinity();
+
 // ---- yyjson helpers ----
-// NaN = 数据缺失 (JSON 字段不存在或 null)
-// +inf = 数据不合理 (存在但值违反业务约束)
 inline float as_float_or_nan(yyjson_val *v) {
-  if (!v)
-    return std::nanf("");
-  if (yyjson_is_real(v))
-    return static_cast<float>(yyjson_get_real(v));
-  if (yyjson_is_int(v))
-    return static_cast<float>(yyjson_get_int(v));
-  return std::nanf("");
+  if (!v) return NaNF;
+  if (yyjson_is_real(v)) return static_cast<float>(yyjson_get_real(v));
+  if (yyjson_is_int(v)) return static_cast<float>(yyjson_get_int(v));
+  return NaNF;
 }
 
-// NaN (数据缺失: JSON null / 字段不存在) → NaN 透传, 留给 grid_ffill 用前值兜;
-// finite ∧ 满足约束 → 原值; finite ∧ 违反约束 (e.g. close ≤ 0) → +inf 保留"业务异常"标记.
-// 把 NaN 也无差别转 +inf 会绕过 ffill (ffill 不兜 +inf), 导致停牌日 close=+inf 残留
-// 全程污染下游 daily_return / mcap_raw / limit_up/dn 等.
+// NaN (数据缺失) 透传留给 ffill; finite 满足约束 → 原值; finite 违反约束 → +inf
+// 保"业务异常"标记 (ffill 不传播 +inf, 不污染下游).
 inline float positive_or_inf(float v) {
-  if (std::isnan(v))
-    return v;
-  return (std::isfinite(v) && v > 0.0f) ? v : std::numeric_limits<float>::infinity();
+  if (std::isnan(v)) return v;
+  return (std::isfinite(v) && v > 0.0f) ? v : InfF;
 }
-
 inline float non_negative_or_inf(float v) {
-  if (std::isnan(v))
-    return v;
-  return (std::isfinite(v) && v >= 0.0f) ? v : std::numeric_limits<float>::infinity();
-}
-
-inline std::string as_str(yyjson_val *v) {
-  if (!v || !yyjson_is_str(v))
-    return {};
-  const char *s = yyjson_get_str(v);
-  return s ? std::string(s) : std::string();
+  if (std::isnan(v)) return v;
+  return (std::isfinite(v) && v >= 0.0f) ? v : InfF;
 }
 
 inline const char *as_cstr_or_null(yyjson_val *v) {
-  if (!v || !yyjson_is_str(v))
-    return nullptr;
+  if (!v || !yyjson_is_str(v)) return nullptr;
   return yyjson_get_str(v);
 }
 
+inline std::string_view as_sv(yyjson_val *v) {
+  if (!v || !yyjson_is_str(v)) return {};
+  return std::string_view(yyjson_get_str(v), yyjson_get_len(v));
+}
+
 inline int as_int_or_default(yyjson_val *v, int def) {
-  if (!v)
-    return def;
-  if (yyjson_is_int(v))
-    return static_cast<int>(yyjson_get_int(v));
+  if (!v) return def;
+  if (yyjson_is_int(v)) return static_cast<int>(yyjson_get_int(v));
   return def;
+}
+
+inline std::int32_t as_yyyymmdd_int(yyjson_val *v) {
+  if (!v || !yyjson_is_str(v)) return 0;
+  return misc::to_yyyymmdd_int(
+      std::string_view(yyjson_get_str(v), yyjson_get_len(v)));
 }
 
 // 按字段名查 a 索引. 字段缺失 / 非 string / 不在 code_idx → -1.
 inline int lookup_a(const Axes &axes, yyjson_val *item, const char *field) {
-  yyjson_val *v = yyjson_obj_get(item, field);
-  const char *s = as_cstr_or_null(v);
-  if (!s)
-    return -1;
+  const char *s = as_cstr_or_null(yyjson_obj_get(item, field));
+  if (!s) return -1;
   auto it = axes.code_idx.find(s);
-  return it == axes.code_idx.end() ? -1 : it->second;
-}
-
-inline int lookup_a_code(const Axes &axes, const std::string &code) {
-  auto it = axes.code_idx.find(code);
   return it == axes.code_idx.end() ? -1 : it->second;
 }
 
@@ -123,43 +102,120 @@ inline bool grid_day_exists(const Axes &axes, const std::string &day) {
   return axes.date_idx.find(day) != axes.date_idx.end();
 }
 
-inline AggregateRow raw_base(std::string_view day, yyjson_val *item,
-                             const char *code_field) {
-  AggregateRow r;
-  r.day = std::string(day);
-  r.code = as_str(yyjson_obj_get(item, code_field));
-  return r;
+// 网格 itf 通用 prealloc: 各 field allocate n_a*n_d + fill (NaN/0).
+inline std::size_t grid_n(const Axes &axes) {
+  return static_cast<std::size_t>(axes.n_a()) *
+         static_cast<std::size_t>(axes.n_d());
 }
 
-// 网格字段 prealloc 共用模板: length = n_a*n_d, 填 NaN
-inline void grid_prealloc_float(std::vector<float> &v, std::size_t n) {
-  v.assign(n, std::nanf(""));
+inline void prealloc_grid_float(PoolArr<float> &g, std::size_t n) {
+  g.allocate(n);
+  std::fill(g.begin(), g.end(), NaNF);
 }
 
-template <class Ev>
-inline void event_prealloc(EventStore<Ev> &store, std::size_t n_a) {
-  store.assign(n_a, {});
+template <class T>
+inline void prealloc_grid_pod(PoolArr<T> &g, std::size_t n, T init = T{}) {
+  g.allocate(n);
+  std::fill(g.begin(), g.end(), init);
 }
 
-// stable_sort: 同 v (多个 visible_date 经 floor_date+CUTOFF 落到同一 row) 时保留
-//   emplace 顺序, 至少保证 sort 算法层不引入新的不确定. (emplace 顺序本身受 Phase 1
-//   并发 task 调度影响, 要彻底 deterministic 需在 Ev 层加 tie-breaker.)
-template <class Ev>
-inline void event_post_sort(EventStore<Ev> &store) {
-  for (auto &chain : store) {
-    std::stable_sort(chain.begin(), chain.end(),
-                     [](const Ev &a, const Ev &b) { return a.v < b.v; });
+// ============================================================================
+// 并行驱动: per-file 拿原子 idx, 解析 JSON 后调用 body(file, root). body 内
+//   决定如何 (无锁 / per-a mutex) 写 pool.
+//
+//   网格 itf: body 直接写 pool[a*n_d + row]. 同 file 同 (a, d) cell 互斥 (单线程内);
+//             跨 file 同 day 同 a 几乎不会发生 (一天一个 dayfile, day 不同 row 不同).
+//             即使发生 (data 异常重复) 也是确定性最后写赢, 无 data race UB.
+//   事件 itf: body 持 mu[a] 锁 emplace 到 pool.<itf>.push_chain(a, ev).
+// ============================================================================
+template <class Body>
+inline void parallel_parse_dayfiles(const std::vector<DayFile> &files,
+                                    Body body) {
+  std::size_t n = files.size();
+  if (n == 0) return;
+  unsigned nt = misc::Affinity::core_count();
+  if (nt == 0) nt = 1;
+  if (static_cast<std::size_t>(nt) > n) nt = static_cast<unsigned>(n);
+
+  std::atomic<std::size_t> next{0};
+  auto worker = [&]() {
+    for (;;) {
+      std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
+      if (i >= n) break;
+      const DayFile &f = files[i];
+      std::string buf = misc::read_file_all(f.path);
+      if (buf.empty()) continue;
+      yyjson_doc *doc = yyjson_read(buf.data(), buf.size(), 0);
+      assert(doc);
+      yyjson_val *root = yyjson_doc_get_root(doc);
+      assert(yyjson_is_arr(root));
+      body(f, root);
+      yyjson_doc_free(doc);
+    }
+  };
+  std::vector<std::thread> ts;
+  ts.reserve(nt);
+  for (unsigned t = 0; t < nt; ++t) ts.emplace_back(worker);
+  for (auto &t : ts) t.join();
+}
+
+// 网格 itf body 辅助: 算 row, 然后 for each item 调 write(off, item).
+//   不在 axes 的 day (grid_day_exists false) → 整 file skip (语义同旧 replay_grid).
+//   floor_date(day) → v_idx; row = v_idx - cutoff; row 越界 → file skip.
+template <class Write>
+inline void per_file_grid_apply(const Axes &axes, const DayFile &f,
+                                yyjson_val *root, int cutoff, Write write) {
+  if (!grid_day_exists(axes, f.day)) return;
+  int v_idx = axes.floor_date(f.day);
+  if (v_idx < 0) return;
+  int row = v_idx - cutoff;
+  int n_d = axes.n_d();
+  if (row < 0 || row >= n_d) return;
+  std::size_t base_d = static_cast<std::size_t>(row);
+  std::size_t n_d_sz = static_cast<std::size_t>(n_d);
+
+  std::size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(root, i, n, item) {
+    int a = lookup_a(axes, item, "instrument");
+    if (a < 0) continue;
+    std::size_t off = static_cast<std::size_t>(a) * n_d_sz + base_d;
+    write(off, item);
+  }
+}
+
+// 事件 itf body 辅助: 算 row, for each item → 持 mu[a] 锁 emit.
+//   事件不要求 day ∈ axes (允许非 trading day 落到前一 trading day).
+//   row >= n_d ⇒ skip (未来日, 未发生).
+//   code_field: BigQuant = "instrument", Tushare = "ts_code".
+template <class Emit>
+inline void per_file_event_apply(const Axes &axes, const DayFile &f,
+                                 yyjson_val *root, int cutoff,
+                                 std::vector<std::mutex> &mu,
+                                 const char *code_field, Emit emit) {
+  int v_idx = axes.floor_date(f.day);
+  if (v_idx < 0) return;
+  int row = v_idx - cutoff;
+  if (row >= axes.n_d()) return;
+
+  std::size_t i, n;
+  yyjson_val *item;
+  yyjson_arr_foreach(root, i, n, item) {
+    int a = lookup_a(axes, item, code_field);
+    if (a < 0) continue;
+    std::lock_guard<std::mutex> lk(mu[a]);
+    emit(a, row, item);
   }
 }
 
 // 网格字段 per-A forward fill:
-//   - finite 值记为 last，可用作 fill 源
-//   - NaN (数据缺失) 用 last 填充
-//   - +inf (数据不合理) 不填充，保留标记
-inline void grid_ffill(std::vector<float> &grid, int n_a, int n_d) {
+//   - finite 值记为 last (可用作 fill 源)
+//   - NaN (数据缺失) 用 last 填; +inf (数据不合理) 不填, 保留标记
+inline void grid_ffill(PoolArr<float> &grid, int n_a, int n_d) {
   for (int a = 0; a < n_a; ++a) {
-    std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
-    float last = std::nanf("");
+    std::size_t base = static_cast<std::size_t>(a) *
+                       static_cast<std::size_t>(n_d);
+    float last = NaNF;
     for (int d = 0; d < n_d; ++d) {
       float v = grid[base + static_cast<std::size_t>(d)];
       if (std::isfinite(v)) {
@@ -171,118 +227,34 @@ inline void grid_ffill(std::vector<float> &grid, int n_a, int n_d) {
   }
 }
 
-// ----------------------------------------------------------------------------
-// itf 通用脚手架: 把 aggregate / replay 的 boilerplate 一次性收纳, 各 itf
-//   仅写自己的"取字段 → 写字段" lambda (a few lines), 不再各写 floor_date /
-//   bounds / lookup_a / lock 等 5-10 行重复逻辑.
-//
-//   aggregate_rows  — JSON arr 行级遍历: 提取 code + 调 extract(item, row) 填 raw,
-//                     extract 返回 false 跳过 (用于 schema-level 过滤如 shift==0).
-//   replay_grid     — raw rows → 网格 (a, row D) 单元写; 网格 day 必须是 trading day.
-//   replay_event    — raw rows → 事件 (per-a chain) emplace; per-A mutex 保护.
-//   两个 replay 都把 cutoff 一次性消化进 row 索引 (row = v_idx - cutoff).
-// ----------------------------------------------------------------------------
-
-template <class Extract>
-inline void aggregate_rows(yyjson_val *arr, std::string_view day,
-                           const char *code_field,
-                           std::vector<AggregateRow> &out, Extract extract) {
-  assert(arr && yyjson_is_arr(arr));
-  size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(arr, i, n, item) {
-    AggregateRow r = raw_base(day, item, code_field);
-    if (r.code.empty())
-      continue;
-    if (!extract(item, r))
-      continue;
-    out.push_back(std::move(r));
-  }
-}
-
-template <class Write>
-inline void replay_grid(std::span<const AggregateRow> rows, const Axes &axes,
-                        int cutoff, Write write) {
-  int n_d = axes.n_d();
-  for (const AggregateRow &r : rows) {
-    if (!grid_day_exists(axes, r.day))
-      continue;
-    int v_idx = axes.floor_date(r.day);
-    if (v_idx < 0)
-      continue;
-    int row = v_idx - cutoff;
-    if (row >= n_d)
-      continue;
-    int a = lookup_a_code(axes, r.code);
-    if (a < 0)
-      continue;
-    std::size_t off = static_cast<std::size_t>(a) *
-                          static_cast<std::size_t>(n_d) +
-                      static_cast<std::size_t>(row);
-    write(off, r);
-  }
-}
-
-template <class Emit>
-inline void replay_event(std::span<const AggregateRow> rows, const Axes &axes,
-                         int cutoff, std::vector<std::mutex> *mu, Emit emit) {
-  assert(mu);
-  int n_d = axes.n_d();
-  for (const AggregateRow &r : rows) {
-    int v_idx = axes.floor_date(r.day);
-    if (v_idx < 0)
-      continue;
-    int row = v_idx - cutoff;
-    if (row >= n_d)
-      continue;
-    int a = lookup_a_code(axes, r.code);
-    if (a < 0)
-      continue;
-    std::lock_guard<std::mutex> lk((*mu)[a]);
-    emit(a, row, r);
-  }
-}
-
-} // namespace
+} // anonymous namespace
 
 // ============================================================================
-// 网格 itf (新基建)
+// 网格 itf
 // ============================================================================
 
 namespace itf_cn_stock_real_bar1d {
 
-// cn_stock_real_bar1d: 不复权 OHLCV + 后复权乘子; 张量层只用 close + adjust_factor.
-//   入库时机: 盘后 17:00–20:00; CUTOFF=-1 → row D 拿 D-1 实际收盘.
-//   close          不复权 [元/股] 原值 (实际成交价, 除权日真实跳跃);
-//                    给 tensor 顶层 close_raw 用 (mcap / limit / low_p / cs_close ...).
-//   adjust_factor  BigQuant 后复权累积乘子 (close_hfq = close × adjust_factor);
-//                    仅 PitPool 内部流转, 不入 tensor 顶层契约;
-//                    给 ts_daily_return 内部叠出 hfq 链式收益 (= 含分红再投入).
-//   post_ffill 保证停牌日继承前值 (af 与 close 同 ffill, 停牌中 af 维持上一交易日值).
 constexpr int CUTOFF = -1;
 
-void prealloc(const Axes &axes, PitPool &p) {
-  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
-                  static_cast<std::size_t>(axes.n_d());
-  grid_prealloc_float(p.bar1d.close, n);
-  grid_prealloc_float(p.bar1d.adjust_factor, n);
-}
+void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+  std::size_t n = grid_n(axes);
+  prealloc_grid_float(p.bar1d.close, n);
+  prealloc_grid_float(p.bar1d.adjust_factor, n);
 
-void aggregate(yyjson_val *arr, std::string_view day,
-               std::vector<AggregateRow> &out) {
-  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
-    r.f0 = as_float_or_nan(yyjson_obj_get(item, "close"));
-    r.f1 = as_float_or_nan(yyjson_obj_get(item, "adjust_factor"));
-    return true;
+  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
+    per_file_grid_apply(axes, f, root, CUTOFF, [&](std::size_t off, yyjson_val *it) {
+      p.bar1d.close[off] = positive_or_inf(
+          as_float_or_nan(yyjson_obj_get(it, "close")));
+      p.bar1d.adjust_factor[off] = positive_or_inf(
+          as_float_or_nan(yyjson_obj_get(it, "adjust_factor")));
+    });
   });
 }
 
-void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
-            std::vector<std::mutex> * /*mu*/) {
-  replay_grid(rows, axes, CUTOFF, [&](std::size_t off, const AggregateRow &r) {
-    pool.bar1d.close[off] = positive_or_inf(r.f0);
-    pool.bar1d.adjust_factor[off] = positive_or_inf(r.f1);
-  });
+void cache_layout(PitPool &p, CacheVisitor &v) {
+  v.section(p.bar1d.close);
+  v.section(p.bar1d.adjust_factor);
 }
 
 void post_ffill(const Axes &axes, PitPool &p) {
@@ -295,31 +267,26 @@ void post_ffill(const Axes &axes, PitPool &p) {
 
 namespace itf_cn_stock_shares {
 
-// cn_stock_shares: 总股本 / 流通股 [股]; 入库盘后, CUTOFF=-1.
 constexpr int CUTOFF = -1;
 
-void prealloc(const Axes &axes, PitPool &p) {
-  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
-                  static_cast<std::size_t>(axes.n_d());
-  grid_prealloc_float(p.shares.total_shares, n);
-  grid_prealloc_float(p.shares.a_float_shares, n);
-}
+void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+  std::size_t n = grid_n(axes);
+  prealloc_grid_float(p.shares.total_shares, n);
+  prealloc_grid_float(p.shares.a_float_shares, n);
 
-void aggregate(yyjson_val *arr, std::string_view day,
-               std::vector<AggregateRow> &out) {
-  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
-    r.f0 = as_float_or_nan(yyjson_obj_get(item, "total_shares"));
-    r.f1 = as_float_or_nan(yyjson_obj_get(item, "a_float_shares"));
-    return true;
+  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
+    per_file_grid_apply(axes, f, root, CUTOFF, [&](std::size_t off, yyjson_val *it) {
+      p.shares.total_shares[off] = positive_or_inf(
+          as_float_or_nan(yyjson_obj_get(it, "total_shares")));
+      p.shares.a_float_shares[off] = positive_or_inf(
+          as_float_or_nan(yyjson_obj_get(it, "a_float_shares")));
+    });
   });
 }
 
-void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
-            std::vector<std::mutex> * /*mu*/) {
-  replay_grid(rows, axes, CUTOFF, [&](std::size_t off, const AggregateRow &r) {
-    pool.shares.total_shares[off] = positive_or_inf(r.f0);
-    pool.shares.a_float_shares[off] = positive_or_inf(r.f1);
-  });
+void cache_layout(PitPool &p, CacheVisitor &v) {
+  v.section(p.shares.total_shares);
+  v.section(p.shares.a_float_shares);
 }
 
 void post_ffill(const Axes &axes, PitPool &p) {
@@ -332,39 +299,29 @@ void post_ffill(const Axes &axes, PitPool &p) {
 
 namespace itf_cn_stock_limit_price {
 
-// cn_stock_limit_price: 当日适用涨跌停价 [元/股].
-//   实际 BigQuant 入库 17:00 (盘后) → CUTOFF=-1 (normal, 承认滞后).
-//   row D = T 取 T-1 day file 的 limit; ST 翻转日略不准, 接受不 overlay.
+// CUTOFF=-1 (normal, 承认滞后). ST 翻转日略不准, 接受不 overlay.
 constexpr int CUTOFF = -1;
 
-void prealloc(const Axes &axes, PitPool &p) {
-  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
-                  static_cast<std::size_t>(axes.n_d());
-  grid_prealloc_float(p.limit_price.upper_limit, n);
-  grid_prealloc_float(p.limit_price.lower_limit, n);
-}
+void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+  std::size_t n = grid_n(axes);
+  prealloc_grid_float(p.limit_price.upper_limit, n);
+  prealloc_grid_float(p.limit_price.lower_limit, n);
 
-// upper_limit / lower_limit 业务约束: > 0; 0/负/non-finite (含 BigQuant 早年
-//   2015-2017 占 5-14% 的 upper_limit==0 数据缺口, 视为"无涨跌停限制")
-//   一律 → +inf, 走"数据不合理"标记. 下游 ts_limit_up/ts_limit_dn 用
-//   is_finite() 跳过, 不会触发误判涨跌停. ffill 不传播 +inf, 紧邻真缺失日
-//   会被前一个有效值兜底 — 比 1e6 finite 哨兵被 ffill 传播污染下游
-//   describe / mean 更干净.
-void aggregate(yyjson_val *arr, std::string_view day,
-               std::vector<AggregateRow> &out) {
-  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
-    r.f0 = as_float_or_nan(yyjson_obj_get(item, "upper_limit"));
-    r.f1 = as_float_or_nan(yyjson_obj_get(item, "lower_limit"));
-    return true;
+  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
+    per_file_grid_apply(axes, f, root, CUTOFF, [&](std::size_t off, yyjson_val *it) {
+      // > 0; 0 / 负 / non-finite (含 2015-2017 部分缺口) → +inf 标记 "无限制",
+      // ffill 不传播.
+      p.limit_price.upper_limit[off] = positive_or_inf(
+          as_float_or_nan(yyjson_obj_get(it, "upper_limit")));
+      p.limit_price.lower_limit[off] = positive_or_inf(
+          as_float_or_nan(yyjson_obj_get(it, "lower_limit")));
+    });
   });
 }
 
-void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
-            std::vector<std::mutex> * /*mu*/) {
-  replay_grid(rows, axes, CUTOFF, [&](std::size_t off, const AggregateRow &r) {
-    pool.limit_price.upper_limit[off] = positive_or_inf(r.f0);
-    pool.limit_price.lower_limit[off] = positive_or_inf(r.f1);
-  });
+void cache_layout(PitPool &p, CacheVisitor &v) {
+  v.section(p.limit_price.upper_limit);
+  v.section(p.limit_price.lower_limit);
 }
 
 void post_ffill(const Axes &axes, PitPool &p) {
@@ -377,442 +334,395 @@ void post_ffill(const Axes &axes, PitPool &p) {
 
 namespace itf_cn_stock_status {
 
-// cn_stock_status: 派生 st_status (4 态) + suspended.
-//   原 BigQuant 字段: st_status (0/1/2, 狭义 ST 标签) + is_risk_warning (0/1, 广义风险)
-//     + suspended + is_risk_warning + price_limit_status + exdr 等.
-//   入张量 st_status (派生, 4 态): 0=正常 / 1=ST / 2=*ST / 3=退市整理期.
-//     映射: 原 st_status==1 → 1; ==2 → 2; (st==0 ∧ is_risk_warning==1) → 3; else → 0
-//     为什么需要 3 档: 退市整理期交易所摘掉 *ST 标签 (原 st_status 翻 0), 但 stock 仍
-//     在交易且面临退市风险, 仅靠原 st_status 漏判 (实测 *ST大通 2023/06/19 进入整理期
-//     后 st_status=0 / is_risk_warning=1, 被 strategy 选中持有至退市).
-//   入张量 suspended uint8: 0=正常, 1=停牌.
-//   实际 BigQuant 入库 17:00 (盘后) → CUTOFF=0 (hybrid 伪装, 假装盘前可见).
-//   历史 day file 按 row=v_idx 消化; 最后一天 (= 实盘当日, day file 尚未入库)
-//   由 apply_meta_overlays 用 cn_stock_static_data (真盘前 09:00) 填充
-//   suspended / st_status 两字段到 row=last_d.
-//   不做 ffill — 缺日 (无文件) 一律保持 0 (按"未知=正常"处理); 实盘当日缺日的
-//   填充责任移交 overlay.
+// CUTOFF=0 (hybrid 伪装); 末日由 apply_meta_overlays 用 static_data 填充.
 constexpr int CUTOFF = 0;
 
-void prealloc(const Axes &axes, PitPool &p) {
-  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
-                  static_cast<std::size_t>(axes.n_d());
-  p.status.st_status.assign(n, int8_t{0});
-  p.status.suspended.assign(n, uint8_t{0});
-}
+void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+  std::size_t n = grid_n(axes);
+  // 默认 0 = "正常 / 未停牌"; 缺日不 ffill.
+  prealloc_grid_pod<std::int8_t>(p.status.st_status, n, 0);
+  prealloc_grid_pod<std::uint8_t>(p.status.suspended, n, 0);
 
-void aggregate(yyjson_val *arr, std::string_view day,
-               std::vector<AggregateRow> &out) {
-  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
-    r.i0 = as_int_or_default(yyjson_obj_get(item, "st_status"), 0);
-    r.i1 = as_int_or_default(yyjson_obj_get(item, "is_risk_warning"), 0);
-    r.i2 = as_int_or_default(yyjson_obj_get(item, "suspended"), 0);
-    return true;
+  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
+    per_file_grid_apply(axes, f, root, CUTOFF, [&](std::size_t off, yyjson_val *it) {
+      int st = as_int_or_default(yyjson_obj_get(it, "st_status"), 0);
+      int rw = as_int_or_default(yyjson_obj_get(it, "is_risk_warning"), 0);
+      int sp = as_int_or_default(yyjson_obj_get(it, "suspended"), 0);
+      // 4 态派生: st 1/2 优先; 否则 risk_warning=1 → 3 (退市整理期); else 0.
+      // 退市整理期: 交易所摘 *ST 后 st 翻 0 但 is_risk_warning 仍 1; 用 3
+      // 保留识别力 (实测 *ST大通 2023/06/19 进整理期后 st_status=0/rw=1, 旧版漏判).
+      std::int8_t out_st = (st == 1) ? std::int8_t{1}
+                           : (st == 2) ? std::int8_t{2}
+                           : (rw != 0) ? std::int8_t{3}
+                                       : std::int8_t{0};
+      p.status.st_status[off] = out_st;
+      p.status.suspended[off] = (sp != 0) ? std::uint8_t{1} : std::uint8_t{0};
+    });
   });
 }
 
-void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
-            std::vector<std::mutex> * /*mu*/) {
-  replay_grid(rows, axes, CUTOFF, [&](std::size_t off, const AggregateRow &r) {
-    // 4 态派生: st_status 优先 (1/2), 否则 is_risk_warning 兜底退市整理期 → 3.
-    int8_t out_st = (r.i0 == 1)   ? int8_t{1}
-                    : (r.i0 == 2) ? int8_t{2}
-                    : (r.i1 != 0) ? int8_t{3}
-                                  : int8_t{0};
-    pool.status.st_status[off] = out_st;
-    pool.status.suspended[off] = (r.i2 != 0) ? uint8_t{1} : uint8_t{0};
-  });
+void cache_layout(PitPool &p, CacheVisitor &v) {
+  v.section(p.status.st_status);
+  v.section(p.status.suspended);
 }
 
-// 不做 ffill — cn_stock_status 是盘前全量快照, 缺日 (无文件) = 数据起点前/拉取漏日,
-//   一律保持 0 (按"未知=正常"处理). risk_warn / susp 直接读 row D.
+// 不做 ffill — 盘前全量快照, 缺日 = 数据起点前 / 拉取漏日, 一律保持 0 (=正常).
 
 } // namespace itf_cn_stock_status
 
 namespace itf_cn_stock_margin_trading_detail {
 
-// cn_stock_margin_trading_detail: 当日两融明细 (盘前入库, CUTOFF=0).
-//   字段: financing_balance, securities_lending_balance ≥ 0.
-//   派生: is_margin = 1 当 (D, A) 存在记录 (= 当日两融标的).
+// CUTOFF=0 (真盘前入库). 非两融标的日 = 无 day file 行 → is_margin=0 默认.
 constexpr int CUTOFF = 0;
 
-void prealloc(const Axes &axes, PitPool &p) {
-  std::size_t n = static_cast<std::size_t>(axes.n_a()) *
-                  static_cast<std::size_t>(axes.n_d());
-  p.margin_detail.is_margin.assign(n, uint8_t{0});
-  grid_prealloc_float(p.margin_detail.financing_balance, n);
-  grid_prealloc_float(p.margin_detail.securities_lending_balance, n);
-}
+void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+  std::size_t n = grid_n(axes);
+  prealloc_grid_pod<std::uint8_t>(p.margin_detail.is_margin, n, 0);
+  prealloc_grid_float(p.margin_detail.financing_balance, n);
+  prealloc_grid_float(p.margin_detail.securities_lending_balance, n);
 
-void aggregate(yyjson_val *arr, std::string_view day,
-               std::vector<AggregateRow> &out) {
-  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
-    r.f0 = as_float_or_nan(yyjson_obj_get(item, "financing_balance"));
-    r.f1 = as_float_or_nan(yyjson_obj_get(item, "securities_lending_balance"));
-    return true;
+  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
+    per_file_grid_apply(axes, f, root, CUTOFF, [&](std::size_t off, yyjson_val *it) {
+      p.margin_detail.is_margin[off] = 1;
+      p.margin_detail.financing_balance[off] = non_negative_or_inf(
+          as_float_or_nan(yyjson_obj_get(it, "financing_balance")));
+      p.margin_detail.securities_lending_balance[off] = non_negative_or_inf(
+          as_float_or_nan(yyjson_obj_get(it, "securities_lending_balance")));
+    });
   });
 }
 
-void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
-            std::vector<std::mutex> * /*mu*/) {
-  replay_grid(rows, axes, CUTOFF, [&](std::size_t off, const AggregateRow &r) {
-    pool.margin_detail.is_margin[off] = 1;
-    pool.margin_detail.financing_balance[off] = non_negative_or_inf(r.f0);
-    pool.margin_detail.securities_lending_balance[off] =
-        non_negative_or_inf(r.f1);
-  });
+void cache_layout(PitPool &p, CacheVisitor &v) {
+  v.section(p.margin_detail.is_margin);
+  v.section(p.margin_detail.financing_balance);
+  v.section(p.margin_detail.securities_lending_balance);
 }
 
-// 不做 ffill — financing_balance / securities_lending_balance 与 is_margin 对齐:
-//   非两融标的日没有 day file 行 ⇒ prealloc 默认 NaN (balance) + 0 (is_margin),
-//   不该 ffill 把"前一天还是两融余额"延续到"今天已退出名单"的日子. is_margin=0 ∧
-//   balance != NaN 是语义不一致 (实测 mr_bal_raw 2024 %finite 比 is_margin %+ 多
-//   2.25%, 全部是 ffill 把退名单后的余额延续了).
-//   是两融标的但 day file 缺日 (罕见, 数据 quality 缺口) 同样 NaN, 不外推.
+// 不做 ffill — is_margin=0 ∧ balance!=NaN 是语义不一致 (实测 2024 多 2.25% 误标).
 
 } // namespace itf_cn_stock_margin_trading_detail
 
 // ============================================================================
-// 事件 itf (新基建; per-A mutex emplace; post_sort 末段 sort by v)
+// 事件 itf
 // ============================================================================
+
+namespace {
+
+// Tushare forecast type string → enum (业务只关心 首亏/续亏).
+inline ForecastType parse_forecast_type(const char *s, std::size_t n) {
+  if (!s || n == 0) return ForecastType::Other;
+  // UTF-8 hard-coded; "首亏" 6 bytes, "续亏" 6 bytes.
+  if (n == 6 && std::memcmp(s, "首亏", 6) == 0) return ForecastType::FirstLoss;
+  if (n == 6 && std::memcmp(s, "续亏", 6) == 0) return ForecastType::ContinueLoss;
+  return ForecastType::Other;
+}
+
+} // namespace
 
 namespace itf_cn_stock_industry_component {
 
-// cn_stock_industry_component: 月初 sw2021 一级行业归属快照 (MonthFirst).
-//   每月仅 1 个 DD 文件 (visible_date = MIN(date) of month); 同 (D, instrument)
-//   下 industry∈{cs,sw2014,sw2021} 三套, 仅取 sw2021 入 ev.
-//   实际 BigQuant 入库 17:00 (盘后) → CUTOFF=-1 (normal, 承认滞后).
-//   月初首日 industry_l1 自然延续上月 base (ts_industry_l1 last_id 单调推进).
+// MonthFirst sw2021 一级行业归属快照. 月初首日 industry_l1 自然延续上月 base.
 constexpr int CUTOFF = -1;
 
-void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.industry_component, static_cast<std::size_t>(axes.n_a()));
-}
+void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+  std::size_t n_a = static_cast<std::size_t>(axes.n_a());
+  p.industry_component.resize_chains(n_a);
+  std::vector<std::mutex> mu(n_a);
 
-void aggregate(yyjson_val *arr, std::string_view day,
-               std::vector<AggregateRow> &out) {
-  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
-    const char *ind = as_cstr_or_null(yyjson_obj_get(item, "industry"));
-    if (!ind || std::strcmp(ind, "sw2021") != 0)
-      return false;
-    r.s0 = as_str(yyjson_obj_get(item, "industry_level1_name"));
-    return true;
+  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
+    per_file_event_apply(axes, f, root, CUTOFF, mu, "instrument",
+                         [&](int a, int row, yyjson_val *it) {
+      const char *ind = as_cstr_or_null(yyjson_obj_get(it, "industry"));
+      if (!ind || std::strcmp(ind, "sw2021") != 0) return;
+      std::string_view name = as_sv(yyjson_obj_get(it, "industry_level1_name"));
+      IndustryComponentEv ev{};
+      ev.v = row;
+      ev.l1_id = sw2021_l1_name_to_id(name);
+      p.industry_component.push_chain(a, ev);
+    });
   });
+  p.industry_component.sort_chains();
+  p.industry_component.finalize();
 }
 
-void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
-            std::vector<std::mutex> *mu) {
-  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
-    pool.industry_component[a].push_back({row, sw2021_l1_name_to_id(r.s0)});
-  });
+void cache_layout(PitPool &p, CacheVisitor &v) {
+  v.section(p.industry_component);
 }
-
-void post_sort(PitPool &p) { event_post_sort(p.industry_component); }
 
 } // namespace itf_cn_stock_industry_component
 
 namespace itf_cn_stock_industry_change {
 
-// cn_stock_industry_change: 月内 sw2021 L1 行业切换事件 (Day, CUTOFF=-1, 盘后).
-//   过滤: industry=='sw2021' AND industry_level==1 AND change_flag==1 (进入新行业).
-//   change_flag==0 (退出旧行业) 不入 — 行业切换日两条同 D 同 A, 只取"进"侧.
 constexpr int CUTOFF = -1;
 
-void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.industry_change, static_cast<std::size_t>(axes.n_a()));
-}
+void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+  std::size_t n_a = static_cast<std::size_t>(axes.n_a());
+  p.industry_change.resize_chains(n_a);
+  std::vector<std::mutex> mu(n_a);
 
-void aggregate(yyjson_val *arr, std::string_view day,
-               std::vector<AggregateRow> &out) {
-  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
-    const char *ind = as_cstr_or_null(yyjson_obj_get(item, "industry"));
-    if (!ind || std::strcmp(ind, "sw2021") != 0)
-      return false;
-    if (as_int_or_default(yyjson_obj_get(item, "industry_level"), 0) != 1)
-      return false;
-    if (as_int_or_default(yyjson_obj_get(item, "change_flag"), -1) != 1)
-      return false;
-    r.s0 = as_str(yyjson_obj_get(item, "industry_name"));
-    return true;
+  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
+    per_file_event_apply(axes, f, root, CUTOFF, mu, "instrument",
+                         [&](int a, int row, yyjson_val *it) {
+      const char *ind = as_cstr_or_null(yyjson_obj_get(it, "industry"));
+      if (!ind || std::strcmp(ind, "sw2021") != 0) return;
+      if (as_int_or_default(yyjson_obj_get(it, "industry_level"), 0) != 1) return;
+      if (as_int_or_default(yyjson_obj_get(it, "change_flag"), -1) != 1) return;
+      std::string_view name = as_sv(yyjson_obj_get(it, "industry_name"));
+      IndustryChangeEv ev{};
+      ev.v = row;
+      ev.l1_id = sw2021_l1_name_to_id(name);
+      p.industry_change.push_chain(a, ev);
+    });
   });
+  p.industry_change.sort_chains();
+  p.industry_change.finalize();
 }
 
-void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
-            std::vector<std::mutex> *mu) {
-  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
-    pool.industry_change[a].push_back({row, sw2021_l1_name_to_id(r.s0)});
-  });
+void cache_layout(PitPool &p, CacheVisitor &v) {
+  v.section(p.industry_change);
 }
-
-void post_sort(PitPool &p) { event_post_sort(p.industry_change); }
 
 } // namespace itf_cn_stock_industry_change
 
 namespace itf_cn_stock_dividend {
 
-// cn_stock_dividend: 分红事件 (Where on publish_date, CUTOFF=-1).
-//   字段: instrument / report_date / ex_date / cash_after_tax (税后每股分红 [元/股]).
-//   ex_date 必入 — dy_raw 走 trailing 12M ex_date 日历窗口 (BigQuant `dividend_yield_ratio` 实测口径).
 constexpr int CUTOFF = -1;
 
-void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.dividend, static_cast<std::size_t>(axes.n_a()));
-}
+void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+  std::size_t n_a = static_cast<std::size_t>(axes.n_a());
+  p.dividend.resize_chains(n_a);
+  std::vector<std::mutex> mu(n_a);
 
-void aggregate(yyjson_val *arr, std::string_view day,
-               std::vector<AggregateRow> &out) {
-  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
-    r.s0 = as_str(yyjson_obj_get(item, "report_date"));
-    r.s1 = as_str(yyjson_obj_get(item, "ex_date"));
-    r.f0 = as_float_or_nan(yyjson_obj_get(item, "cash_after_tax"));
-    return true;
+  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
+    per_file_event_apply(axes, f, root, CUTOFF, mu, "instrument",
+                         [&](int a, int row, yyjson_val *it) {
+      DividendEv ev;
+      ev.v = row;
+      ev.report_date = as_yyyymmdd_int(yyjson_obj_get(it, "report_date"));
+      ev.ex_date = as_yyyymmdd_int(yyjson_obj_get(it, "ex_date"));
+      ev.cash_after_tax = as_float_or_nan(yyjson_obj_get(it, "cash_after_tax"));
+      p.dividend.push_chain(a, ev);
+    });
   });
+  p.dividend.sort_chains();
+  p.dividend.finalize();
 }
 
-void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
-            std::vector<std::mutex> *mu) {
-  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
-    pool.dividend[a].push_back({row, r.s0, r.s1, r.f0});
-  });
+void cache_layout(PitPool &p, CacheVisitor &v) {
+  v.section(p.dividend);
 }
-
-void post_sort(PitPool &p) { event_post_sort(p.dividend); }
 
 } // namespace itf_cn_stock_dividend
 
 namespace itf_cn_stock_financial_ttm_shift {
 
-// cn_stock_financial_ttm_shift: 财务 TTM 时序 (only shift=0 入 EventStore).
-//   aggregate 过滤 shift!=0; shift=0 = BigQuant 给定的"该 visible_date 最新报告期 TTM"
-//   (含意随披露季节漂移). per-A 沿 v 升序, 同 (instrument, visible_date) 该次披露
-//   shift=0 单条; 跨 visible_date 多条 ⇒ feature 层走 max v.
 constexpr int CUTOFF = -1;
 
-void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.financial_ttm, static_cast<std::size_t>(axes.n_a()));
-}
+void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+  std::size_t n_a = static_cast<std::size_t>(axes.n_a());
+  p.financial_ttm.resize_chains(n_a);
+  std::vector<std::mutex> mu(n_a);
 
-void aggregate(yyjson_val *arr, std::string_view day,
-               std::vector<AggregateRow> &out) {
-  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
-    if (as_int_or_default(yyjson_obj_get(item, "shift"), -1) != 0)
-      return false;
-    r.s0 = as_str(yyjson_obj_get(item, "report_date"));
-    r.f0 = as_float_or_nan(yyjson_obj_get(item, "total_operating_revenue_ttm"));
-    r.f1 = as_float_or_nan(
-        yyjson_obj_get(item, "net_profit_to_parent_shareholders_ttm"));
-    r.f2 = as_float_or_nan(yyjson_obj_get(item, "net_cffoa_ttm"));
-    return true;
+  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
+    per_file_event_apply(axes, f, root, CUTOFF, mu, "instrument",
+                         [&](int a, int row, yyjson_val *it) {
+      // 仅入 shift==0 (该 visible_date 最新报告期 TTM).
+      if (as_int_or_default(yyjson_obj_get(it, "shift"), -1) != 0) return;
+      FinancialTtmEv ev;
+      ev.v = row;
+      ev.report_date = as_yyyymmdd_int(yyjson_obj_get(it, "report_date"));
+      ev.total_operating_revenue_ttm =
+          as_float_or_nan(yyjson_obj_get(it, "total_operating_revenue_ttm"));
+      ev.net_profit_to_parent_shareholders_ttm = as_float_or_nan(
+          yyjson_obj_get(it, "net_profit_to_parent_shareholders_ttm"));
+      ev.net_cffoa_ttm =
+          as_float_or_nan(yyjson_obj_get(it, "net_cffoa_ttm"));
+      p.financial_ttm.push_chain(a, ev);
+    });
   });
+  p.financial_ttm.sort_chains();
+  p.financial_ttm.finalize();
 }
 
-void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
-            std::vector<std::mutex> *mu) {
-  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
-    pool.financial_ttm[a].push_back({row, r.s0, r.f0, r.f1, r.f2});
-  });
+void cache_layout(PitPool &p, CacheVisitor &v) {
+  v.section(p.financial_ttm);
 }
-
-void post_sort(PitPool &p) { event_post_sort(p.financial_ttm); }
 
 } // namespace itf_cn_stock_financial_ttm_shift
 
 namespace itf_cn_stock_financial_balance_general_pit {
 
-// cn_stock_financial_balance_general_pit: 资产负债表 PIT (MRQ snapshot).
-//   不过滤 fs_quarter_index — 季报 / 半年报 / 年报均入; 同 (visible_date, instrument)
-//   可多 report_date 行 (历史 + 修正), feature 层维护 map<report_date, latest by v>
-//   取 max report_date.
 constexpr int CUTOFF = -1;
 
-void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.financial_balance, static_cast<std::size_t>(axes.n_a()));
-}
+void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+  std::size_t n_a = static_cast<std::size_t>(axes.n_a());
+  p.financial_balance.resize_chains(n_a);
+  std::vector<std::mutex> mu(n_a);
 
-void aggregate(yyjson_val *arr, std::string_view day,
-               std::vector<AggregateRow> &out) {
-  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
-    r.s0 = as_str(yyjson_obj_get(item, "report_date"));
-    r.f0 = as_float_or_nan(yyjson_obj_get(item, "total_owner_equity"));
-    r.f1 = as_float_or_nan(
-        yyjson_obj_get(item, "total_equity_to_parent_shareholders"));
-    r.f2 = as_float_or_nan(yyjson_obj_get(item, "total_assets"));
-    return true;
+  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
+    per_file_event_apply(axes, f, root, CUTOFF, mu, "instrument",
+                         [&](int a, int row, yyjson_val *it) {
+      // 不过滤 fs_quarter_index — 季/半/年报均入; feature 层 max(report_date) MRQ.
+      FinancialBalanceEv ev;
+      ev.v = row;
+      ev.report_date = as_yyyymmdd_int(yyjson_obj_get(it, "report_date"));
+      ev.total_owner_equity =
+          as_float_or_nan(yyjson_obj_get(it, "total_owner_equity"));
+      ev.total_equity_to_parent_shareholders = as_float_or_nan(
+          yyjson_obj_get(it, "total_equity_to_parent_shareholders"));
+      ev.total_assets = as_float_or_nan(yyjson_obj_get(it, "total_assets"));
+      p.financial_balance.push_chain(a, ev);
+    });
   });
+  p.financial_balance.sort_chains();
+  p.financial_balance.finalize();
 }
 
-void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
-            std::vector<std::mutex> *mu) {
-  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
-    pool.financial_balance[a].push_back({row, r.s0, r.f0, r.f1, r.f2});
-  });
+void cache_layout(PitPool &p, CacheVisitor &v) {
+  v.section(p.financial_balance);
 }
-
-void post_sort(PitPool &p) { event_post_sort(p.financial_balance); }
 
 } // namespace itf_cn_stock_financial_balance_general_pit
 
 namespace itf_cn_stock_financial_income_general_pit {
 
-// cn_stock_financial_income_general_pit: 利润表 PIT.
-//   aggregate 过滤 fs_quarter_index != 4 (只入年报), 给 ni_raw 用 (dividend_st 阈值).
-//   字段 net_profit_to_parent_shareholders (归母年度 NI; 与 pe_raw / roe_raw 分子对仗).
-//   同 report_date 多版本 (修正) 取 max v.
 constexpr int CUTOFF = -1;
 
-void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.financial_income_annual,
-                 static_cast<std::size_t>(axes.n_a()));
-}
+void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+  std::size_t n_a = static_cast<std::size_t>(axes.n_a());
+  p.financial_income_annual.resize_chains(n_a);
+  std::vector<std::mutex> mu(n_a);
 
-void aggregate(yyjson_val *arr, std::string_view day,
-               std::vector<AggregateRow> &out) {
-  aggregate_rows(arr, day, "instrument", out, [](yyjson_val *item, AggregateRow &r) {
-    if (as_int_or_default(yyjson_obj_get(item, "fs_quarter_index"), -1) != 4)
-      return false;
-    r.s0 = as_str(yyjson_obj_get(item, "report_date"));
-    r.f0 = as_float_or_nan(
-        yyjson_obj_get(item, "net_profit_to_parent_shareholders"));
-    return true;
+  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
+    per_file_event_apply(axes, f, root, CUTOFF, mu, "instrument",
+                         [&](int a, int row, yyjson_val *it) {
+      // 仅入 fs_quarter_index==4 (年报) — 给 ni_raw / dividend_st 阈值用.
+      if (as_int_or_default(yyjson_obj_get(it, "fs_quarter_index"), -1) != 4)
+        return;
+      FinancialIncomeAnnualEv ev;
+      ev.v = row;
+      ev.report_date = as_yyyymmdd_int(yyjson_obj_get(it, "report_date"));
+      ev.net_profit_to_parent_shareholders = as_float_or_nan(
+          yyjson_obj_get(it, "net_profit_to_parent_shareholders"));
+      p.financial_income_annual.push_chain(a, ev);
+    });
   });
+  p.financial_income_annual.sort_chains();
+  p.financial_income_annual.finalize();
 }
 
-void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
-            std::vector<std::mutex> *mu) {
-  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
-    pool.financial_income_annual[a].push_back({row, r.s0, r.f0});
-  });
+void cache_layout(PitPool &p, CacheVisitor &v) {
+  v.section(p.financial_income_annual);
 }
-
-void post_sort(PitPool &p) { event_post_sort(p.financial_income_annual); }
 
 } // namespace itf_cn_stock_financial_income_general_pit
 
-// ============================================================================
-// 事件 itf (Tushare 保留)
-// ============================================================================
-
 namespace itf_forecast {
 
-// Tushare forecast: 业绩预告. 公告实时 (盘后), CUTOFF=-1. 字段用 ts_code.
+// Tushare forecast: 字段用 ts_code; type 字符串一次性 map 到 enum.
 constexpr int CUTOFF = -1;
 
-void prealloc(const Axes &axes, PitPool &p) {
-  event_prealloc(p.forecast, static_cast<std::size_t>(axes.n_a()));
-}
+void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+  std::size_t n_a = static_cast<std::size_t>(axes.n_a());
+  p.forecast.resize_chains(n_a);
+  std::vector<std::mutex> mu(n_a);
 
-void aggregate(yyjson_val *arr, std::string_view day,
-               std::vector<AggregateRow> &out) {
-  aggregate_rows(arr, day, "ts_code", out, [](yyjson_val *item, AggregateRow &r) {
-    r.s0 = as_str(yyjson_obj_get(item, "end_date"));
-    r.s1 = as_str(yyjson_obj_get(item, "type"));
-    r.f0 = as_float_or_nan(yyjson_obj_get(item, "last_parent_net"));
-    return true;
+  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
+    per_file_event_apply(axes, f, root, CUTOFF, mu, "ts_code",
+                         [&](int a, int row, yyjson_val *it) {
+      ForecastEv ev;
+      ev.v = row;
+      ev.end_date = as_yyyymmdd_int(yyjson_obj_get(it, "end_date"));
+      yyjson_val *tv = yyjson_obj_get(it, "type");
+      const char *ts = as_cstr_or_null(tv);
+      std::size_t tl = ts ? yyjson_get_len(tv) : 0;
+      ev.type = parse_forecast_type(ts, tl);
+      ev.last_parent_net =
+          as_float_or_nan(yyjson_obj_get(it, "last_parent_net"));
+      p.forecast.push_chain(a, ev);
+    });
   });
+  p.forecast.sort_chains();
+  p.forecast.finalize();
 }
 
-void replay(std::span<const AggregateRow> rows, const Axes &axes, PitPool &pool,
-            std::vector<std::mutex> *mu) {
-  replay_event(rows, axes, CUTOFF, mu, [&](int a, int row, const AggregateRow &r) {
-    pool.forecast[a].push_back({row, r.s0, r.s1, r.f0});
-  });
+void cache_layout(PitPool &p, CacheVisitor &v) {
+  v.section(p.forecast);
 }
-
-void post_sort(PitPool &p) { event_post_sort(p.forecast); }
 
 } // namespace itf_forecast
 
 // ============================================================================
-// ITFS[] 表 — 单点真理
-//   file_name = data/YYYY/MM/DD/<file_name>.json basename, 也是日志/标识用名.
-//   增减 itf 在此追加/删除一行 + 上方 itf_<name> 块.
+// ITFS[] — 单点真理
+//   增减 itf 在此追加 / 删除一行 + 上方 itf_<name> 块.
 // ============================================================================
-
 const ItfDesc ITFS[] = {
-    // ---- 网格 itf (新基建; 无锁) ----
-    {"cn_stock_real_bar1d", false, &itf_cn_stock_real_bar1d::prealloc,
-     &itf_cn_stock_real_bar1d::aggregate, &itf_cn_stock_real_bar1d::replay,
-     nullptr, &itf_cn_stock_real_bar1d::post_ffill},
-    {"cn_stock_shares", false, &itf_cn_stock_shares::prealloc,
-     &itf_cn_stock_shares::aggregate, &itf_cn_stock_shares::replay, nullptr,
+    {"cn_stock_real_bar1d",
+     &itf_cn_stock_real_bar1d::build,
+     &itf_cn_stock_real_bar1d::cache_layout,
+     &itf_cn_stock_real_bar1d::post_ffill},
+    {"cn_stock_shares",
+     &itf_cn_stock_shares::build,
+     &itf_cn_stock_shares::cache_layout,
      &itf_cn_stock_shares::post_ffill},
-    {"cn_stock_limit_price", false, &itf_cn_stock_limit_price::prealloc,
-     &itf_cn_stock_limit_price::aggregate, &itf_cn_stock_limit_price::replay,
-     nullptr,
+    {"cn_stock_limit_price",
+     &itf_cn_stock_limit_price::build,
+     &itf_cn_stock_limit_price::cache_layout,
      &itf_cn_stock_limit_price::post_ffill},
-    {"cn_stock_status", false, &itf_cn_stock_status::prealloc,
-     &itf_cn_stock_status::aggregate, &itf_cn_stock_status::replay, nullptr,
+    {"cn_stock_status",
+     &itf_cn_stock_status::build,
+     &itf_cn_stock_status::cache_layout,
      nullptr},
-    {"cn_stock_margin_trading_detail", false,
-     &itf_cn_stock_margin_trading_detail::prealloc,
-     &itf_cn_stock_margin_trading_detail::aggregate,
-     &itf_cn_stock_margin_trading_detail::replay, nullptr, nullptr},
-
-    // ---- 事件 itf (新基建; per-A mutex) ----
-    {"cn_stock_industry_component", true,
-     &itf_cn_stock_industry_component::prealloc,
-     &itf_cn_stock_industry_component::aggregate,
-     &itf_cn_stock_industry_component::replay,
-     &itf_cn_stock_industry_component::post_sort, nullptr},
-    {"cn_stock_industry_change", true, &itf_cn_stock_industry_change::prealloc,
-     &itf_cn_stock_industry_change::aggregate,
-     &itf_cn_stock_industry_change::replay,
-     &itf_cn_stock_industry_change::post_sort, nullptr},
-    {"cn_stock_dividend", true, &itf_cn_stock_dividend::prealloc,
-     &itf_cn_stock_dividend::aggregate, &itf_cn_stock_dividend::replay,
-     &itf_cn_stock_dividend::post_sort, nullptr},
-    {"cn_stock_financial_ttm_shift", true,
-     &itf_cn_stock_financial_ttm_shift::prealloc,
-     &itf_cn_stock_financial_ttm_shift::aggregate,
-     &itf_cn_stock_financial_ttm_shift::replay,
-     &itf_cn_stock_financial_ttm_shift::post_sort, nullptr},
-    {"cn_stock_financial_balance_general_pit", true,
-     &itf_cn_stock_financial_balance_general_pit::prealloc,
-     &itf_cn_stock_financial_balance_general_pit::aggregate,
-     &itf_cn_stock_financial_balance_general_pit::replay,
-     &itf_cn_stock_financial_balance_general_pit::post_sort, nullptr},
-    {"cn_stock_financial_income_general_pit", true,
-     &itf_cn_stock_financial_income_general_pit::prealloc,
-     &itf_cn_stock_financial_income_general_pit::aggregate,
-     &itf_cn_stock_financial_income_general_pit::replay,
-     &itf_cn_stock_financial_income_general_pit::post_sort, nullptr},
-
-    // ---- 事件 itf (Tushare 保留) ----
-    {"forecast", true, &itf_forecast::prealloc, &itf_forecast::aggregate,
-     &itf_forecast::replay, &itf_forecast::post_sort, nullptr},
+    {"cn_stock_margin_trading_detail",
+     &itf_cn_stock_margin_trading_detail::build,
+     &itf_cn_stock_margin_trading_detail::cache_layout,
+     nullptr},
+    {"cn_stock_industry_component",
+     &itf_cn_stock_industry_component::build,
+     &itf_cn_stock_industry_component::cache_layout,
+     nullptr},
+    {"cn_stock_industry_change",
+     &itf_cn_stock_industry_change::build,
+     &itf_cn_stock_industry_change::cache_layout,
+     nullptr},
+    {"cn_stock_dividend",
+     &itf_cn_stock_dividend::build,
+     &itf_cn_stock_dividend::cache_layout,
+     nullptr},
+    {"cn_stock_financial_ttm_shift",
+     &itf_cn_stock_financial_ttm_shift::build,
+     &itf_cn_stock_financial_ttm_shift::cache_layout,
+     nullptr},
+    {"cn_stock_financial_balance_general_pit",
+     &itf_cn_stock_financial_balance_general_pit::build,
+     &itf_cn_stock_financial_balance_general_pit::cache_layout,
+     nullptr},
+    {"cn_stock_financial_income_general_pit",
+     &itf_cn_stock_financial_income_general_pit::build,
+     &itf_cn_stock_financial_income_general_pit::cache_layout,
+     nullptr},
+    {"forecast",
+     &itf_forecast::build,
+     &itf_forecast::cache_layout,
+     nullptr},
 };
 
 const int ITFS_COUNT = static_cast<int>(sizeof(ITFS) / sizeof(ITFS[0]));
 
 // ============================================================================
-// apply_meta_overlays — hybrid PIT 收尾: 真盘前 _meta 快照填充 row=last_d
-//   当前唯一 overlay: cn_stock_static_data → status 2 字段 (suspended, st_status).
-//
-//   语义"填充而非覆盖": status CUTOFF=0 假装盘前, 实盘当日 (last_d) day file 还未
-//     入库时 row=last_d 是 prealloc 默认 0 (正常态); 本函数把 static_data 真盘前
-//     09:00 值写进去补齐. 历史 day file 已存在的天数 (T < last_d) 不被触碰
-//     (函数仅写 row=last_d 这一行, 不动其他 row).
-//
-//   _meta 不存在 ⇒ silent noop (历史回测 / 首轮 build 容错).
-//   axes.n_d() == 0 ⇒ silent noop.
-//   instrument 不在 axes.code_idx ⇒ skip.
-//
-//   不取锁: 单线程调用 (load.cpp 在 aggregate replay 全部结束后才调度本函数).
+// apply_meta_overlays — hybrid PIT 收尾.
 // ============================================================================
 void apply_meta_overlays(const Axes &axes, PitPool &pool) {
   namespace fs = std::filesystem;
   fs::path meta_path =
       misc::git_root() / "data" / "_meta" / "cn_stock_static_data.json";
-  if (!fs::exists(meta_path))
-    return;
+  if (!fs::exists(meta_path)) return;
 
   std::string buf = misc::read_file_all(meta_path);
-  if (buf.empty())
-    return;
+  if (buf.empty()) return;
 
   int n_d = axes.n_d();
-  if (n_d <= 0)
-    return;
+  if (n_d <= 0) return;
   int last_d = n_d - 1;
   std::size_t base_off = static_cast<std::size_t>(last_d);
 
@@ -821,41 +731,32 @@ void apply_meta_overlays(const Axes &axes, PitPool &pool) {
   yyjson_val *root = yyjson_doc_get_root(doc);
   assert(yyjson_is_arr(root));
 
-  // hybrid 时序契约 fail-fast: snapshot 文件内每行 date 字段 (= MAX(date) 一日) 必须
-  //   == axes.dates[last_d]. 任何错位 (trading_days 已推进但 snapshot 未刷 / 反向)
-  //   都会让真盘前态被贴到错误的 row, 此处直接 assert. 空文件已在上方 noop.
+  // static_data 盘前更新, trading_days 可能盘后才补 CN 当日; 只校验快照为今天.
   yyjson_val *first = yyjson_arr_get_first(root);
   if (first) {
     const char *snap_d = as_cstr_or_null(yyjson_obj_get(first, "date"));
     assert(snap_d && "cn_stock_static_data row 缺 date 字段");
-    assert(axes.dates[last_d] == snap_d &&
-           "cn_stock_static_data.MAX(date) 与 axes.last_d 错位 — "
-           "先刷 trading_days / static_data 到同一交易日再 build");
+    const std::string today = misc::today_yyyymmdd();
+    assert(today == snap_d && "cn_stock_static_data.MAX(date) 不是今天");
   }
 
-  size_t i, n;
+  std::size_t n_d_sz = static_cast<std::size_t>(n_d);
+  std::size_t i, n;
   yyjson_val *item;
   yyjson_arr_foreach(root, i, n, item) {
     int a = lookup_a(axes, item, "instrument");
-    if (a < 0)
-      continue;
-    std::size_t off = static_cast<std::size_t>(a) *
-                          static_cast<std::size_t>(n_d) +
-                      base_off;
+    if (a < 0) continue;
+    std::size_t off = static_cast<std::size_t>(a) * n_d_sz + base_off;
 
-    // status 2 字段 (suspended + st_status); limit_price 已改 CUTOFF=-1 normal,
-    // 不再 overlay (承认滞后, T 取 T-1 limit).
-    // st_status 4 态派生: in_delist=1 → 3 (优先, 退市整理期), 否则 st_status 原值
-    // (0/1/2). static_data 无 is_risk_warning 字段, 退市整理期靠 in_delist 识别.
     int st = as_int_or_default(yyjson_obj_get(item, "st_status"), 0);
     int dl = as_int_or_default(yyjson_obj_get(item, "in_delist"), 0);
     int sp = as_int_or_default(yyjson_obj_get(item, "suspended"), 0);
-    int8_t out_st = (dl != 0)            ? int8_t{3}
-                    : (st == 1)          ? int8_t{1}
-                    : (st == 2)          ? int8_t{2}
-                                         : int8_t{0};
+    std::int8_t out_st = (dl != 0) ? std::int8_t{3}
+                         : (st == 1) ? std::int8_t{1}
+                         : (st == 2) ? std::int8_t{2}
+                                     : std::int8_t{0};
     pool.status.st_status[off] = out_st;
-    pool.status.suspended[off] = (sp != 0) ? uint8_t{1} : uint8_t{0};
+    pool.status.suspended[off] = (sp != 0) ? std::uint8_t{1} : std::uint8_t{0};
   }
 
   yyjson_doc_free(doc);

@@ -46,8 +46,8 @@ qmt/
 │           ├── feature.cpp          # 【单点真理 feature】每 feature 一个 ts_xxx/cs_xxx compute fn + 末尾 FEATURES[] 表挂载
 │           │                        # F 枚举顺序 = FEATURES[] 索引 = 计算顺序 (后段读已写就的 T.ts_row(prior_f, a))
 │           ├── tensor.cpp           # Tensor 容器 (统一 [F][A][D] layout, ts_row 连续, gather/scatter cs_row)
-│           ├── pit.cpp              # 【单点真理 itf】每 itf 一个 namespace block (prealloc + aggregate + replay + post_sort) + 末尾 ITFS[] 表挂载
-│           ├── load.cpp             # Phase 1 通用 flow: 仅迭代 ITFS[] (prealloc → aggregate cache → replay → post_sort/post_ffill), 不出现 itf 名
+│           ├── pit.cpp              # 【单点真理 itf】每 itf 一个 namespace block (build + cache_layout [+ post_ffill]) + 末尾 ITFS[] 表挂载
+│           ├── load.cpp             # Phase 1 通用 flow: 仅迭代 ITFS[] (cache mmap hit / build miss → overlay → ffill), 不出现 itf 名
 │           ├── ts.cpp               # Phase 2 通用 flow: per-A 并行, 迭代 FEATURES[] 中 axis==TS 的 compute_ts 调; kernel 在 ts.hpp (state_machine_intervals 模板)
 │           ├── cs.cpp               # Phase 3 通用 flow: per-D 并行, 迭代 FEATURES[] 中 axis==CS 的 compute_cs 调; kernel (winsor_mad / z / pct_rank / factor_pipeline) 在 cs.hpp/cpp
 │           └── build.cpp            # 编排入口: 串 4 phase + misc::Timer 报段时
@@ -297,17 +297,17 @@ hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际�
 
 **Phase 切分动机**
 
-| phase  | 数据形态          | 任务粒度 | 并行性             | 主要工作                                            |
-| ------ | ----------------- | -------- | ------------------ | --------------------------------------------------- |
-| 0 axes | 标量级元数据      | 主线程   | 无                 | 一次性确定 D / A / per-A 静态                       |
-| 1 load | itf raw aggregate | itf ≈ 12 | cache + replay     | dayfile 聚合 cache + **PIT cutoff 落到 row D 索引** |
-| 2 时序 | 列式 (per-A 全 D) | a ≈ 5500 | embarrassingly (A) | 单调时间序列计算 + 状态机                           |
-| 3 截面 | 行式 (per-D 全 A) | d ≈ 2750 | embarrassingly (D) | 截面归一 + universe 选取                            |
+| phase  | 数据形态          | 任务粒度 | 并行性             | 主要工作                                                        |
+| ------ | ----------------- | -------- | ------------------ | --------------------------------------------------------------- |
+| 0 axes | 标量级元数据      | 主线程   | 无                 | 一次性确定 D / A / per-A 静态                                   |
+| 1 load | itf PIT pool      | itf ≈ 12 | mmap cache + build | hit: mmap pool.bin; miss: 并行 parse dayfile → 直写 pool + dump |
+| 2 时序 | 列式 (per-A 全 D) | a ≈ 5500 | embarrassingly (A) | 单调时间序列计算 + 状态机                                       |
+| 3 截面 | 行式 (per-D 全 A) | d ≈ 2750 | embarrassingly (D) | 截面归一 + universe 选取                                        |
 
 **设计原则** (业务密集化 + 性能选择, 改字段表/计算图不动外层):
-- **agnostic 外层 + 单点真理**: `pit.cpp` (itf 维, 每 itf 一组 `{prealloc, aggregate, replay, post_sort?, post_ffill?}` + `ITFS[]` 表挂载), `feature.cpp` (feature 维, 每 feature 一个 `ts_xxx` / `cs_xxx` + `FEATURES[]` 表挂载); 外层 flow (`load.cpp` / `ts.cpp` / `cs.cpp` / `build.cpp`) 仅通过函数指针表迭代调度, 不出现任何具体 itf 名 / feature 名.
-- **aggregate 与 PIT/张量解耦**: `aggregate/<itf>.bin` 只缓存 dayfile JSON 解析后的 raw rows, hash 仅依赖该 itf 的 dayfile `relpath + size + mtime`; 不依赖 `Axes` / `PitPool` / `Tensor` / feature/factor. 张量表和特征计算频繁改时, dayfile 不变即可复用 aggregate.
-- **PIT cutoff 在 Phase 1 replay 一次性消化**: `replay` 内 `row = v_idx - itf::CUTOFF` 直接定位行 D, 写完后 `pool[a, d]` 即 "T 当日合法可见数据". Phase 2/3 不再做任何时间偏移 — 杜绝下游漏算 cutoff 导致的未来数据泄漏.
+- **agnostic 外层 + 单点真理**: `pit.cpp` (itf 维, 每 itf 一组 `{build, cache_layout, post_ffill?}` + `ITFS[]` 表挂载), `feature.cpp` (feature 维, 每 feature 一个 `ts_xxx` / `cs_xxx` + `FEATURES[]` 表挂载); 外层 flow (`load.cpp` / `ts.cpp` / `cs.cpp` / `build.cpp`) 仅通过函数指针表迭代调度, 不出现任何具体 itf 名 / feature 名.
+- **pool cache 零反序列化**: `data/pool/<itf>.bin` 是 `PitPool` 字段的紧凑 POD blob 拼接 (header + section table + raw bytes). hit 路径 `mmap(MAP_PRIVATE)` → `PoolArr.map_view` 把 PitPool 字段指针指过去 ⇒ **零 copy / 零反序列化 / 零 hash lookup** (后续 overlay / ffill 的少量写入由 OS COW 落匿名页, 不脏文件). cache key = FNV(POOL_VERSION + itf name + dayfile `relpath/size/mtime` + `_meta/*.json size/mtime`); axes 由 meta 推出, 不单独 hash. dayfile / meta 不变 ⇒ cache 永远 hit.
+- **PIT cutoff 在 Phase 1 build 一次性消化**: `build` 内 `row = floor_date(day) - itf::CUTOFF` 直接定位行 D, 写完后 `pool[a, d]` 即 "T 当日合法可见数据". Phase 2/3 不再做任何时间偏移 — 杜绝下游漏算 cutoff 导致的未来数据泄漏.
 - **F 枚举顺序 = 计算顺序 = 隐式 topo sort**: 调度器 (`ts.cpp` / `cs.cpp`) 仅按 `FEATURES[]` 索引顺序串行调; 只要 "新 feature 加在其依赖之后", 后段直接读 `T.ts_row(prior_f, a)` 即可, 无需运行时 topo / 依赖锁.
 - **网格无锁 + 事件 per-A 锁**: 网格 itf 因 `(a, v_idx)` slot 唯一 → 完全无锁写; 事件 itf 多对一 emplace, 锁粒度精到 `vector<mutex>(n_a)` (非全局, 非 per-itf), 接近无争用.
 - **F 段独立 A*D layout (a-major / d-minor)**: Phase 2 的 `ts_row(f, a)` 是连续 span (cache friendly, 主路径); Phase 3 的 `gather/scatter_cs_row(f, d)` 是 stride-D copy (3 buffer 复用, 一次性付出).
@@ -328,39 +328,37 @@ Phase 0 axes  (主线程; axis.cpp + tensor.cpp)
                                              #   ts_row(f,a) = 连续 D span (Phase 2 主路径)
                                              #   gather/scatter_cs_row(f,d) = stride D copy (Phase 3 入口)
 
-Phase 1 PIT load  (per-itf aggregate cache; load.cpp 通用 flow + pit.cpp 单点 itf 表)
-  # 形态: dayfile JSON → aggregate/<itf>.bin raw rows → replay 到 PitPool.
-  # 关键: aggregate 只缓存原始行, 不依赖 Axes/PitPool/Tensor/feature; cutoff 在 replay 一次性落到 row 索引.
-  # 并发: replay 阶段网格 itf 写入完全无锁 (slot 唯一); 事件 itf 仅 per-A mutex 锁 emplace, 争用接近 0.
-  # 编码: miss 时走 yyjson_read 解析 dayfile; hit 时直接读二进制 raw rows.
-  #       itf.aggregate / itf.replay 在自身 namespace 决定字段映射, 外层 flow 不感知 schema.
+Phase 1 PIT load  (per-itf pool cache via mmap; load.cpp 通用 flow + pit.cpp 单点 itf 表)
+  # 形态: dayfile JSON → (miss 时) 直写 PitPool → 落 data/pool/<itf>.bin (POD blob 紧凑拼接).
+  #       hit 时直接 mmap(MAP_PRIVATE) → PoolArr.map_view 把 pool 字段指过去, 零反序列化.
+  # 关键: cache 只跟 dayfile + _meta 文件绑定 (FNV: relpath+size+mtime), 不依赖 axes/feature.
+  #       cutoff 在 build 一次性落到 row 索引; overlay / ffill 永远跑最新代码 (mmap COW).
+  # 并发: build 时网格 itf 写入完全无锁 ((a, row) slot 唯一); 事件 itf 仅 per-A mutex 锁 emplace.
+  #       hit 路径单线程亚毫秒 (只建 page table); 业务首次访问由 OS readahead 并发拉页.
 
   for itf in pit.cpp::ITFS[]:                # 仅迭代 ITFS[] 表, 不出现具体 itf 名
-    itf.prealloc(axes, pool)                 # 网格: 字段 vector A*D NaN/0; 事件: EventStore[A] 空链
-
-  for itf in ITFS[]:
     files ← enumerate data/YYYY/MM/DD/<itf.file_name>.json
-    hash  ← H(relpath, size, mtime) over files
-    rows  ← read aggregate/<itf.file_name>.bin if hash hit
-             else parse json dayfiles via itf.aggregate(arr, day, rows), then persist aggregate
-    itf.replay(rows, axes, pool, mu_or_null)
-                                             # row = axes.floor_date(row.day) - itf::CUTOFF
-                                             #   (CUTOFF=0 → row=v_idx; CUTOFF=-1 → row=v_idx+1; row≥n_d 越界 skip)
-                                             # 网格: mu=nullptr; pool.<itf>.<field>[a*n_d + row] 无锁写
-                                             # 事件: mu[a] 锁后 pool.<itf>[a].emplace_back(Ev{v=row,…})
+    key   ← FNV(POOL_VERSION, itf.file_name, [files: relpath+size+mtime], [_meta files: size+mtime])
 
-  for itf in ITFS[] where itf.post_sort:     # 事件 itf 末段 sort by v 升序 — 给 Phase 2 单调指针扫
-    itf.post_sort(pool)
+    if mmap(data/pool/<itf>.bin) header.key == key:
+        itf.cache_layout(pool, visitor=Map)  # 每段 PoolArr.data_ ← mmap_base + section.offset
+        # hit: 总耗时 μs 级 — 不读字节, 不分配, 不 hash lookup
+    else:
+        itf.build(axes, files, pool)         # 并行 parse dayfile JSON → 直写 pool 字段:
+                                             #   row = axes.floor_date(day) - itf::CUTOFF
+                                             #     (CUTOFF=0 → row=v_idx; CUTOFF=-1 → row=v_idx+1; 越界 skip)
+                                             #   网格: pool.<itf>.<field>[a*n_d + row] 无锁写
+                                             #   事件: mu[a] 锁后 chain.push(Ev{v=row,…}); 全 itf 终走
+                                             #         sort_chains (stable by v) + finalize (压平到 arena)
+        dump_pool_cache(itf, key, pool)      # cache_layout(visitor=Write) 拼 header + table + blob → atomic_write
 
   apply_meta_overlays(axes, pool)            # hybrid 伪装收尾 (必须在 post_ffill 之前):
                                              #   读 data/_meta/cn_stock_static_data.json (真盘前 09:00 快照)
-                                             #   把 suspended / st_status 2 字段填充到
-                                             #   row = axes.n_d()-1 (= last_d, 实盘当日).
-                                             #   仅写 row=last_d 一行, 历史天不动 ⇒ "填充而非覆盖".
-                                             #   _meta 不存在 ⇒ silent noop (历史回测兜底).
+                                             #   把 suspended / st_status 2 字段填充到 row=last_d (实盘当日).
+                                             #   mmap COW: 只该页被 dirty, 不脏 cache 文件.
 
   for itf in ITFS[] where itf.post_ffill:    # 网格 itf per-A forward fill (停牌期间继承前值)
-    itf.post_ffill(axes, pool)
+    itf.post_ffill(axes, pool)               # 同样走 mmap COW, ffill 逻辑改不用 bump POOL_VERSION
 
 Phase 2 时序  (per-A 并行; ts.cpp 通用 flow + feature.cpp 单点 feature 表)
   # 形态: 列式 (per-A 全 D), A 维 embarrassingly parallel; D 内强 causal (滚动/状态机).
@@ -448,7 +446,7 @@ Phase 3 截面  (per-D 并行; cs.cpp 通用 flow + feature.cpp 单点 feature �
 
 并发模型规格 (动机/不变量已在各 Phase 头部展开, 此处仅列数据 + 同步点)
 - Phase 0: 主线程; 全量 in-memory; 跑一次.
-- Phase 1: per-itf aggregate cache; cache miss 才扫 dayfile + parse JSON, cache hit 直接 replay raw rows; 网格 `mu=nullptr`, 事件 `vector<mutex>(n_a)`; 末段 `post_sort` / `post_ffill` 单线程串行.
+- Phase 1: per-itf pool cache (mmap MAP_PRIVATE); hit ≈ μs 级零 copy; miss 走并行 parse dayfile → 直写 pool → dump. 网格无锁, 事件 `vector<mutex>(n_a)`; 末段 `apply_meta_overlays` + `post_ffill` 单线程串行 (mmap COW 触发, 不脏文件).
 - Phase 2: 任务数 ≈ n_a (5500); 每 worker 独占 `T.ts_row(*, a)`.
 - Phase 3: 任务数 ≈ n_d (2750); 每 worker 独占 `cs_row` 段 + thread-local 3 buffer (length=n_a).
 - 同步点: 仅 phase 间硬屏障 (`build.cpp` 顺序 `join` + `misc::Timer` 报段时), phase 内无屏障.
@@ -457,10 +455,10 @@ Phase 3 截面  (per-D 并行; cs.cpp 通用 flow + feature.cpp 单点 feature �
 
 新增/修改/删除一个 itf:
 1. `cpp/include/api/{bigquant,tushare}/spec.hpp`: 在 `SPECS[]` 末尾追加 spec (BigQuant 的 `TableSpec{name, visible_date, FetchKind, FetchFreq, Category, pk}` / Tushare 的 `InterfaceSpec`).
-2. `cpp/include/feature/pit.hpp`: 加/改 typed `Grid<…>` / `<…>Ev` struct, 在 `PitPool` 加成员.
-3. `cpp/src/feature/pit.cpp`: 加 `namespace itf_<name> { prealloc, aggregate, replay, [post_sort, post_ffill] }` 一组 dense block; `aggregate` 从 `yyjson_val arr` 读 raw rows, `replay` 基于当前 `Axes`/cutoff 写 `PitPool`.
-4. `cpp/src/feature/pit.cpp`: `ITFS[]` 末尾追加一行.
-   外层 `load.cpp` / `build.cpp` 不动.
+2. `cpp/include/feature/pit.hpp`: 加/改 typed `Grid<…>` / `<…>Ev` struct (字段必须 POD: `int32_t` 日期 / `uint8_t` enum / float / int), 在 `PitPool` 加 `PoolArr<T>` / `EventStore<Ev>` 成员.
+3. `cpp/src/feature/pit.cpp`: 加 `namespace itf_<name> { build, cache_layout, [post_ffill] }` 一组 dense block; `build` 端到端从 dayfile JSON 直接写入 pool (内部 prealloc → 并行 parse → emplace → sort → finalize 一路串通); `cache_layout(pool, visitor)` 按固定顺序对每个 PoolArr/EventStore 调 `v.section(...)`.
+4. `cpp/src/feature/pit.cpp`: `ITFS[]` 末尾追加一行 (`{file_name, &build, &cache_layout, post_ffill_or_nullptr}`).
+   外层 `load.cpp` / `build.cpp` 不动. 改 PitPool 字段 / Ev struct / cache_layout 顺序时, `load.cpp::POOL_VERSION` +1.
 
 新增/修改/删除一个 feature:
 1. `cpp/include/feature/feature.hpp`: 在 `F` 枚举对应位置加一行 (位置 = 计算顺序; 后于其依赖).

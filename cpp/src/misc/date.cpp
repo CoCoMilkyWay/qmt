@@ -16,6 +16,24 @@ std::chrono::sys_days parse_yyyymmdd(std::string_view s) {
   return sys_days{year{y} / m / d};
 }
 
+std::chrono::sys_days parse_yyyymmdd_int(std::int32_t yyyymmdd) {
+  assert(yyyymmdd > 0);
+  int y = yyyymmdd / 10000;
+  int m = (yyyymmdd / 100) % 100;
+  int d = yyyymmdd % 100;
+  return sys_days{year{y} / m / d};
+}
+
+std::int32_t to_yyyymmdd_int(std::string_view s) {
+  if (s.size() != 8) return 0;
+  std::int32_t v = 0;
+  for (char c : s) {
+    if (c < '0' || c > '9') return 0;
+    v = v * 10 + (c - '0');
+  }
+  return v;
+}
+
 std::string fmt_yyyymmdd(std::chrono::sys_days d) {
   year_month_day ymd{d};
   char buf[16];

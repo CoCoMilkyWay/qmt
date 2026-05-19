@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,6 +15,14 @@ std::string today_yyyymmdd();
 
 // "YYYYMMDD" -> sys_days; size != 8 直接 assert
 std::chrono::sys_days parse_yyyymmdd(std::string_view s);
+
+// YYYYMMDD int32 形式 (PitPool event 内部 ev.report_date / ev.ex_date / ...).
+//   yyyymmdd <= 0 视为缺失 → 调用方应在外面先判空跳过, 不传入此函数.
+std::chrono::sys_days parse_yyyymmdd_int(std::int32_t yyyymmdd);
+
+// "YYYYMMDD" string ↔ int32 互转 (event aggregate 时单点入口).
+//   空串 / 长度非 8 / 含非数字 → 返回 0 (= "未提供"; 业务侧用 ==0 跳过).
+std::int32_t to_yyyymmdd_int(std::string_view s);
 
 // sys_days -> "YYYYMMDD"
 std::string fmt_yyyymmdd(std::chrono::sys_days d);

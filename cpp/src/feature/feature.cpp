@@ -15,6 +15,7 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <map>
 #include <span>
@@ -126,7 +127,7 @@ inline void fill_after_delist(std::span<float>, int, const Axes &,
 //   注: r.v 已在 replay 时应用 cutoff = 首次可见 row D.
 template <class FinancialEv>
 int find_forecast_off_d(const ForecastEv &fe,
-                        const std::vector<FinancialEv> &financials,
+                        std::span<const FinancialEv> financials,
                         const Axes &axes) {
   int n_d = axes.n_d();
   int financial_d = -1;
@@ -169,12 +170,12 @@ namespace {
 // 模板: 网格 float 字段 → ts_row; NaN 透传保留数据问题.
 //   fill_pre_list=true: 上市前哨兵置 0 (close/mcap/share 等估值类);
 //   fill_pre_list=false: 全期保留 NaN (margin balance 等"不存在=NaN").
-template <class GetField>
+//   src 用 PoolArr<float> (与 PitPool 字段一致, 兼容 mmap view 与 owned 两态).
 inline void grid_copy(int a, const Axes &axes, const StockMeta &meta, Tensor &T,
-                      F dst, GetField get_field, bool fill_pre_list = true) {
+                      F dst, const PoolArr<float> &src,
+                      bool fill_pre_list = true) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
-  const std::vector<float> &src = get_field();
   auto out = T.ts_row(dst, a);
   for (int d = 0; d < n_d; ++d) {
     out[d] = src[base + static_cast<std::size_t>(d)];
@@ -185,12 +186,10 @@ inline void grid_copy(int a, const Axes &axes, const StockMeta &meta, Tensor &T,
 }
 
 // 模板: 网格 uint8_t bool 字段 → ts_row (1.0 / 0.0); 不调 fill_* (bool 0 = "无", 与 NaN 不同).
-template <class GetField>
 inline void grid_copy_bool(int a, const Axes &axes, Tensor &T, F dst,
-                           GetField get_field) {
+                           const PoolArr<std::uint8_t> &src) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
-  const std::vector<uint8_t> &src = get_field();
   auto out = T.ts_row(dst, a);
   for (int d = 0; d < n_d; ++d) {
     out[d] = src[base + static_cast<std::size_t>(d)] ? 1.0f : 0.0f;
@@ -205,8 +204,7 @@ inline void grid_copy_bool(int a, const Axes &axes, Tensor &T, F dst,
 //   同口径. daily_return 直接基于该 close 链式, 除权日含分红/送股的真实跳跃.
 void ts_close_raw(int a, const Axes &axes, const PitPool &pool,
                   const StockMeta &meta, Tensor &T) {
-  grid_copy(a, axes, meta, T, F::close_raw,
-            [&]() -> const std::vector<float> & { return pool.bar1d.close; });
+  grid_copy(a, axes, meta, T, F::close_raw, pool.bar1d.close);
 }
 
 // mcap_raw = close_raw[d] × shares.total_shares[a, d]  ([元])
@@ -250,8 +248,7 @@ void ts_fmcap_raw(int a, const Axes &axes, const PitPool &pool,
 // share_raw ← cn_stock_shares.total_shares ([股]; 直读, 无单位换算)
 void ts_share_raw(int a, const Axes &axes, const PitPool &pool,
                   const StockMeta &meta, Tensor &T) {
-  grid_copy(a, axes, meta, T, F::share_raw,
-            [&]() -> const std::vector<float> & { return pool.shares.total_shares; });
+  grid_copy(a, axes, meta, T, F::share_raw, pool.shares.total_shares);
 }
 
 // ----------------------------------------------------------------------------
@@ -300,7 +297,7 @@ inline void scan_latest_balance(int a, const Axes &axes, const PitPool &pool,
   int n_d = axes.n_d();
   auto out = T.ts_row(dst, a);
   const auto &events = pool.financial_balance[a];
-  std::map<std::string, FinancialBalanceEv> latest_by_rd;
+  std::map<std::int32_t, FinancialBalanceEv> latest_by_rd;
   std::size_t ep = 0;
   for (int d = 0; d < n_d; ++d) {
     while (ep < events.size() && events[ep].v <= d) {
@@ -372,11 +369,11 @@ void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
   std::vector<Item> items;
   items.reserve(divs.size());
   for (const auto &e : divs) {
-    if (e.ex_date.size() != 8)
+    if (e.ex_date <= 0)
       continue;
     if (!is_finite(e.cash_after_tax) || e.cash_after_tax <= 0.0f)
       continue;
-    items.push_back({misc::parse_yyyymmdd(e.ex_date), e.cash_after_tax});
+    items.push_back({misc::parse_yyyymmdd_int(e.ex_date), e.cash_after_tax});
   }
   std::sort(items.begin(), items.end(),
             [](const Item &x, const Item &y) { return x.ex < y.ex; });
@@ -418,7 +415,7 @@ void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
 //   主动 -1 完成此对齐. d=0 处无前一交易日 → NaN.
 namespace {
 inline void ts_lim_shift1(int a, const Axes &axes, const StockMeta &meta,
-                          Tensor &T, F dst, const std::vector<float> &src) {
+                          Tensor &T, F dst, const PoolArr<float> &src) {
   int n_d = axes.n_d();
   std::size_t base = static_cast<std::size_t>(a) * static_cast<std::size_t>(n_d);
   auto out = T.ts_row(dst, a);
@@ -445,29 +442,25 @@ void ts_dn_lim(int a, const Axes &axes, const PitPool &pool,
 // susp ← cn_stock_status.suspended (CUTOFF=0, hybrid 伪装假装盘前, last_d 由 static_data 填充)
 void ts_susp(int a, const Axes &axes, const PitPool &pool, const StockMeta &,
              Tensor &T) {
-  grid_copy_bool(a, axes, T, F::susp,
-                 [&]() -> const std::vector<uint8_t> & { return pool.status.suspended; });
+  grid_copy_bool(a, axes, T, F::susp, pool.status.suspended);
 }
 
 // is_margin ← margin_detail (D, A) 存在性 (CUTOFF=0)
 void ts_is_margin(int a, const Axes &axes, const PitPool &pool,
                   const StockMeta &, Tensor &T) {
-  grid_copy_bool(a, axes, T, F::is_margin,
-                 [&]() -> const std::vector<uint8_t> & { return pool.margin_detail.is_margin; });
+  grid_copy_bool(a, axes, T, F::is_margin, pool.margin_detail.is_margin);
 }
 
 void ts_mr_bal_raw(int a, const Axes &axes, const PitPool &pool,
                    const StockMeta &meta, Tensor &T) {
   grid_copy(a, axes, meta, T, F::mr_bal_raw,
-            [&]() -> const std::vector<float> & { return pool.margin_detail.financing_balance; },
-            false);
+            pool.margin_detail.financing_balance, false);
 }
 
 void ts_ms_bal_raw(int a, const Axes &axes, const PitPool &pool,
                    const StockMeta &meta, Tensor &T) {
   grid_copy(a, axes, meta, T, F::ms_bal_raw,
-            [&]() -> const std::vector<float> & { return pool.margin_detail.securities_lending_balance; },
-            false);
+            pool.margin_detail.securities_lending_balance, false);
 }
 
 // industry_l1: SW2021 一级行业 ID per (D, A), 0=未知, 1..31 见 industry.hpp.
@@ -524,11 +517,11 @@ void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
     float val;
     int last_v;
   };
-  std::vector<std::pair<std::string, Cell>> annuals;
+  std::vector<std::pair<std::int32_t, Cell>> annuals;
   std::size_t ev_ptr = 0;
   const auto &events = pool.financial_income_annual[a];
 
-  auto annuals_find = [&](const std::string &k) -> int {
+  auto annuals_find = [&](std::int32_t k) -> int {
     for (std::size_t i = 0; i < annuals.size(); ++i)
       if (annuals[i].first == k)
         return static_cast<int>(i);
@@ -616,7 +609,7 @@ inline void scan_latest_ttm_and_balance(int a, const Axes &axes,
   auto out = T.ts_row(dst, a);
   const auto &ttms = pool.financial_ttm[a];
   const auto &bals = pool.financial_balance[a];
-  std::map<std::string, FinancialBalanceEv> latest_by_rd;
+  std::map<std::int32_t, FinancialBalanceEv> latest_by_rd;
   std::size_t tp = 0, bp = 0;
   int last_ttm = -1;
   for (int d = 0; d < n_d; ++d) {
@@ -801,7 +794,8 @@ void ts_profit_st(int a, const Axes &axes, const PitPool &pool,
   for (const auto &e : pool.forecast[a]) {
     if (month_of(e.end_date) != 12)
       continue;
-    if (e.type != "首亏" && e.type != "续亏")
+    if (e.type != ForecastType::FirstLoss &&
+        e.type != ForecastType::ContinueLoss)
       continue;
     if (!is_finite(e.last_parent_net) || e.last_parent_net >= 0.0f)
       continue;
@@ -829,7 +823,8 @@ void ts_revenue_st(int a, const Axes &axes, const PitPool &pool,
   for (const auto &e : pool.forecast[a]) {
     if (month_of(e.end_date) != 12)
       continue;
-    if (e.type != "首亏" && e.type != "续亏")
+    if (e.type != ForecastType::FirstLoss &&
+        e.type != ForecastType::ContinueLoss)
       continue;
     int end_y = year_of(e.end_date);
     if (end_y < 2021)

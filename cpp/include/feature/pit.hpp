@@ -1,318 +1,436 @@
 #pragma once
 
-#include "package/yyjson/yyjson.h"
+#include "misc/mmap.hpp"
 
+#include <algorithm>
+#include <cassert>
+#include <cstddef>
 #include <cstdint>
-#include <mutex>
+#include <cstring>
+#include <filesystem>
 #include <span>
 #include <string>
-#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace feature {
 
-struct Axes; // fwd decl
+struct Axes;     // fwd decl
+struct PitPool;  // fwd decl
 
 // ============================================================================
-// PIT 中间结构. Phase 1 写入, Phase 2 只读.
+// PIT 中间结构 (Phase 1 写, Phase 2 只读).
 //
 // 划分:
-//   网格 itf (1 record / 交易日 / asset): dense 存. 字段独立向量, length =
-//                                          n_a()*n_d() (a-major, d-minor).
-//                                          缺席用 NaN (float) / 0 (uint8/int8);
-//                                          与 Tensor::ts_row 同 layout, Phase 2
-//                                          可零 copy 取 span.
-//   事件 itf (per A 时间线):              EventStore<Ev> = vector<vector<Ev>>,
-//                                          [a] 外, 按 v 升序的事件链.
-//                                          v = visible_d_idx 经 CUTOFF 调整后
-//                                          的 row D 索引.
+//   网格 itf (1 record / 交易日 / asset): dense 存. 每字段独立 PoolArr<T>,
+//                                          长度 = n_a()*n_d() (a-major, d-minor);
+//                                          缺席 = NaN (float) / 0 (uint8/int8);
+//                                          与 Tensor::ts_row 同 layout → Phase 2
+//                                          零 copy 取 span.
+//   事件 itf (per A 时间线):              EventStore<Ev> = (offsets [n_a+1],
+//                                          events arena). 同 a 内按 v 升序;
+//                                          v = visible_d_idx 经 CUTOFF 调整后的 row D.
 //
-// PitPool 是 typed struct (而非泛型 map<name, anything>) — 编译期类型安全,
-// itf.replay 直接写 pool.<itf>.<field>; 增减 itf 只需改 PitPool 与 itf 模块的
-// dense block (pit.cpp 内).
+// 全部字段都是 POD ⇒ cache 文件 (data/pool/<itf>.bin) = 字段 raw blob 的紧凑拼接.
+// hit 路径 mmap(MAP_PRIVATE) → PoolArr.map_view 把 data 指针指过去 → 零 copy 零
+// 反序列化; 后续 overlay / ffill 写 PoolArr 由 OS 自动 COW (不脏文件).
 //
 // 数据源 (BigQuant + Tushare 新基建):
-//   全部 BigQuant 表实际入库时间都是盘后 17:00 之后, 按 PIT 严格 = -1; 项目按业务可推出性
-//   分两类模式 (详见 README §cutoff 表):
+//   全部 BigQuant 表入库时间盘后 17:00 后, PIT 严格 = -1. 项目按业务可推出性分两类
+//   模式 (详见 README §cutoff):
 //     normal (CUTOFF=-1, 承认滞后): row D=T 取 T-1 day file 数据.
-//     hybrid (CUTOFF=0,  伪装盘前): 历史 day file 按 row=v_idx 消化 (假装盘前可见);
-//                                   最后一天 (= 实盘当日) day file 还没入库时, 由
-//                                   apply_meta_overlays 用 cn_stock_static_data
-//                                   (真盘前 09:00) 填充 row=last_d.
+//     hybrid (CUTOFF=0,  伪装盘前): 历史 day file 按 row=v_idx (假装盘前可见);
+//                                   最后一天 (= 实盘当日) 由 apply_meta_overlays
+//                                   用 cn_stock_static_data (真盘前 09:00) 填 row=last_d.
 //
 //   网格:
-//     bar1d                 ← cn_stock_real_bar1d    CUTOFF=-1 (normal)
-//     shares                ← cn_stock_shares        CUTOFF=-1 (normal)
-//     limit_price           ← cn_stock_limit_price   CUTOFF=-1 (normal, 不 overlay)
+//     bar1d                 ← cn_stock_real_bar1d    CUTOFF=-1
+//     shares                ← cn_stock_shares        CUTOFF=-1
+//     limit_price           ← cn_stock_limit_price   CUTOFF=-1
 //     status                ← cn_stock_status        CUTOFF=0  (hybrid, overlay)
 //     margin_detail         ← cn_stock_margin_trading_detail  CUTOFF=0
-//                              (真盘前 10:00 入库, normal offset=0 不滞后)
-//                              (含派生 is_margin = 当日 (D,A) 是否在两融名单)
-//   meta overlay (apply_meta_overlays, post_sort 之后 / post_ffill 之前):
-//     cn_stock_static_data (Snapshot, 真盘前 09:00, _meta 单文件) → 填充 row=last_d 的
-//       status.{suspended, st_status} 两字段. 仅触及 row=last_d 一行,
-//       历史天 (T < last_d) 完全不动. (limit_price 已退回 normal -1, 不再 overlay.)
+//   meta overlay (apply_meta_overlays):
+//     cn_stock_static_data (_meta) → status.{suspended, st_status} row=last_d
 //   事件:
-//     industry_component    ← cn_stock_industry_component (sw2021)  CUTOFF=-1 (normal, 月初快照)
-//     industry_change       ← cn_stock_industry_change (sw2021 L1)  CUTOFF=-1 (normal)
-//     dividend              ← cn_stock_dividend                     CUTOFF=-1 (normal)
-//     financial_ttm         ← cn_stock_financial_ttm_shift (shift=0)CUTOFF=-1 (normal)
-//     financial_balance     ← cn_stock_financial_balance_general_pitCUTOFF=-1 (normal)
-//     financial_income_annual ← cn_stock_financial_income_general_pit (fs_quarter_index=4)
-//                                                                   CUTOFF=-1 (normal)
-//     forecast              ← Tushare forecast                      CUTOFF=-1 (normal)
+//     industry_component / industry_change / dividend / financial_ttm /
+//     financial_balance / financial_income_annual / forecast (Tushare)
 // ============================================================================
+
+// ---------------------------------------------------------------------------
+// PoolArr<T>: 双模 POD 视图.
+//   - build 路径: allocate(n) → owned vector 持有 n 个 T (= prealloc), 业务可写;
+//                 finalize_owned_to_shrink() 可选 (这里不需要).
+//   - hit 路径:   map_view(ptr, n) → 指向 mmap 区, owned 释放.
+//   接口对外等价于 std::vector<T> 的只读+下标写 (data/size/[]/begin/end).
+//
+//   注: 对外暴露 data_ / size_ 是为了让 CacheVisitor + cache_layout 通用
+//   (template 化, 零开销).
+// ---------------------------------------------------------------------------
+template <class T>
+class PoolArr {
+public:
+  PoolArr() = default;
+  PoolArr(const PoolArr &) = delete;
+  PoolArr &operator=(const PoolArr &) = delete;
+  PoolArr(PoolArr &&) = default;
+  PoolArr &operator=(PoolArr &&) = default;
+
+  T *data() { return data_; }
+  const T *data() const { return data_; }
+  std::size_t size() const { return size_; }
+  bool empty() const { return size_ == 0; }
+
+  T &operator[](std::size_t i) { return data_[i]; }
+  const T &operator[](std::size_t i) const { return data_[i]; }
+  T *begin() { return data_; }
+  T *end() { return data_ + size_; }
+  const T *begin() const { return data_; }
+  const T *end() const { return data_ + size_; }
+
+  // build / miss 路径: 自己分配 n 个 T 并 value-initialize (POD 类型 → 0/NaN
+  // 由调用方 fill 决定).
+  void allocate(std::size_t n) {
+    owned_.assign(n, T{});
+    data_ = owned_.data();
+    size_ = n;
+  }
+
+  // hit 路径: 指向 mmap 区 (data 写入由 OS COW 处理). 不接管所有权.
+  void map_view(T *p, std::size_t n) {
+    owned_.clear();
+    owned_.shrink_to_fit();
+    data_ = p;
+    size_ = n;
+  }
+
+private:
+  T *data_ = nullptr;
+  std::size_t size_ = 0;
+  std::vector<T> owned_; // 仅 build 路径填充; map_view 后空
+};
+
+// ---------------------------------------------------------------------------
+// EventStore<Ev>: per-A 事件链, 物理布局 (offsets[n_a+1], events arena).
+//   build 时: resize_chains(n_a) → 各线程 push_chain(a, ev) (per-a 互斥) →
+//             sort_chains() (per-a stable_sort by v) → finalize() 压平.
+//   hit 时:   cache_layout 直接 visit offsets / events 两个 PoolArr.
+//   读时:     pool.<itf>[a] 返回 std::span<Ev> (range-for / size / [] 全支持).
+// ---------------------------------------------------------------------------
+template <class Ev>
+class EventStore {
+public:
+  EventStore() = default;
+  EventStore(const EventStore &) = delete;
+  EventStore &operator=(const EventStore &) = delete;
+  EventStore(EventStore &&) = default;
+  EventStore &operator=(EventStore &&) = default;
+
+  // ---- build (miss) 路径 ----
+  void resize_chains(std::size_t n_a) {
+    chains_.assign(n_a, {});
+  }
+  void push_chain(int a, const Ev &e) {
+    chains_[static_cast<std::size_t>(a)].push_back(e);
+  }
+  void sort_chains() {
+    // stable_sort 保 emplace 顺序: 同 v (visible 经 cutoff 落同 row) 时不引入
+    // 算法层新不确定 (emplace 顺序本身受 phase 1 调度影响, 彻底 deterministic
+    // 需在 Ev 加 tie-breaker, 不做).
+    for (auto &c : chains_) {
+      std::stable_sort(c.begin(), c.end(),
+                       [](const Ev &x, const Ev &y) { return x.v < y.v; });
+    }
+  }
+  // 压平 chains_ 到 owned offsets/events arena. 调用后 chains_ 释放.
+  void finalize() {
+    std::size_t n_a = chains_.size();
+    offsets_.allocate(n_a + 1);
+    std::size_t total = 0;
+    offsets_[0] = 0;
+    for (std::size_t a = 0; a < n_a; ++a) {
+      total += chains_[a].size();
+      offsets_[a + 1] = static_cast<std::uint32_t>(total);
+    }
+    events_.allocate(total);
+    for (std::size_t a = 0; a < n_a; ++a) {
+      std::memcpy(events_.data() + offsets_[a], chains_[a].data(),
+                  chains_[a].size() * sizeof(Ev));
+    }
+    std::vector<std::vector<Ev>>().swap(chains_);
+  }
+
+  // ---- 通用 ----
+  PoolArr<std::uint32_t> &offsets() { return offsets_; }
+  PoolArr<Ev> &events() { return events_; }
+
+  std::size_t n_a() const { return offsets_.size() ? offsets_.size() - 1 : 0; }
+
+  std::span<const Ev> operator[](int a) const {
+    std::uint32_t lo = offsets_[a];
+    std::uint32_t hi = offsets_[a + 1];
+    return std::span<const Ev>(events_.data() + lo, hi - lo);
+  }
+  std::span<Ev> operator[](int a) {
+    std::uint32_t lo = offsets_[a];
+    std::uint32_t hi = offsets_[a + 1];
+    return std::span<Ev>(events_.data() + lo, hi - lo);
+  }
+
+private:
+  PoolArr<std::uint32_t> offsets_;
+  PoolArr<Ev> events_;
+  std::vector<std::vector<Ev>> chains_; // 仅 build 路径用, finalize 后清空
+};
 
 // ========== 网格 ==========
 
 // cn_stock_real_bar1d (CUTOFF=-1): 不复权 OHLCV + 后复权乘子.
-//   close            不复权 [元/股] (实际市场成交价, 除权日自然跳跃)
-//   adjust_factor    BigQuant 后复权累积乘子 (close_hfq[d] = close[d] × adjust_factor[d]):
-//                      - 平日 af 不变, close 变化 = close×af 变化 = 真实日收益
-//                      - 除权日 close 跳 (含分红/送股), af 反向跳, close×af 平滑
-//                      - 起点附近 af ≈ 累积初值 (e.g. 平安银行 2024-06 ≈ 116)
-//   PitPool 暴露 close + adjust_factor; tensor 顶层只暴露 close_raw (= close 真价).
-//   estimation 类 (mcap_raw / limit_up / low_p / cs_close / ...) 全部用 close_raw 真值 —
-//   close × shares = 真市值; close vs limit_price 同口径才能判封板; < 1 元低价股看真实股价.
-//   连续性类 (daily_return; 未来 momentum / vol / N 日收益) 内部叠 adjust_factor 算
-//   hfq 链式 (= 含分红再投入的真持有收益, 除权日平滑无负跳; 见 feature.cpp::ts_daily_return).
-//   adjust_factor 是 PitPool 内部细节, 不入 tensor 顶层契约 (按"额外复权/偏移
-//   由特征自己内部处理, 不暴露顶层"原则).
+//   close            不复权 [元/股] (实际市场成交价, 除权日跳跃)
+//   adjust_factor    BigQuant 后复权累积乘子 (close_hfq[d] = close[d] × adjust_factor[d])
+//   PitPool 暴露 close + adjust_factor; tensor 顶层仅 close_raw (= close 真价).
+//   连续性 feature (daily_return) 内部叠 adjust_factor 算 hfq 链式 (= 含分红再投入).
 struct GridBar1d {
-  std::vector<float> close;
-  std::vector<float> adjust_factor;
+  PoolArr<float> close;
+  PoolArr<float> adjust_factor;
 };
 
 // cn_stock_shares (CUTOFF=-1): 各类股本 [股].
-//   张量层用 total_shares (mcap_raw) + a_float_shares (fmcap_raw, BigQuant 实测口径
-//     `float_market_cap` = close × a_float_shares; total_float 含 H 股, 002594/BYD 误差排查得).
-//   total_float / free_float 暂不入张量, 后续如需可加.
 struct GridShares {
-  std::vector<float> total_shares;
-  std::vector<float> a_float_shares;
+  PoolArr<float> total_shares;
+  PoolArr<float> a_float_shares;
 };
 
 // cn_stock_limit_price (CUTOFF=-1, normal): 当日适用涨跌停价 [元/股].
-//   实际 BigQuant 入库 17:00 (盘后) → 承认滞后, row D=T 取 T-1 day file 的 limit.
-//   ST 翻转日略不准 (T-1 是停牌日, T-1 limit 是旧 pct), 接受不 overlay.
+//   实际 BigQuant 入库 17:00 → 承认滞后, row D=T 取 T-1 day file 的 limit.
 struct GridLimitPrice {
-  std::vector<float> upper_limit;
-  std::vector<float> lower_limit;
+  PoolArr<float> upper_limit;
+  PoolArr<float> lower_limit;
 };
 
-// cn_stock_status (CUTOFF=0, hybrid 伪装): 两个字段:
-//   st_status         int8 4 态 (派生): 0=正常 / 1=ST / 2=*ST / 3=退市整理期
-//                     replay 时由原 BigQuant 字段派生:
-//                       cn_stock_status (日频): st_status==1 → 1; ==2 → 2;
-//                         (st==0 ∧ is_risk_warning==1) → 3; else → 0
-//                       cn_stock_static_data (overlay): in_delist==1 → 3 (优先);
-//                         否则 st_status 原值直落 (0/1/2)
-//                     退市整理期: 交易所摘掉 *ST 标签 → 原 st_status 翻 0, 但
-//                     is_risk_warning 仍 1 / static_data.in_delist=1; 用 4 态
-//                     表达保留退市整理识别力, 同时区分 ST vs *ST. 下游 cs_tradable
-//                     走 `> 0.5` OR 排除, 任一非零档都触发 filter.
-//   suspended         uint8: 0/1                  → susp 直读 (1=当日停牌)
-//   (price_limit_status / exdr 暂未入张量)
-//   实际 BigQuant 入库 17:00 (盘后), 但 ST / 停牌当日开盘前即生效 → 业务上等同
-//   "盘前可知". 历史 day file 按 CUTOFF=0 假装盘前; 最后一天 (= 实盘当日, day file
-//   还未入库) 由 apply_meta_overlays 用 cn_stock_static_data 真盘前 09:00 填充
-//   row=last_d.
+// cn_stock_status (CUTOFF=0, hybrid 伪装):
+//   st_status         int8 4 态: 0=正常 / 1=ST / 2=*ST / 3=退市整理期
+//   suspended         uint8: 0/1 (1=当日停牌)
+//   实际盘后入库, 业务上 ST/停牌当日盘前即生效 → 假装盘前; 最后一天由 overlay
+//   用 cn_stock_static_data (真盘前 09:00) 填 row=last_d.
 struct GridStatus {
-  std::vector<int8_t> st_status;
-  std::vector<uint8_t> suspended;
+  PoolArr<std::int8_t> st_status;
+  PoolArr<std::uint8_t> suspended;
 };
 
 // cn_stock_margin_trading_detail (CUTOFF=0): 当日两融明细.
 //   is_margin                  uint8: 派生 — (D, A) 当日是否存在记录 (1=两融标的)
 //   financing_balance          融资余额 [元]
 //   securities_lending_balance 融券余额 [元]
-//   注: rzrqye = financing_balance + securities_lending_balance (不入张量, 下游需要时自加)
 struct GridMarginDetail {
-  std::vector<uint8_t> is_margin;
-  std::vector<float> financing_balance;
-  std::vector<float> securities_lending_balance;
+  PoolArr<std::uint8_t> is_margin;
+  PoolArr<float> financing_balance;
+  PoolArr<float> securities_lending_balance;
 };
 
-// ========== 事件 ==========
+// ========== 事件 (POD only) ==========
 
-// cn_stock_industry_component WHERE industry='sw2021' (CUTOFF=-1, normal, MonthFirst):
-//   每月初一份 sw2021 一级行业归属快照. 同 (D, instrument) 单条.
-//   l1_id = sw2021_l1_name_to_id(industry_level1_name); 不在表内 → 0.
-//   月初首日 industry_l1 自然延续上月 base (ts_industry_l1 last_id 单调推进, 见 feature.cpp).
+// cn_stock_industry_component WHERE industry='sw2021' (CUTOFF=-1, MonthFirst):
+//   每月初一份 sw2021 一级行业归属快照. l1_id = sw2021_l1_name_to_id(... ); 不在表 → 0.
 struct IndustryComponentEv {
-  int v;
-  uint8_t l1_id; // sw2021 一级行业 ID (0=未知, 1..31)
+  std::int32_t v;          // row D (32-bit 对齐 + 与 axes int 索引一致)
+  std::uint8_t l1_id;
+  std::uint8_t _pad[3]{};  // POD 对齐
 };
 
-// cn_stock_industry_change WHERE industry='sw2021' AND industry_level=1 AND
-//   change_flag=1 (CUTOFF=-1, Day): 月内 sw2021 一级行业切换事件 (进入新行业).
-//   同 (D, instrument) 通常只有 1 条 (一进对应一出, 只取进).
+// cn_stock_industry_change (CUTOFF=-1, Day): 月内 sw2021 L1 行业切换事件.
+//   change_flag=1 进入新行业一侧.
 struct IndustryChangeEv {
-  int v;
-  uint8_t l1_id; // 切换后 sw2021 一级行业 ID
+  std::int32_t v;
+  std::uint8_t l1_id;
+  std::uint8_t _pad[3]{};
 };
 
-// cn_stock_dividend (CUTOFF=-1, Where on publish_date): 分红事件.
-//   同 (instrument, publish_date, report_date) 单条.
-//   dividend_st 用 cash_after_tax × share_raw[ev.v] 推 3y 累计现金分红 (按 report_date.Y 窗口).
-//   dy_raw 用 cash_after_tax × share_raw[D] 推 trailing 12M 累计现金分红 (按 ex_date 日历窗口).
-//   ex_date ≥ publish_date 一定 (公告早于除权), 故 ex_date ≤ T ⇒ publish_date ≤ T (PIT 自洽).
+// cn_stock_dividend (CUTOFF=-1): 分红事件.
+//   report_date / ex_date 为 YYYYMMDD int32 (前 = std::string, 现已 POD 化).
+//   dy_raw 走 ex_date trailing 12M 窗口; dividend_st 用 cash_after_tax × share_raw[ev.v]
+//   推 3y 累计现金分红 (按 report_date.Y 窗口).
 struct DividendEv {
-  int v;
-  std::string report_date;
-  std::string ex_date;
+  std::int32_t v;
+  std::int32_t report_date;
+  std::int32_t ex_date;
   float cash_after_tax;
+};
+
+// Tushare forecast 类型 enum (业务关心的只有 "首亏" / "续亏"; 其他归 Other).
+//   aggregate 时一次性 map string → enum, replay/feature 不再碰 string.
+enum class ForecastType : std::uint8_t {
+  Other = 0,
+  FirstLoss = 1,  // 首亏
+  ContinueLoss = 2, // 续亏
 };
 
 // Tushare forecast (CUTOFF=-1): 业绩预告.
 //   profit_st / revenue_st 状态机触发源.
 struct ForecastEv {
-  int v;
-  std::string end_date;
-  std::string type;
+  std::int32_t v;
+  std::int32_t end_date;
+  ForecastType type;
+  std::uint8_t _pad[3]{};
   float last_parent_net;
 };
 
-// ----- BigQuant 财务事件 (PIT, 盘后 17:00–20:00 入库, CUTOFF=-1 normal) -----
-
-// cn_stock_financial_ttm_shift: 财务 TTM 时序 (shift∈{0..76}).
-//   每次披露一次发完整 shift 历史 (~77 期); 我们只取 shift=0 = 该 visible_date 的最新报告期 TTM.
-//   shift=0 含意随披露时间漂移: 4 月底 ≈ 年报, 5 月初 ≈ Q1, 8 月底 ≈ 半年报, 11 月初 ≈ Q3.
-//   字段 (BigQuant 实测口径, 见 doc/research/verify_valuation.py 验证):
-//     total_operating_revenue_ttm                   ps_raw / rev_raw 分母 (含利息/保费,
-//                                                                          ≠ operating_revenue_ttm)
-//     net_profit_to_parent_shareholders_ttm         pe_raw / roe_raw / roa_raw 分子 (归母)
-//     net_cffoa_ttm                                 pcf_raw 分母 (经营性现金流)
-//   per-A 沿 v 单调推进取 latest event 即可 (shift=0 已锁"该 visible 最新报告期";
-//   同 report_date 在新 visible_date 的 shift=0 行覆盖旧值, max v 自然取新).
+// cn_stock_financial_ttm_shift: 财务 TTM (shift=0).
+//   per-A 沿 v 升序取 latest event 即可 (max v 自然取新).
 struct FinancialTtmEv {
-  int v;
-  std::string report_date;
+  std::int32_t v;
+  std::int32_t report_date;
   float total_operating_revenue_ttm;
   float net_profit_to_parent_shareholders_ttm;
   float net_cffoa_ttm;
 };
 
 // cn_stock_financial_balance_general_pit: 资产负债表 PIT (MRQ snapshot).
-//   同 visible_date 可见多个 report_date (历史报告期 + 修正), 取 max(report_date).
-//   字段 (BigQuant 实测口径):
-//     total_owner_equity                            pb_raw 分母 (含少数股东, ≠ parent equity;
-//                                                                CATL/茅台 误差排查得)
-//     total_equity_to_parent_shareholders           roe_raw 分母 (归母, 教科书 ROE 口径)
-//     total_assets                                  roa_raw 分母
-//   per-A 走 latest event 维护 map<report_date, latest_row by v>, 取 max report_date 即可.
+//   同 visible_date 多 report_date (历史 + 修正), feature 层走 max report_date.
 struct FinancialBalanceEv {
-  int v;
-  std::string report_date;
+  std::int32_t v;
+  std::int32_t report_date;
   float total_owner_equity;
   float total_equity_to_parent_shareholders;
   float total_assets;
 };
 
 // cn_stock_financial_income_general_pit: 利润表 PIT.
-//   只入 fs_quarter_index == 4 的年报 (aggregate 时过滤); 给 ni_raw 用 (dividend_st 阈值).
-//   字段:
-//     net_profit_to_parent_shareholders             ni_raw 数值 (归母年度 NI; 全栈对仗)
-//   同 report_date 多版本取 latest visible (修正语义).
+//   aggregate 过滤 fs_quarter_index!=4 (只入年报); 给 ni_raw 用 (dividend_st 阈值).
 struct FinancialIncomeAnnualEv {
-  int v;
-  std::string report_date;
+  std::int32_t v;
+  std::int32_t report_date;
   float net_profit_to_parent_shareholders;
 };
 
-template <class Ev>
-using EventStore = std::vector<std::vector<Ev>>;
-
+// ============================================================================
+// PitPool — 一份 Phase 1 → 2 的桥梁结构. 所有字段都是 PoolArr<POD> 或
+// EventStore<POD Ev> ⇒ 可整 dump / 整 mmap.
+// ============================================================================
 struct PitPool {
-  // 网格 (新基建)
   GridBar1d bar1d;
   GridShares shares;
   GridLimitPrice limit_price;
   GridStatus status;
   GridMarginDetail margin_detail;
 
-  // 事件 (新基建)
   EventStore<IndustryComponentEv> industry_component;
   EventStore<IndustryChangeEv> industry_change;
   EventStore<DividendEv> dividend;
   EventStore<FinancialTtmEv> financial_ttm;
   EventStore<FinancialBalanceEv> financial_balance;
   EventStore<FinancialIncomeAnnualEv> financial_income_annual;
-
-  // 事件 (Tushare 保留)
   EventStore<ForecastEv> forecast;
-};
 
-struct AggregateRow {
-  std::string day;
-  std::string code;
-  float f0 = 0.0f;
-  float f1 = 0.0f;
-  float f2 = 0.0f;
-  int i0 = 0;
-  int i1 = 0;
-  int i2 = 0;
-  std::string s0;
-  std::string s1;
-  std::string s2;
+  // load.cpp internal: 每个 itf 一个 mmap 句柄 (hit 路径下), 与 ITFS 同序.
+  // 声明在最后 ⇒ 析构在所有 PoolArr 之后, 保证 view 指针在 munmap 前仍合法.
+  // miss 路径下对应槽为空 (PoolArr 走 owned vector). phase 2 不应访问.
+  std::vector<misc::MmapFile> _cache_mmaps;
 };
 
 // ============================================================================
-// ItfDesc: 单 itf 的描述. 在 pit.cpp 内每个 itf 一组 fn (prealloc + aggregate +
-//   replay + post_sort + post_ffill) 集中定义, 然后填进 ITFS[] 表.
-//   load.cpp 仅迭代该表, 不出现具体 itf 名.
-//   增减 itf 只需 (1) PitPool 加字段 (2) pit.cpp 加一组 fn (3) ITFS[] 加一行.
+// DayFile: (day, path) 二元组. itf.build 的输入. load.cpp 枚举给定 itf 的
+//   全部 dayfile (data/<Y>/<M>/<D>/<itf>.json) 升序排列后传入.
+// ============================================================================
+struct DayFile {
+  std::string day; // "YYYYMMDD"
+  std::filesystem::path path;
+};
+
+// ============================================================================
+// CacheVisitor — 通用 cache 序列化 visitor.
 //
-// 函数职责:
-//   prealloc(axes, pool):
-//     初始化 pool 中此 itf 的字段. 网格 itf 把每个字段 vector 设为
-//     length=n_a*n_d 的 NaN/0; 事件 itf 把 EventStore[a] 设为 length=n_a 的空链.
-//   aggregate(arr, day, out):
-//     解析单 (day, itf) json 数组为 raw aggregate rows; 不依赖 Axes/PitPool.
-//   replay(rows, axes, pool, mu):
-//     把 raw aggregate rows 映射进 PitPool. 网格场合 mu==nullptr, 事件场合
-//     mu 是 length=n_a 的 mutex 数组, 按 a 取锁 emplace.
-//   post_sort(pool):
-//     事件 itf 末段 sort by v 升序 (Phase 2 走单调指针扫). 网格 itf 留 nullptr.
+// 每个 itf 的 cache_layout(PitPool&, CacheVisitor&) 按固定顺序对每个 PoolArr<T>
+// 调 v.section(arr). 同一份 cache_layout 服务 3 个用途 (kind 切换):
+//   Size  — 累计字段总字节 (dump 前算 file 总长)
+//   Write — 把每段 raw bytes 顺序 append 到 out, 同时记 (offset, bytes) 入 table
+//   Map   — 把 PoolArr.data 指向 mmap 区基址 + section offset (零 copy)
+//
+// section table = [(offset, bytes)] × n_sections. 写在 cache 文件头里, hit 时
+// 直接消费. cache_layout 在三种模式下访问顺序必须一致 (由代码即文档保证).
+// ============================================================================
+struct CacheVisitor {
+  enum Kind : std::uint8_t { Size, Write, Map };
+  Kind kind;
+
+  // Size 模式: 累计 (含 8 字节 align padding).
+  std::size_t total_bytes = 0;
+
+  // Write 模式: out 是文件主体 buffer, sections 累 (offset, bytes).
+  std::string *write_out = nullptr;
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> *sections = nullptr;
+  std::size_t write_align_base = 0; // 文件内 section 区起始 offset (= header end)
+
+  // Map 模式: base = mmap 起点, sections 是 cache 头读到的 table, cursor 累自增.
+  const std::uint8_t *map_base = nullptr;
+  const std::pair<std::uint64_t, std::uint64_t> *map_sections = nullptr;
+  std::size_t cursor = 0;
+
+  template <class T>
+  void section(PoolArr<T> &arr) {
+    if (kind == Size) {
+      // section 起点 8 字节对齐 (T align ≤ 8; mmap 后直接 reinterpret_cast).
+      while (total_bytes % 8 != 0) ++total_bytes;
+      total_bytes += arr.size() * sizeof(T);
+    } else if (kind == Write) {
+      std::size_t bytes = arr.size() * sizeof(T);
+      // 对齐到 8: 相对文件起点的 offset 必须 8 对齐, 而 section 区基址
+      // (write_align_base) 本身已 8 对齐 → 只需保证 write_out 内 offset 8 对齐.
+      while ((write_out->size() + write_align_base) % 8 != 0)
+        write_out->push_back('\0');
+      std::uint64_t off = static_cast<std::uint64_t>(write_out->size()) +
+                          static_cast<std::uint64_t>(write_align_base);
+      write_out->append(reinterpret_cast<const char *>(arr.data()), bytes);
+      sections->emplace_back(off, static_cast<std::uint64_t>(bytes));
+    } else { // Map
+      auto [off, bytes] = map_sections[cursor++];
+      assert(bytes % sizeof(T) == 0);
+      T *p = reinterpret_cast<T *>(
+          const_cast<std::uint8_t *>(map_base) + off);
+      arr.map_view(p, bytes / sizeof(T));
+    }
+  }
+
+  // EventStore: 两个 section (offsets, events).
+  template <class Ev>
+  void section(EventStore<Ev> &store) {
+    section(store.offsets());
+    section(store.events());
+  }
+};
+
+// ============================================================================
+// ItfDesc — 单 itf 的描述. pit.cpp 内每 itf 一组 (build + cache_layout
+//   + post_ffill?) 集中定义, 末尾挂进 ITFS[]. load.cpp 仅迭代该表.
+//
+// 端到端单点:
+//   build(axes, files, pool):
+//     从 dayfile JSON 直接写入 pool 字段 (并行 / per-a mutex 由 itf 内部决定).
+//     全程串通 prealloc → parse → emplace → sort → finalize, 不经任何中间
+//     row 表示. miss 路径调一次. 调完 pool 字段就是"row D 已 cutoff 的合法数据".
+//   cache_layout(pool, visitor):
+//     列出此 itf 在 cache 内的 PoolArr blob (固定顺序). dump / map / size 走同一表.
 //   post_ffill(axes, pool):
-//     网格 itf per-A forward fill (停牌期间继承前值). 事件 itf 留 nullptr.
+//     网格 itf per-A forward fill. 不入 cache (每次都跑, 改 ffill 逻辑不用 bump
+//     POOL_VERSION). 事件 itf 留 nullptr.
 // ============================================================================
 struct ItfDesc {
-  const char *file_name; // .json basename, 也是日志/标识用名
-  bool is_event;         // false=网格 (无锁), true=事件 (per-A mutex)
-
-  void (*prealloc)(const Axes &, PitPool &);
-  void (*aggregate)(yyjson_val *arr, std::string_view day,
-                    std::vector<AggregateRow> &out);
-  void (*replay)(std::span<const AggregateRow> rows, const Axes &, PitPool &,
-                 std::vector<std::mutex> *mu);
-  void (*post_sort)(PitPool &);                // 事件 itf 末段 sort by v; 网格 itf 留 nullptr
-  void (*post_ffill)(const Axes &, PitPool &); // 网格 itf per-A forward fill; 事件 itf 留 nullptr
+  const char *file_name; // .json basename, 也是 log / cache file 用名
+  void (*build)(const Axes &, const std::vector<DayFile> &, PitPool &);
+  void (*cache_layout)(PitPool &, CacheVisitor &);
+  void (*post_ffill)(const Axes &, PitPool &); // 网格 itf 才有
 };
 
 extern const ItfDesc ITFS[];
 extern const int ITFS_COUNT;
 
 // ============================================================================
-// apply_meta_overlays — Phase 1 末段 hook (post_sort 之后, post_ffill 之前)
+// apply_meta_overlays — Phase 1 末段: 真盘前 _meta 快照填充 row=last_d.
+//   唯一 overlay: cn_stock_static_data → status 2 字段 (suspended, st_status).
 //
-// 当前唯一 overlay 源: cn_stock_static_data (真盘前 09:00 全市场快照, _meta 单文件).
-//   读 data/_meta/cn_stock_static_data.json (Snapshot kind, MAX(date) 一日全量行),
-//   把 2 字段填充到 row = axes.n_d() - 1 (= 最后一天 / 实盘当日):
-//     pool.status.suspended,  pool.status.st_status
+//   语义"填充": status CUTOFF=0 假装盘前, 实盘当日 (last_d) day file 还未入库时
+//   row=last_d 是默认 0; static_data 真盘前 09:00 值写进去. 历史天 (T<last_d) 不动.
 //
-// 设计动机 (hybrid 伪装, 兼顾"回测简洁 + 实盘正确 + 二者一致"):
-//   - status 历史 (T < last_d): 沿用 cn_stock_status day file (实际盘后 17:00 入库,
-//     张量层 CUTOFF=0 假装盘前可见).
-//   - status 最后一天 (T = last_d, 实盘当日 day file 还没入库): static_data 是真盘前
-//     数据, overlay 填入 row=last_d 即"交易时已可见且最新".
-//   - 仅写 row=last_d 一行, 历史天完全不动 ⇒ 填充而非覆盖语义.
-//   - 顺序要紧: 必须在 post_ffill 之前 — status 自身不做 ffill, 但其他 itf 可能做;
-//     overlay 写真值后 ffill 看到非默认值即不动它.
-//
-// 注: cn_stock_limit_price 已退回 CUTOFF=-1 normal (承认滞后), 不再 overlay.
-//
-// _meta/cn_stock_static_data.json 不存在 → silently noop (历史回测 / 首次 build 容错).
+//   _meta 不存在 ⇒ silent noop; axes.n_d()==0 ⇒ noop; instrument 不在 codes ⇒ skip.
 // ============================================================================
 void apply_meta_overlays(const Axes &axes, PitPool &pool);
 

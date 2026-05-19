@@ -114,6 +114,7 @@ set(SOURCES
     ../../src/misc/schedule.cpp
     ../../src/misc/logging.cpp
     ../../src/misc/npy.cpp
+    ../../src/misc/mmap.cpp
     ../../src/api/bigquant/dai.cpp
     ../../src/api/bigquant/spec.cpp
     ../../src/api/bigquant/parse.cpp
@@ -155,6 +156,7 @@ set(HEADERS
     ../../include/misc/logging.hpp
     ../../include/misc/profiler.hpp
     ../../include/misc/npy.hpp
+    ../../include/misc/mmap.hpp
     ../../include/api/bigquant/dai.hpp
     ../../include/api/bigquant/spec.hpp
     ../../include/api/bigquant/parse.hpp
