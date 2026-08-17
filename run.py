@@ -37,6 +37,13 @@ def _cleanup_processes():
     time.sleep(0.3)
 
 
+def _cleanup_tmp():
+    # 删除 data/ 下残留的 .tmp (上次中断的原子写半成品: parquet / pool bin)
+    import glob
+    for p in glob.glob("data/**/*.tmp", recursive=True):
+        os.remove(p)
+
+
 def _build(app_name, enable_debug, enable_profile, enable_assert):
     py_script = f"py/{app_name}.py"
     assert os.path.exists(py_script), f"Build script not found: {py_script}"
@@ -68,6 +75,7 @@ def main():
 
     print("Cleanup...")
     _cleanup_processes()
+    _cleanup_tmp()
 
     print("Building...")
     _build(APP_NAME, ENABLE_DEBUG, ENABLE_PROFILE, ENABLE_ASSERT)
