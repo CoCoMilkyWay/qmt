@@ -84,7 +84,7 @@ enum class F : int {
   mcap,
   fmcap,
   pe_ttm12,
-  pb_ttm3,
+  pb_ttm1, // 瞬时估值 (MRQ)
   ps_ttm12,
   pcf_ttm12,
   roe_ttm12,

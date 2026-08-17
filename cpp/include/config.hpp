@@ -210,7 +210,7 @@ inline constexpr std::array<feature::F, 26> BUILD_NO_NAN_FEATURES = {{
     feature::F::mcap,
     feature::F::fmcap,
     feature::F::pe_ttm12,
-    feature::F::pb_ttm3,
+    feature::F::pb_ttm1,
     feature::F::ps_ttm12,
     feature::F::pcf_ttm12,
     feature::F::roe_ttm12,

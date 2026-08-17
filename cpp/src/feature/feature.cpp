@@ -258,7 +258,7 @@ void ts_share_raw(int a, const Axes &axes, const PitPool &pool,
 //   - ttm 流 (cn_stock_financial_ttm_shift, shift=0): per-A 沿 v 升序, 取 latest event
 //     (max v); shift=0 已锁定"该 visible_date 的最新报告期 TTM", 跨披露天直接 max v.
 //   - balance 流 (cn_stock_financial_balance_general_pit): per-A 沿 v 升序, 维护
-//     map<report_date, latest_ev>; 取 max(report_date) 当 latest event (MRQ snapshot).
+//     map<report_date, latest_ev>; 取 max(report_date) 当 latest event (瞬时估值 / MRQ).
 //     反例: max v 可能取到对旧 report_date 的修正 (低于新 quarter), 会错位.
 //   - income annual 流 (cn_stock_financial_income_general_pit, fs_quarter_index=4):
 //     per-A 沿 v 升序, 维护 map<report_date, {val, last_v}>; ni_raw 取 last_v 最大
@@ -314,7 +314,7 @@ inline void scan_latest_balance(int a, const Axes &axes, const PitPool &pool,
 }
 
 // pb_raw = mcap_raw / balance.total_owner_equity (含少数股东, BigQuant 实测口径).
-//   支持负 PB (负权益); mcap<=0 是未上市/无价格哨兵, 不参与估值.
+//   ttm1 瞬时估值 (MRQ); 支持负 PB (负权益); mcap<=0 是未上市/无价格哨兵, 不参与估值.
 void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
   auto mcap = T.ts_row(F::mcap_raw, a);
@@ -1050,8 +1050,8 @@ void cs_fmcap(int d, const Axes &, Tensor &T, CsBufs &b) {
 void cs_pe_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
   factor_pipeline(d, F::pe_raw, F::pe_ttm12, true, T, b.a);
 }
-void cs_pb_ttm3(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::pb_raw, F::pb_ttm3, true, T, b.a);
+void cs_pb_ttm1(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::pb_raw, F::pb_ttm1, true, T, b.a);
 }
 void cs_ps_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
   factor_pipeline(d, F::ps_raw, F::ps_ttm12, true, T, b.a);
@@ -1198,7 +1198,7 @@ const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES = {{
     {"mcap", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_mcap},
     {"fmcap", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_fmcap},
     {"pe_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pe_ttm12},
-    {"pb_ttm3", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pb_ttm3},
+    {"pb_ttm1", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pb_ttm1},
     {"ps_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_ps_ttm12},
     {"pcf_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_pcf_ttm12},
     {"roe_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_roe_ttm12},
