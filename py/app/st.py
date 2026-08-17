@@ -1,37 +1,40 @@
-"""统计 data/**/DD/st.json 的 st_tpye 分布与状态语义.
+"""统计 cn_stock_status 月度 parquet 的 st_status / is_risk_warning 分布与转移.
 
-目的: 当前 risk_warn 状态机仅看 name 含 'ST' 子串, 粒度过粗.
-     先把数据摸清楚 (有哪些 st_tpye / 与 name 的关系 / 相邻事件转移), 再决定 parse.
+目的: 摸清 BigQuant cn_stock_status 的状态字段分布, 验证 cpp/src/feature/feature.cpp
+里 risk_warn 4 态派生 (0=正常, 1=ST, 2=*ST, 3=退市整理期) 的数据基础:
+  - st_status (int8: 0=正常, 1=ST, 2=*ST) 频次
+  - is_risk_warning (int8: 0/1) 频次
+  - 派生 risk_warn 4 态频次 (st_status 1/2 → 1/2; st_status==0 ∧ rw!=0 → 3)
+  - per-instrument 状态转移频次 (按 date 升序, prev_state -> cur_state)
 """
 
 import glob
-import json
 import os
 from collections import Counter, defaultdict
 
+import pandas as pd
+
 TOP_N = 50
-SAMPLES_PER_TYPE = 3
+SAMPLES_PER_TRANS = 3
 
 
-def _name_class(name: str) -> str:
-    if not name:
-        return "<empty>"
-    has_star = "*ST" in name
-    has_st = "ST" in name
-    if has_star:
-        return "*ST"
-    if has_st:
-        return "ST"
-    return "无ST"
+def derive_risk_warn(st_status: int, is_risk_warning: int) -> int:
+    if st_status == 1:
+        return 1
+    if st_status == 2:
+        return 2
+    if st_status == 0 and is_risk_warning != 0:
+        return 3
+    return 0
 
 
 def _print_dist(title, counter, total):
     print(f"=== {title} ===")
     print(f"  总数: {total}  种类: {len(counter)}")
     for k, v in counter.most_common(TOP_N):
-        label = "<null>" if k is None else str(k)
+        label = "<null>" if k is None or pd.isna(k) else str(k)
         pct = v * 100.0 / total if total else 0.0
-        print(f"  {label:<24}  {v:>6}  ({pct:5.2f}%)")
+        print(f"  {label:<12}  {v:>8}  ({pct:5.2f}%)")
     print()
 
 
@@ -39,82 +42,51 @@ def main():
     os.chdir(os.path.dirname(os.path.abspath(__file__)) + "/../..")
     assert os.path.isdir("data"), "data/ not found at repo root"
 
-    paths = sorted(glob.glob("data/*/*/*/st.json"))
-    assert paths, "未发现 st.json"
-    print(f"st.json 文件数: {len(paths)}\n")
+    paths = sorted(glob.glob("data/*-*/cn_stock_status.parquet"))
+    assert paths, "未发现 cn_stock_status.parquet 月度分片"
+    print(f"月度分片数: {len(paths)}\n")
 
-    records = []
+    dfs = []
     for p in paths:
-        with open(p, "r", encoding="utf-8") as f:
-            arr = json.load(f)
-        assert isinstance(arr, list)
-        records.extend(arr)
-    assert records, "无记录"
-    total = len(records)
+        df = pd.read_parquet(p, columns=["date", "instrument", "st_status", "is_risk_warning"])
+        dfs.append(df)
+    df = pd.concat(dfs, ignore_index=True)
+    total = len(df)
     print(f"总记录数: {total}\n")
 
-    type_counter = Counter(r.get("st_tpye") for r in records)
-    _print_dist("st_tpye 全局频次", type_counter, total)
+    df["risk_warn"] = df.apply(
+        lambda r: derive_risk_warn(int(r["st_status"]), int(r["is_risk_warning"])), axis=1
+    )
 
-    type_to_namecls = defaultdict(Counter)
-    type_to_samples = defaultdict(list)
-    for r in records:
-        t = r.get("st_tpye")
-        nc = _name_class(r.get("name", ""))
-        type_to_namecls[t][nc] += 1
-        if len(type_to_samples[t]) < SAMPLES_PER_TYPE:
-            type_to_samples[t].append(r)
+    _print_dist("st_status (0=正常, 1=ST, 2=*ST)", df["st_status"].value_counts(dropna=False), total)
+    _print_dist("is_risk_warning (0/1)", df["is_risk_warning"].value_counts(dropna=False), total)
+    _print_dist(
+        "派生 risk_warn (0=正常, 1=ST, 2=*ST, 3=退市整理期)",
+        df["risk_warn"].value_counts(dropna=False),
+        total,
+    )
 
-    print("=== 每种 st_tpye 下 name 的 ST/*ST 子串分布 + 样例 ===")
-    for t, _ in type_counter.most_common():
-        nc = type_to_namecls[t]
-        nc_str = "  ".join(f"{k}={v}" for k, v in nc.most_common())
-        print(f"[{t}]  name分布: {nc_str}")
-        for s in type_to_samples[t]:
-            reason = (s.get("st_reason") or "")[:40].replace("\n", " ")
-            print(
-                f"    {s.get('ts_code'):>10}  pub={s.get('pub_date')}  "
-                f"imp={s.get('imp_date')}  name={s.get('name'):<12}  "
-                f"reason={reason}"
-            )
-        print()
-
-    print("=== 相邻事件转移 (按 ts_code+imp_date 排序; prev_name_cls -> name_cls 频次 by st_tpye) ===")
-    by_code = defaultdict(list)
-    for r in records:
-        by_code[r.get("ts_code")].append(r)
-    trans_by_type = defaultdict(Counter)
-    init_by_type = defaultdict(Counter)
-    for code, rs in by_code.items():
-        rs.sort(key=lambda x: (x.get("imp_date") or "", x.get("pub_date") or ""))
-        prev_nc = None
-        for r in rs:
-            t = r.get("st_tpye")
-            cur_nc = _name_class(r.get("name", ""))
-            if prev_nc is None:
-                init_by_type[t][f"INIT->{cur_nc}"] += 1
+    print("=== per-instrument 状态转移频次 (按 date 升序) ===")
+    df = df.sort_values(["instrument", "date"])
+    trans = Counter()
+    trans_samples = defaultdict(list)
+    for code, grp in df.groupby("instrument"):
+        prev = None
+        for _, row in grp.iterrows():
+            cur = int(row["risk_warn"])
+            if prev is None:
+                key = f"INIT->{cur}"
             else:
-                trans_by_type[t][f"{prev_nc}->{cur_nc}"] += 1
-            prev_nc = cur_nc
-
-    for t, _ in type_counter.most_common():
-        merged = Counter()
-        merged.update(init_by_type.get(t, {}))
-        merged.update(trans_by_type.get(t, {}))
-        merged_str = "  ".join(f"{k}={v}" for k, v in merged.most_common())
-        print(f"[{t}]  {merged_str}")
+                key = f"{prev}->{cur}"
+            trans[key] += 1
+            if len(trans_samples[key]) < SAMPLES_PER_TRANS:
+                trans_samples[key].append((code, row["date"]))
+            prev = cur
+    for key, cnt in trans.most_common(TOP_N):
+        print(f"  {key:<12}  {cnt:>8}")
+        for code, d in trans_samples[key]:
+            print(f"    sample: {code:<12}  {pd.Timestamp(d).date()}")
     print()
-
-    print("=== reason 关键词 (按 st_tpye 抽 top-5 reason 原文) ===")
-    type_to_reasons = defaultdict(Counter)
-    for r in records:
-        type_to_reasons[r.get("st_tpye")][r.get("st_reason") or ""] += 1
-    for t, _ in type_counter.most_common():
-        c = type_to_reasons[t]
-        print(f"[{t}]")
-        for reason, cnt in c.most_common(5):
-            print(f"  ({cnt:>4}) {reason[:80]}")
-        print()
 
 
 if __name__ == "__main__":

@@ -49,7 +49,8 @@ inline bool read_bool(const feature::Tensor &T, F f, int a, int d) {
 inline int find_d(const feature::Axes &axes, std::string_view yyyymmdd,
                   bool floor) {
   // floor=true: 找 ≤ yyyymmdd 的最大索引; false: 找 ≥ 的最小.
-  if (floor) return axes.floor_date(yyyymmdd);
+  if (floor)
+    return axes.floor_date(yyyymmdd);
   auto it = std::lower_bound(axes.dates.begin(), axes.dates.end(), yyyymmdd);
   return (it == axes.dates.end())
              ? -1
@@ -82,7 +83,8 @@ struct NameTimeline {
 
 // yyyymmdd int32 → "YYYYMMDD"; <= 0 → 空串.
 inline std::string ymd_str(std::int32_t v) {
-  if (v <= 0) return {};
+  if (v <= 0)
+    return {};
   char buf[9];
   std::snprintf(buf, sizeof(buf), "%08d", v);
   return std::string(buf, 8);
@@ -94,7 +96,8 @@ void add_name_interval(const feature::Axes &axes, std::vector<NameInterval> &v,
   assert(start.size() == 8 && end.size() == 8 && !name.empty());
   int lo = find_d(axes, start, /*floor=*/false);
   int hi = find_d(axes, end, /*floor=*/true);
-  if (lo < 0 || hi < lo) return;
+  if (lo < 0 || hi < lo)
+    return;
   v.push_back(NameInterval{lo, hi, std::move(name)});
 }
 
@@ -107,20 +110,24 @@ NameTimeline load_name_timeline(const feature::Axes &axes) {
   // 历史简称区间: cn_stock_name_change 月度 parquet 全扫.
   for (auto &[ym, path] : misc::pq::list_month_files("cn_stock_name_change")) {
     misc::pq::TableView v(misc::pq::read_table(path));
-    if (v.rows() == 0) continue;
+    if (v.rows() == 0)
+      continue;
     misc::pq::Col ins = v.col("instrument"), nm = v.col("name");
     misc::pq::Col sd = v.col("start_date"), ed = v.col("end_date");
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       auto it = axes.code_idx.find(std::string(ins.str(i)));
-      if (it == axes.code_idx.end()) continue;
+      if (it == axes.code_idx.end())
+        continue;
       int a = it->second;
       std::string start = ymd_str(sd.yyyymmdd(i));
       std::string end = ymd_str(ed.yyyymmdd(i));
-      if (start.empty() || end.empty()) continue;
+      if (start.empty() || end.empty())
+        continue;
       add_name_interval(axes, tl.by_a[static_cast<std::size_t>(a)], start, end,
                         std::string(nm.str(i)));
       std::string &mx = last_end[static_cast<std::size_t>(a)];
-      if (mx.empty() || end > mx) mx = std::move(end);
+      if (mx.empty() || end > mx)
+        mx = std::move(end);
     }
   }
 
@@ -132,7 +139,8 @@ NameTimeline load_name_timeline(const feature::Axes &axes) {
   misc::pq::Col ins = sv.col("instrument"), nm = sv.col("name");
   for (std::int64_t i = 0, nr = sv.rows(); i < nr; ++i) {
     auto it = axes.code_idx.find(std::string(ins.str(i)));
-    if (it == axes.code_idx.end()) continue;
+    if (it == axes.code_idx.end())
+      continue;
     int a = it->second;
     const std::string &mx = last_end[static_cast<std::size_t>(a)];
     std::string start = mx.empty() ? axes.dates.front() : misc::add_days(mx, 1);
@@ -141,8 +149,7 @@ NameTimeline load_name_timeline(const feature::Axes &axes) {
   }
 
   for (auto &v : tl.by_a) {
-    std::sort(v.begin(), v.end(), [](const NameInterval &x,
-                                     const NameInterval &y) {
+    std::sort(v.begin(), v.end(), [](const NameInterval &x, const NameInterval &y) {
       return x.lo < y.lo;
     });
   }
@@ -153,7 +160,8 @@ inline std::string_view name_of(const NameTimeline &tl,
                                 const feature::StockMeta &meta, int a, int d) {
   const auto &v = tl.by_a[static_cast<std::size_t>(a)];
   for (auto it = v.rbegin(); it != v.rend(); ++it) {
-    if (it->lo <= d && d <= it->hi) return it->name;
+    if (it->lo <= d && d <= it->hi)
+      return it->name;
   }
   return meta.name[static_cast<std::size_t>(a)];
 }
@@ -233,7 +241,8 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     // (1) 更新 last_close 缓存 (T 的 close_raw 已 ffill, finite 保留)
     for (int a = 0; a < n_a; ++a) {
       float c = T.at(F::close_raw, a, d);
-      if (is_finite(c)) last_close[a] = c;
+      if (is_finite(c))
+        last_close[a] = c;
     }
 
     // (1.5) 持仓兜底: 已退市股 (delist_age finite) 强制按 last_close 平仓.
@@ -292,9 +301,11 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     std::vector<std::pair<float, int>> cands;
     cands.reserve(::config::POOL_UNIVERSE_SIZE);
     for (int a = 0; a < n_a; ++a) {
-      if (!read_bool(T, F::tradable, a, d)) continue;
+      if (!read_bool(T, F::tradable, a, d))
+        continue;
       float s = T.at(F::factor_score, a, d);
-      if (!is_finite(s)) continue;
+      if (!is_finite(s))
+        continue;
       cands.emplace_back(s, a);
     }
     std::sort(cands.begin(), cands.end(),
@@ -312,8 +323,10 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     std::unordered_set<int> top_n_set, top_exit_set;
     top_n_set.reserve(static_cast<std::size_t>(n_top));
     top_exit_set.reserve(static_cast<std::size_t>(n_top_exit));
-    for (int k = 0; k < n_top; ++k) top_n_set.insert(cands[k].second);
-    for (int k = 0; k < n_top_exit; ++k) top_exit_set.insert(cands[k].second);
+    for (int k = 0; k < n_top; ++k)
+      top_n_set.insert(cands[k].second);
+    for (int k = 0; k < n_top_exit; ++k)
+      top_exit_set.insert(cands[k].second);
 
     // (4) 决定 to_sell / to_buy ------------------------------------------------
     // sell: holdings 中不在 top_exit, 且不被 limit_up/limit_dn 主动排除.
@@ -322,7 +335,8 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     intended_sell.reserve(holdings.size());
     for (auto &kv : holdings) {
       int a = kv.first;
-      if (top_exit_set.count(a)) continue;
+      if (top_exit_set.count(a))
+        continue;
       if (read_bool(T, F::limit_up, a, d) || read_bool(T, F::limit_dn, a, d))
         continue;
       intended_sell.push_back(a);
@@ -332,15 +346,19 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
                                      intended_sell.end());
     int kept = 0;
     for (auto &kv : holdings) {
-      if (!sold_set.count(kv.first)) ++kept;
+      if (!sold_set.count(kv.first))
+        ++kept;
     }
     int slots = hold_n - kept;
     if (slots > 0) {
       for (const auto &p : cands) {
-        if (slots <= 0) break;
+        if (slots <= 0)
+          break;
         int a = p.second;
-        if (holdings.count(a) && !sold_set.count(a)) continue; // 已持仓且未卖
-        if (!top_n_set.count(a)) break; // 已超 top N 范围 (排序后)
+        if (holdings.count(a) && !sold_set.count(a))
+          continue; // 已持仓且未卖
+        if (!top_n_set.count(a))
+          break; // 已超 top N 范围 (排序后)
         if (read_bool(T, F::limit_up, a, d) || read_bool(T, F::limit_dn, a, d))
           continue;
         intended_buy.push_back(a);
@@ -356,7 +374,8 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     for (int a : intended_sell) {
       bool susp = read_bool(T, F::susp, a, d);
       float c = last_close[static_cast<std::size_t>(a)];
-      if (susp || !is_finite(c)) continue; // 失败: 停牌或无价
+      if (susp || !is_finite(c))
+        continue; // 失败: 停牌或无价
       double sh = holdings[a];
       double proceeds = sh * static_cast<double>(c) *
                         (1.0 - ::config::BACKTEST_SELL_COST);
@@ -384,8 +403,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     {
       double mv_kept = 0.0;
       for (auto &kv : holdings) {
-        mv_kept += kv.second * static_cast<double>(last_close[
-            static_cast<std::size_t>(kv.first)]);
+        mv_kept += kv.second * static_cast<double>(last_close[static_cast<std::size_t>(kv.first)]);
       }
       double pv_after = cash + mv_kept;
       double target_per_slot = pv_after / static_cast<double>(hold_n);
@@ -393,13 +411,16 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
           static_cast<double>(::config::BACKTEST_REBALANCE_THRESHOLD) * pv_after;
 
       for (int a : intended_buy) {
-        if (cash <= 0.0) break;
+        if (cash <= 0.0)
+          break;
         float c = last_close[static_cast<std::size_t>(a)];
-        if (!is_finite(c) || c <= 0.0f) continue;
+        if (!is_finite(c) || c <= 0.0f)
+          continue;
         double cost_money = std::min(target_per_slot, cash);
         double net = cost_money / (1.0 + ::config::BACKTEST_BUY_COST);
         double sh = net / static_cast<double>(c);
-        if (sh <= 0.0) continue;
+        if (sh <= 0.0)
+          continue;
         cash -= cost_money;
         holdings[a] = sh; // intended_buy ∉ holdings (见 (4))
         open_recs[a] = OpenRec{d, c};
@@ -417,14 +438,16 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
         for (auto &kv : holdings) {
           int a = kv.first;
           float c = last_close[static_cast<std::size_t>(a)];
-          if (!is_finite(c) || c <= 0.0f) continue;
+          if (!is_finite(c) || c <= 0.0f)
+            continue;
           if (read_bool(T, F::susp, a, d) ||
               read_bool(T, F::limit_up, a, d) ||
               read_bool(T, F::limit_dn, a, d))
             continue;
           double cur_mv = kv.second * static_cast<double>(c);
           double def = target_per_slot - cur_mv;
-          if (def < rebal_thd) continue;
+          if (def < rebal_thd)
+            continue;
           defs.push_back({def, a, c});
         }
         std::sort(defs.begin(), defs.end(),
@@ -432,11 +455,13 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
                     return x.def > y.def;
                   });
         for (const auto &dd : defs) {
-          if (cash <= 0.0) break;
+          if (cash <= 0.0)
+            break;
           double cost_money = std::min(dd.def, cash);
           double net = cost_money / (1.0 + ::config::BACKTEST_BUY_COST);
           double sh_add = net / static_cast<double>(dd.c);
-          if (sh_add <= 0.0) continue;
+          if (sh_add <= 0.0)
+            continue;
           cash -= cost_money;
           holdings[dd.a] += sh_add; // 加仓; open_recs 不动
           ++n_rebal_add;
@@ -448,8 +473,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     double mv_end = 0.0;
     for (auto &kv : holdings) {
       mv_end += kv.second *
-                static_cast<double>(last_close[
-                    static_cast<std::size_t>(kv.first)]);
+                static_cast<double>(last_close[static_cast<std::size_t>(kv.first)]);
     }
     double pv_end = cash + mv_end;
     strat_nav[i] = static_cast<float>(pv_end);
@@ -470,12 +494,15 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
       int dr_n = 0;
       int d_prev = d - 1;
       for (int a = 0; a < n_a; ++a) {
-        if (!read_bool(T, F::pool, a, d_prev)) continue;
+        if (!read_bool(T, F::pool, a, d_prev))
+          continue;
         float rw = T.at(F::risk_warn, a, d_prev);
         assert(is_finite(rw) && "risk_warn NaN — should be 0/1/2");
-        if (rw > 0.5f) continue; // ST (1) / *ST (2) 排除
+        if (rw > 0.5f)
+          continue; // ST (1) / *ST (2) 排除
         float r = T.at(F::daily_return, a, d);
-        if (!is_finite(r)) continue;
+        if (!is_finite(r))
+          continue;
         dr_sum += static_cast<double>(r);
         ++dr_n;
       }
@@ -492,7 +519,8 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
                   static_cast<float>(::config::BACKTEST_HOLD_N);
     int n_susp_h = 0;
     for (auto &kv : holdings) {
-      if (read_bool(T, F::susp, kv.first, d)) ++n_susp_h;
+      if (read_bool(T, F::susp, kv.first, d))
+        ++n_susp_h;
     }
     susp_pct[i] = holdings.empty()
                       ? 0.0f
@@ -508,8 +536,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     std::vector<std::pair<int, double>> sorted_hold; // (a, weight)
     sorted_hold.reserve(holdings.size());
     for (auto &kv : holdings) {
-      double mv = kv.second * static_cast<double>(last_close[
-                                  static_cast<std::size_t>(kv.first)]);
+      double mv = kv.second * static_cast<double>(last_close[static_cast<std::size_t>(kv.first)]);
       sorted_hold.emplace_back(kv.first, mv / pv_end);
     }
     std::sort(sorted_hold.begin(), sorted_hold.end(),

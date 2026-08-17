@@ -42,11 +42,14 @@ list_month_files(std::string_view name) {
   std::string fname = std::string(name) + ".parquet";
 
   for (auto &ent : fs::directory_iterator(data_root)) {
-    if (!ent.is_directory()) continue;
+    if (!ent.is_directory())
+      continue;
     std::string ym = ent.path().filename().string();
-    if (ym.size() != 7 || ym[4] != '-') continue;
+    if (ym.size() != 7 || ym[4] != '-')
+      continue;
     fs::path p = ent.path() / fname;
-    if (fs::exists(p)) out.emplace_back(std::move(ym), std::move(p));
+    if (fs::exists(p))
+      out.emplace_back(std::move(ym), std::move(p));
   }
   std::sort(out.begin(), out.end());
   return out;
@@ -63,10 +66,9 @@ std::shared_ptr<arrow::Table> read_table(const fs::path &path) {
   assert(reader_res.ok() && "pq::read_table: 构造 reader 失败");
   std::unique_ptr<parquet::arrow::FileReader> reader =
       std::move(reader_res).ValueOrDie();
-  std::shared_ptr<arrow::Table> t;
-  auto st = reader->ReadTable(&t);
-  assert(st.ok() && "pq::read_table: ReadTable 失败");
-  return t;
+  auto t_res = reader->ReadTable();
+  assert(t_res.ok() && "pq::read_table: ReadTable 失败");
+  return std::move(t_res).ValueOrDie();
 }
 
 void write_table_atomic(const fs::path &path,
@@ -113,10 +115,12 @@ inline std::int32_t ns_to_yyyymmdd(std::int64_t ns) {
 
 // "YYYYMMDD" → int32; 非 8 位数字 → 0
 inline std::int32_t sv_to_yyyymmdd(std::string_view s) {
-  if (s.size() != 8) return 0;
+  if (s.size() != 8)
+    return 0;
   std::int32_t v = 0;
   for (char c : s) {
-    if (c < '0' || c > '9') return 0;
+    if (c < '0' || c > '9')
+      return 0;
     v = v * 10 + (c - '0');
   }
   return v;
@@ -125,7 +129,8 @@ inline std::int32_t sv_to_yyyymmdd(std::string_view s) {
 } // namespace
 
 std::int32_t Col::yyyymmdd(std::int64_t i) const {
-  if (arr_->IsNull(i)) return 0;
+  if (arr_->IsNull(i))
+    return 0;
   switch (type_) {
   case arrow::Type::TIMESTAMP:
     return ns_to_yyyymmdd(
@@ -145,7 +150,8 @@ std::int32_t Col::yyyymmdd(std::int64_t i) const {
 }
 
 float Col::f32(std::int64_t i) const {
-  if (arr_->IsNull(i)) return std::numeric_limits<float>::quiet_NaN();
+  if (arr_->IsNull(i))
+    return std::numeric_limits<float>::quiet_NaN();
   switch (type_) {
   case arrow::Type::DOUBLE:
     return static_cast<float>(
@@ -171,7 +177,8 @@ float Col::f32(std::int64_t i) const {
 }
 
 int Col::i32(std::int64_t i, int def) const {
-  if (arr_->IsNull(i)) return def;
+  if (arr_->IsNull(i))
+    return def;
   switch (type_) {
   case arrow::Type::INT8:
     return static_cast<const arrow::Int8Array &>(*arr_).Value(i);
@@ -198,7 +205,8 @@ int Col::i32(std::int64_t i, int def) const {
 }
 
 std::string_view Col::str(std::int64_t i) const {
-  if (arr_->IsNull(i)) return {};
+  if (arr_->IsNull(i))
+    return {};
   switch (type_) {
   case arrow::Type::STRING: {
     auto v = static_cast<const arrow::StringArray &>(*arr_).GetView(i);
@@ -236,7 +244,8 @@ Col TableView::col(std::string_view name) const {
     assert(t_->num_rows() == 0);
   }
   assert(c->num_chunks() <= 1 && "TableView: CombineChunks 后应单 chunk");
-  if (c->num_chunks() == 0) return Col(); // 0 行: 任何行访问都是越界, 不会发生
+  if (c->num_chunks() == 0)
+    return Col(); // 0 行: 任何行访问都是越界, 不会发生
   return Col(c->chunk(0));
 }
 

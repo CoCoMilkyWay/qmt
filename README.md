@@ -84,25 +84,34 @@ qmt/
 │                                    # ★ MonthFirst: cn_stock_industry_component 由 spec.freq=MonthFirst 决定每月仅取
 │                                    #   visible_date=MIN(date) 一份全行业成分快照; 月内细粒度变动靠
 │                                    #   cn_stock_industry_change (Day) 增量 cover.
-├── py/                              # 构建/运行模式 (run.py 调用)
+├── py/                              # 构建/运行模式 + 报告 (run.py 调用)
 │   ├── main.py                      # CMake 配置 + 编译
-│   └── mode_{debug,profile,assert,production}.py
+│   ├── mode_{debug,profile,assert,production}.py
+│   ├── report.py                    # 直读 output/*.npy + meta.json → plotly HTML 报告
+│   └── app/                         # 独立运维/研究脚本 (run.py 不引用)
+│       ├── api.py                   # tushare pro_api 烟雾测试
+│       ├── clean.py                 # 清单张 itf 的 data/YYYY-MM/*.parquet
+│       ├── meta.py                  # cn_stock_basic_info.parquet 字段分布
+│       └── st.py                    # cn_stock_status st_status / risk_warn 派生分布
 └── doc/
     ├── bigquant/                    # BigQuant DAI 文档 + 探测脚本
-    │   ├── used/                    # 采用表的 schema/example/api 索引
-    │   │   ├── api.md               # 表的中英文名 / 收费 / 更新频率 / 描述
-    │   │   ├── schema.md            # 字段类型 (timestamp[ns] / string / double / int8 / ...)
-    │   │   └── example.md           # 前 5 行样例
-    │   ├── fetch.py / probe.py      # 离线 archive 导出 (BigQuant AI Studio 内跑, 产出 data/YYYY-MM parquet) + 探测脚本
+    │   ├── api.md                   # 全表目录 (中英文名 / 收费 / 更新频率 / 描述)
+    │   ├── used_api.md              # 项目采用 27 张表的目录子集
+    │   ├── api/                     # 各表 schema .txt (BigQuant AI Studio 导出)
+    │   ├── fetch.py                 # 离线 archive 导出 (AI Studio 内跑, 产出 data/YYYY-MM parquet)
+    │   ├── probe.py                 # DAI 接口探测 (单日单 instrument 收敛验证)
     │   └── schema.py                # schema dump 工具
     ├── research/                    # 数据研究脚本
-    │   ├── analysis.py              # 覆盖率分析
-    │   └── analysis.md              # 分析结果
+    │   ├── verify_valuation.py      # 复现 BigQuant valuation 字段 (parquet PIT)
+    │   └── verify_nonfinancial.py   # 非财务特征数据校验 (legacy, 走旧 JSON 路径)
     └── tushare/                     # tushare API 文档
         ├── tushare.md               # 接口索引
         ├── help/                    # 通用 trick (本地化 / HTTP 协议 / 数据库落地)
         ├── basic/                   # 基础信息
-        └── financial/               # 财务报表 (forecast / express / disclosure_date / dividend / ...)
+        ├── financial/               # 财务报表 (forecast / express / disclosure_date / dividend / ...)
+        ├── index/                   # 指数 (申万行业 / index_member_all)
+        ├── margin/                  # 融资融券
+        └── quote/                   # 行情 (daily / daily_basic / adj_factor / stk_limit / suspend_d)
 ```
 
 # 因子张量 T[D, A, F]

@@ -144,12 +144,8 @@ set(HEADERS
     ../../include/misc/parquet.hpp
     ../../include/misc/schedule.hpp
     ../../include/misc/timer.hpp
-    ../../include/misc/print.hpp
-    ../../include/misc/progress_single.hpp
-    ../../include/misc/progress_parallel.hpp
     ../../include/misc/affinity.hpp
     ../../include/misc/logging.hpp
-    ../../include/misc/profiler.hpp
     ../../include/misc/npy.hpp
     ../../include/misc/mmap.hpp
     ../../include/api/bigquant/dai.hpp
