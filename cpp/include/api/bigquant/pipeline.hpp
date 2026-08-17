@@ -8,14 +8,12 @@
 namespace bigquant {
 
 // ============================================================================
-// BigQuant DAI 数据接入主流水线
-//   - Static                 → data/_meta/<name>.json (DAI 一次响应直写)
-//   - Partition/Where + Day  → misc::plan_day_segments (整月空洞→月段 / 局部缺失→日段
-//                              / lookback 强拉) → DAI fetch → 按 visible_date 切日落盘
-//   - Partition + MonthFirst → misc::plan_month_segments → 按月段 fetch → 同上
-//   - emit_meta (axis 源)    → 上面 Partition+Day 落 day file 后, 末尾 aggregate_meta
-//                              从全部 day file 聚合到 data/_meta/<name>.json
-//   - 每张表整段成功后 mark_api_updated (lastupdate 去重)
+// BigQuant DAI 月度流水线 (与 tushare::update 完全对仗)
+//   - Static / Snapshot → data/_meta/<name>.parquet 单文件整刷 (mtime dedup)
+//   - 其余              → misc::plan_months (关月存在→skip / 开放月 mtime dedup /
+//                         缺失→拉; 历史月缺失撞 API_MIN_DATE 护栏 assert) →
+//                         fetch(月) → data/YYYY-MM/<name>.parquet 整月覆盖
+// 落盘 = 服务端响应原样 (单文件 tmp+rename 原子; 0 行月也落 0 行文件).
 // ============================================================================
 void update(std::string_view start, std::string_view end,
             const std::vector<TableSpec> &specs, int lookback_days);

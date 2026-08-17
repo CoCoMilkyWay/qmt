@@ -20,11 +20,7 @@ void atomic_write(const std::filesystem::path &path, const char *data,
                   std::size_t len);
 
 // 序列化 yyjson_mut_doc 为 PRETTY_TWO_SPACES + atomic_write; doc 不释放 (caller 负责).
-// 三处行式 JSON 落盘 (bigquant store / tushare store / import) 共用样板.
+// 唯一 JSON 落盘点: output/meta.json (数据集本体全走 misc/parquet).
 void atomic_write_json(const std::filesystem::path &path, yyjson_mut_doc *doc);
-
-// 序列化 yyjson_mut_doc 为 PRETTY_TWO_SPACES 文本 (caller 负责释放 doc).
-// 当不直接写盘 (需进一步打包, e.g. journal MonthTxn) 时使用.
-std::string serialize_json(yyjson_mut_doc *doc);
 
 } // namespace misc

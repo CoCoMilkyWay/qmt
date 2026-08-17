@@ -4,22 +4,21 @@
 #include "feature/industry.hpp"
 #include "misc/affinity.hpp"
 #include "misc/date.hpp"
-#include "misc/fs.hpp"
-
-#include "package/yyjson/yyjson.h"
+#include "misc/parquet.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
+#include <cstdio>
 #include <filesystem>
 #include <limits>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 // ============================================================================
@@ -29,10 +28,10 @@
 //             2) pit.cpp 加一个 namespace itf_<name> (build / cache_layout)
 //             3) ITFS[] 末尾追加一行
 //
-// 流水 (build, miss 路径一次): dayfile JSON → 并行解析 → 直接写入 pool 字段
-//   (网格走 (a, row) cell, 事件走 per-a chain emplace + sort + finalize).
-//   不经任何中间 row 表示 (旧 AggregateRow / replay 两段已删除). 写完即"row D
-//   已 cutoff 的合法数据", 下游 feature 直读 pool[base + d].
+// 流水 (build, miss 路径一次): 月度 parquet → 并行 (per-月) 读列 → 直接写入
+//   pool 字段 (网格走 (a, row) cell, 事件走 per-a chain emplace + sort +
+//   finalize). 不经任何中间 row 表示. 写完即"row D 已 cutoff 的合法数据",
+//   下游 feature 直读 pool[base + d].
 //
 // 【raw cutoff 单点真理】每个 itf namespace 内 constexpr CUTOFF = 0 / -1:
 //   row D 的合法数据 = visible_date <= D + CUTOFF 的最新值
@@ -46,16 +45,10 @@ namespace feature {
 
 namespace {
 
+namespace pq = misc::pq;
+
 constexpr float NaNF = std::numeric_limits<float>::quiet_NaN();
 constexpr float InfF = std::numeric_limits<float>::infinity();
-
-// ---- yyjson helpers ----
-inline float as_float_or_nan(yyjson_val *v) {
-  if (!v) return NaNF;
-  if (yyjson_is_real(v)) return static_cast<float>(yyjson_get_real(v));
-  if (yyjson_is_int(v)) return static_cast<float>(yyjson_get_int(v));
-  return NaNF;
-}
 
 // NaN (数据缺失) 透传留给 ffill; finite 满足约束 → 原值; finite 违反约束 → +inf
 // 保"业务异常"标记 (ffill 不传播 +inf, 不污染下游).
@@ -68,38 +61,19 @@ inline float non_negative_or_inf(float v) {
   return (std::isfinite(v) && v >= 0.0f) ? v : InfF;
 }
 
-inline const char *as_cstr_or_null(yyjson_val *v) {
-  if (!v || !yyjson_is_str(v)) return nullptr;
-  return yyjson_get_str(v);
+// yyyymmdd int32 → "YYYYMMDD"; <= 0 → 空串.
+inline std::string ymd_str(std::int32_t v) {
+  if (v <= 0) return {};
+  char buf[9];
+  std::snprintf(buf, sizeof(buf), "%08d", v);
+  return std::string(buf, 8);
 }
 
-inline std::string_view as_sv(yyjson_val *v) {
-  if (!v || !yyjson_is_str(v)) return {};
-  return std::string_view(yyjson_get_str(v), yyjson_get_len(v));
-}
-
-inline int as_int_or_default(yyjson_val *v, int def) {
-  if (!v) return def;
-  if (yyjson_is_int(v)) return static_cast<int>(yyjson_get_int(v));
-  return def;
-}
-
-inline std::int32_t as_yyyymmdd_int(yyjson_val *v) {
-  if (!v || !yyjson_is_str(v)) return 0;
-  return misc::to_yyyymmdd_int(
-      std::string_view(yyjson_get_str(v), yyjson_get_len(v)));
-}
-
-// 按字段名查 a 索引. 字段缺失 / 非 string / 不在 code_idx → -1.
-inline int lookup_a(const Axes &axes, yyjson_val *item, const char *field) {
-  const char *s = as_cstr_or_null(yyjson_obj_get(item, field));
-  if (!s) return -1;
-  auto it = axes.code_idx.find(s);
+// instrument / ts_code → a 索引; 不在 code_idx → -1.
+inline int lookup_a(const Axes &axes, std::string_view code) {
+  if (code.empty()) return -1;
+  auto it = axes.code_idx.find(std::string(code));
   return it == axes.code_idx.end() ? -1 : it->second;
-}
-
-inline bool grid_day_exists(const Axes &axes, const std::string &day) {
-  return axes.date_idx.find(day) != axes.date_idx.end();
 }
 
 // 网格 itf 通用 prealloc: 各 field allocate n_a*n_d + fill (NaN/0).
@@ -120,17 +94,62 @@ inline void prealloc_grid_pod(PoolArr<T> &g, std::size_t n, T init = T{}) {
 }
 
 // ============================================================================
-// 并行驱动: per-file 拿原子 idx, 解析 JSON 后调用 body(file, root). body 内
-//   决定如何 (无锁 / per-a mutex) 写 pool.
-//
-//   网格 itf: body 直接写 pool[a*n_d + row]. 同 file 同 (a, d) cell 互斥 (单线程内);
-//             跨 file 同 day 同 a 几乎不会发生 (一天一个 dayfile, day 不同 row 不同).
-//             即使发生 (data 异常重复) 也是确定性最后写赢, 无 data race UB.
-//   事件 itf: body 持 mu[a] 锁 emplace 到 pool.<itf>.push_chain(a, ev).
+// row 定位 (per-file memo, 月内 distinct date 少, 避免逐行 string 化查表):
+//   网格: date 必须精确命中 axes 交易日 (非交易日行 skip);
+//         row = v_idx - CUTOFF, 越界 skip. distinct vd → distinct row ⇒ 跨月无锁写.
+//   事件: floor_date (周末/节假日公告落上一交易日); row 越界 skip.
+// ============================================================================
+class GridRowMemo {
+public:
+  GridRowMemo(const Axes &axes, int cutoff) : axes_(axes), cutoff_(cutoff) {}
+  int row(std::int32_t ymd) { // -1 = skip
+    auto it = memo_.find(ymd);
+    if (it != memo_.end()) return it->second;
+    int r = -1;
+    auto di = axes_.date_idx.find(ymd_str(ymd));
+    if (di != axes_.date_idx.end()) {
+      int cand = di->second - cutoff_;
+      if (cand >= 0 && cand < axes_.n_d()) r = cand;
+    }
+    memo_.emplace(ymd, r);
+    return r;
+  }
+
+private:
+  const Axes &axes_;
+  int cutoff_;
+  std::unordered_map<std::int32_t, int> memo_;
+};
+
+class EventRowMemo {
+public:
+  EventRowMemo(const Axes &axes, int cutoff) : axes_(axes), cutoff_(cutoff) {}
+  int row(std::int32_t ymd) { // -1 = skip
+    auto it = memo_.find(ymd);
+    if (it != memo_.end()) return it->second;
+    int r = -1;
+    int v_idx = axes_.floor_date(ymd_str(ymd));
+    if (v_idx >= 0) {
+      int cand = v_idx - cutoff_;
+      if (cand >= 0 && cand < axes_.n_d()) r = cand;
+    }
+    memo_.emplace(ymd, r);
+    return r;
+  }
+
+private:
+  const Axes &axes_;
+  int cutoff_;
+  std::unordered_map<std::int32_t, int> memo_;
+};
+
+// ============================================================================
+// 并行驱动: per-月 parquet 拿原子 idx, 读表后调用 body(view). body 内决定如何
+//   (无锁 / per-a mutex) 写 pool. 0 行月直接 skip.
 // ============================================================================
 template <class Body>
-inline void parallel_parse_dayfiles(const std::vector<DayFile> &files,
-                                    Body body) {
+inline void parallel_parse_months(const std::vector<MonthFile> &files,
+                                  Body body) {
   std::size_t n = files.size();
   if (n == 0) return;
   unsigned nt = misc::Affinity::core_count();
@@ -142,70 +161,15 @@ inline void parallel_parse_dayfiles(const std::vector<DayFile> &files,
     for (;;) {
       std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
       if (i >= n) break;
-      const DayFile &f = files[i];
-      std::string buf = misc::read_file_all(f.path);
-      if (buf.empty()) continue;
-      yyjson_doc *doc = yyjson_read(buf.data(), buf.size(), 0);
-      assert(doc);
-      yyjson_val *root = yyjson_doc_get_root(doc);
-      assert(yyjson_is_arr(root));
-      body(f, root);
-      yyjson_doc_free(doc);
+      pq::TableView v(pq::read_table(files[i].path));
+      if (v.rows() == 0) continue;
+      body(v);
     }
   };
   std::vector<std::thread> ts;
   ts.reserve(nt);
   for (unsigned t = 0; t < nt; ++t) ts.emplace_back(worker);
   for (auto &t : ts) t.join();
-}
-
-// 网格 itf body 辅助: 算 row, 然后 for each item 调 write(off, item).
-//   不在 axes 的 day (grid_day_exists false) → 整 file skip (语义同旧 replay_grid).
-//   floor_date(day) → v_idx; row = v_idx - cutoff; row 越界 → file skip.
-template <class Write>
-inline void per_file_grid_apply(const Axes &axes, const DayFile &f,
-                                yyjson_val *root, int cutoff, Write write) {
-  if (!grid_day_exists(axes, f.day)) return;
-  int v_idx = axes.floor_date(f.day);
-  if (v_idx < 0) return;
-  int row = v_idx - cutoff;
-  int n_d = axes.n_d();
-  if (row < 0 || row >= n_d) return;
-  std::size_t base_d = static_cast<std::size_t>(row);
-  std::size_t n_d_sz = static_cast<std::size_t>(n_d);
-
-  std::size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(root, i, n, item) {
-    int a = lookup_a(axes, item, "instrument");
-    if (a < 0) continue;
-    std::size_t off = static_cast<std::size_t>(a) * n_d_sz + base_d;
-    write(off, item);
-  }
-}
-
-// 事件 itf body 辅助: 算 row, for each item → 持 mu[a] 锁 emit.
-//   事件不要求 day ∈ axes (允许非 trading day 落到前一 trading day).
-//   row >= n_d ⇒ skip (未来日, 未发生).
-//   code_field: BigQuant = "instrument", Tushare = "ts_code".
-template <class Emit>
-inline void per_file_event_apply(const Axes &axes, const DayFile &f,
-                                 yyjson_val *root, int cutoff,
-                                 std::vector<std::mutex> &mu,
-                                 const char *code_field, Emit emit) {
-  int v_idx = axes.floor_date(f.day);
-  if (v_idx < 0) return;
-  int row = v_idx - cutoff;
-  if (row >= axes.n_d()) return;
-
-  std::size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(root, i, n, item) {
-    int a = lookup_a(axes, item, code_field);
-    if (a < 0) continue;
-    std::lock_guard<std::mutex> lk(mu[a]);
-    emit(a, row, item);
-  }
 }
 
 // 网格字段 per-A forward fill:
@@ -237,18 +201,26 @@ namespace itf_cn_stock_real_bar1d {
 
 constexpr int CUTOFF = -1;
 
-void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   std::size_t n = grid_n(axes);
   prealloc_grid_float(p.bar1d.close, n);
   prealloc_grid_float(p.bar1d.adjust_factor, n);
+  std::size_t n_d = static_cast<std::size_t>(axes.n_d());
 
-  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
-    per_file_grid_apply(axes, f, root, CUTOFF, [&](std::size_t off, yyjson_val *it) {
-      p.bar1d.close[off] = positive_or_inf(
-          as_float_or_nan(yyjson_obj_get(it, "close")));
-      p.bar1d.adjust_factor[off] = positive_or_inf(
-          as_float_or_nan(yyjson_obj_get(it, "adjust_factor")));
-    });
+  parallel_parse_months(files, [&](const pq::TableView &v) {
+    pq::Col date = v.col("date"), inst = v.col("instrument");
+    pq::Col close = v.col("close"), af = v.col("adjust_factor");
+    GridRowMemo memo(axes, CUTOFF);
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
+      int row = memo.row(date.yyyymmdd(i));
+      if (row < 0) continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0) continue;
+      std::size_t off = static_cast<std::size_t>(a) * n_d +
+                        static_cast<std::size_t>(row);
+      p.bar1d.close[off] = positive_or_inf(close.f32(i));
+      p.bar1d.adjust_factor[off] = positive_or_inf(af.f32(i));
+    }
   });
 }
 
@@ -269,18 +241,26 @@ namespace itf_cn_stock_shares {
 
 constexpr int CUTOFF = -1;
 
-void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   std::size_t n = grid_n(axes);
   prealloc_grid_float(p.shares.total_shares, n);
   prealloc_grid_float(p.shares.a_float_shares, n);
+  std::size_t n_d = static_cast<std::size_t>(axes.n_d());
 
-  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
-    per_file_grid_apply(axes, f, root, CUTOFF, [&](std::size_t off, yyjson_val *it) {
-      p.shares.total_shares[off] = positive_or_inf(
-          as_float_or_nan(yyjson_obj_get(it, "total_shares")));
-      p.shares.a_float_shares[off] = positive_or_inf(
-          as_float_or_nan(yyjson_obj_get(it, "a_float_shares")));
-    });
+  parallel_parse_months(files, [&](const pq::TableView &v) {
+    pq::Col date = v.col("date"), inst = v.col("instrument");
+    pq::Col ts = v.col("total_shares"), fs = v.col("a_float_shares");
+    GridRowMemo memo(axes, CUTOFF);
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
+      int row = memo.row(date.yyyymmdd(i));
+      if (row < 0) continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0) continue;
+      std::size_t off = static_cast<std::size_t>(a) * n_d +
+                        static_cast<std::size_t>(row);
+      p.shares.total_shares[off] = positive_or_inf(ts.f32(i));
+      p.shares.a_float_shares[off] = positive_or_inf(fs.f32(i));
+    }
   });
 }
 
@@ -302,20 +282,28 @@ namespace itf_cn_stock_limit_price {
 // CUTOFF=-1 (normal, 承认滞后). ST 翻转日略不准, 接受不 overlay.
 constexpr int CUTOFF = -1;
 
-void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   std::size_t n = grid_n(axes);
   prealloc_grid_float(p.limit_price.upper_limit, n);
   prealloc_grid_float(p.limit_price.lower_limit, n);
+  std::size_t n_d = static_cast<std::size_t>(axes.n_d());
 
-  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
-    per_file_grid_apply(axes, f, root, CUTOFF, [&](std::size_t off, yyjson_val *it) {
+  parallel_parse_months(files, [&](const pq::TableView &v) {
+    pq::Col date = v.col("date"), inst = v.col("instrument");
+    pq::Col up = v.col("upper_limit"), dn = v.col("lower_limit");
+    GridRowMemo memo(axes, CUTOFF);
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
+      int row = memo.row(date.yyyymmdd(i));
+      if (row < 0) continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0) continue;
+      std::size_t off = static_cast<std::size_t>(a) * n_d +
+                        static_cast<std::size_t>(row);
       // > 0; 0 / 负 / non-finite (含 2015-2017 部分缺口) → +inf 标记 "无限制",
       // ffill 不传播.
-      p.limit_price.upper_limit[off] = positive_or_inf(
-          as_float_or_nan(yyjson_obj_get(it, "upper_limit")));
-      p.limit_price.lower_limit[off] = positive_or_inf(
-          as_float_or_nan(yyjson_obj_get(it, "lower_limit")));
-    });
+      p.limit_price.upper_limit[off] = positive_or_inf(up.f32(i));
+      p.limit_price.lower_limit[off] = positive_or_inf(dn.f32(i));
+    }
   });
 }
 
@@ -337,27 +325,38 @@ namespace itf_cn_stock_status {
 // CUTOFF=0 (hybrid 伪装); 末日由 apply_meta_overlays 用 static_data 填充.
 constexpr int CUTOFF = 0;
 
-void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   std::size_t n = grid_n(axes);
   // 默认 0 = "正常 / 未停牌"; 缺日不 ffill.
   prealloc_grid_pod<std::int8_t>(p.status.st_status, n, 0);
   prealloc_grid_pod<std::uint8_t>(p.status.suspended, n, 0);
+  std::size_t n_d = static_cast<std::size_t>(axes.n_d());
 
-  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
-    per_file_grid_apply(axes, f, root, CUTOFF, [&](std::size_t off, yyjson_val *it) {
-      int st = as_int_or_default(yyjson_obj_get(it, "st_status"), 0);
-      int rw = as_int_or_default(yyjson_obj_get(it, "is_risk_warning"), 0);
-      int sp = as_int_or_default(yyjson_obj_get(it, "suspended"), 0);
+  parallel_parse_months(files, [&](const pq::TableView &v) {
+    pq::Col date = v.col("date"), inst = v.col("instrument");
+    pq::Col st_c = v.col("st_status"), rw_c = v.col("is_risk_warning");
+    pq::Col sp_c = v.col("suspended");
+    GridRowMemo memo(axes, CUTOFF);
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
+      int row = memo.row(date.yyyymmdd(i));
+      if (row < 0) continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0) continue;
+      std::size_t off = static_cast<std::size_t>(a) * n_d +
+                        static_cast<std::size_t>(row);
+      int st = st_c.i32(i, 0);
+      int rw = rw_c.i32(i, 0);
+      int sp = sp_c.i32(i, 0);
       // 4 态派生: st 1/2 优先; 否则 risk_warning=1 → 3 (退市整理期); else 0.
       // 退市整理期: 交易所摘 *ST 后 st 翻 0 但 is_risk_warning 仍 1; 用 3
-      // 保留识别力 (实测 *ST大通 2023/06/19 进整理期后 st_status=0/rw=1, 旧版漏判).
+      // 保留识别力 (实测 *ST大通 2023/06/19 进整理期后 st_status=0/rw=1).
       std::int8_t out_st = (st == 1) ? std::int8_t{1}
                            : (st == 2) ? std::int8_t{2}
                            : (rw != 0) ? std::int8_t{3}
                                        : std::int8_t{0};
       p.status.st_status[off] = out_st;
       p.status.suspended[off] = (sp != 0) ? std::uint8_t{1} : std::uint8_t{0};
-    });
+    }
   });
 }
 
@@ -372,23 +371,33 @@ void cache_layout(PitPool &p, CacheVisitor &v) {
 
 namespace itf_cn_stock_margin_trading_detail {
 
-// CUTOFF=0 (真盘前入库). 非两融标的日 = 无 day file 行 → is_margin=0 默认.
+// CUTOFF=0 (真盘前入库). 非两融标的日 = 无记录行 → is_margin=0 默认.
 constexpr int CUTOFF = 0;
 
-void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   std::size_t n = grid_n(axes);
   prealloc_grid_pod<std::uint8_t>(p.margin_detail.is_margin, n, 0);
   prealloc_grid_float(p.margin_detail.financing_balance, n);
   prealloc_grid_float(p.margin_detail.securities_lending_balance, n);
+  std::size_t n_d = static_cast<std::size_t>(axes.n_d());
 
-  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
-    per_file_grid_apply(axes, f, root, CUTOFF, [&](std::size_t off, yyjson_val *it) {
+  parallel_parse_months(files, [&](const pq::TableView &v) {
+    pq::Col date = v.col("date"), inst = v.col("instrument");
+    pq::Col fb = v.col("financing_balance");
+    pq::Col sb = v.col("securities_lending_balance");
+    GridRowMemo memo(axes, CUTOFF);
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
+      int row = memo.row(date.yyyymmdd(i));
+      if (row < 0) continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0) continue;
+      std::size_t off = static_cast<std::size_t>(a) * n_d +
+                        static_cast<std::size_t>(row);
       p.margin_detail.is_margin[off] = 1;
-      p.margin_detail.financing_balance[off] = non_negative_or_inf(
-          as_float_or_nan(yyjson_obj_get(it, "financing_balance")));
-      p.margin_detail.securities_lending_balance[off] = non_negative_or_inf(
-          as_float_or_nan(yyjson_obj_get(it, "securities_lending_balance")));
-    });
+      p.margin_detail.financing_balance[off] = non_negative_or_inf(fb.f32(i));
+      p.margin_detail.securities_lending_balance[off] =
+          non_negative_or_inf(sb.f32(i));
+    }
   });
 }
 
@@ -409,11 +418,9 @@ void cache_layout(PitPool &p, CacheVisitor &v) {
 namespace {
 
 // Tushare forecast type string → enum (业务只关心 首亏/续亏).
-inline ForecastType parse_forecast_type(const char *s, std::size_t n) {
-  if (!s || n == 0) return ForecastType::Other;
-  // UTF-8 hard-coded; "首亏" 6 bytes, "续亏" 6 bytes.
-  if (n == 6 && std::memcmp(s, "首亏", 6) == 0) return ForecastType::FirstLoss;
-  if (n == 6 && std::memcmp(s, "续亏", 6) == 0) return ForecastType::ContinueLoss;
+inline ForecastType parse_forecast_type(std::string_view s) {
+  if (s == "首亏") return ForecastType::FirstLoss;
+  if (s == "续亏") return ForecastType::ContinueLoss;
   return ForecastType::Other;
 }
 
@@ -424,22 +431,27 @@ namespace itf_cn_stock_industry_component {
 // MonthFirst sw2021 一级行业归属快照. 月初首日 industry_l1 自然延续上月 base.
 constexpr int CUTOFF = -1;
 
-void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   std::size_t n_a = static_cast<std::size_t>(axes.n_a());
   p.industry_component.resize_chains(n_a);
   std::vector<std::mutex> mu(n_a);
 
-  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
-    per_file_event_apply(axes, f, root, CUTOFF, mu, "instrument",
-                         [&](int a, int row, yyjson_val *it) {
-      const char *ind = as_cstr_or_null(yyjson_obj_get(it, "industry"));
-      if (!ind || std::strcmp(ind, "sw2021") != 0) return;
-      std::string_view name = as_sv(yyjson_obj_get(it, "industry_level1_name"));
+  parallel_parse_months(files, [&](const pq::TableView &v) {
+    pq::Col date = v.col("date"), inst = v.col("instrument");
+    pq::Col ind = v.col("industry"), l1 = v.col("industry_level1_name");
+    EventRowMemo memo(axes, CUTOFF);
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
+      if (ind.str(i) != "sw2021") continue;
+      int row = memo.row(date.yyyymmdd(i));
+      if (row < 0) continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0) continue;
       IndustryComponentEv ev{};
       ev.v = row;
-      ev.l1_id = sw2021_l1_name_to_id(name);
+      ev.l1_id = sw2021_l1_name_to_id(l1.str(i));
+      std::lock_guard<std::mutex> lk(mu[a]);
       p.industry_component.push_chain(a, ev);
-    });
+    }
   });
   p.industry_component.sort_chains();
   p.industry_component.finalize();
@@ -455,24 +467,30 @@ namespace itf_cn_stock_industry_change {
 
 constexpr int CUTOFF = -1;
 
-void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   std::size_t n_a = static_cast<std::size_t>(axes.n_a());
   p.industry_change.resize_chains(n_a);
   std::vector<std::mutex> mu(n_a);
 
-  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
-    per_file_event_apply(axes, f, root, CUTOFF, mu, "instrument",
-                         [&](int a, int row, yyjson_val *it) {
-      const char *ind = as_cstr_or_null(yyjson_obj_get(it, "industry"));
-      if (!ind || std::strcmp(ind, "sw2021") != 0) return;
-      if (as_int_or_default(yyjson_obj_get(it, "industry_level"), 0) != 1) return;
-      if (as_int_or_default(yyjson_obj_get(it, "change_flag"), -1) != 1) return;
-      std::string_view name = as_sv(yyjson_obj_get(it, "industry_name"));
+  parallel_parse_months(files, [&](const pq::TableView &v) {
+    pq::Col date = v.col("date"), inst = v.col("instrument");
+    pq::Col ind = v.col("industry"), lvl = v.col("industry_level");
+    pq::Col flag = v.col("change_flag"), name = v.col("industry_name");
+    EventRowMemo memo(axes, CUTOFF);
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
+      if (ind.str(i) != "sw2021") continue;
+      if (lvl.i32(i, 0) != 1) continue;
+      if (flag.i32(i, -1) != 1) continue;
+      int row = memo.row(date.yyyymmdd(i));
+      if (row < 0) continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0) continue;
       IndustryChangeEv ev{};
       ev.v = row;
-      ev.l1_id = sw2021_l1_name_to_id(name);
+      ev.l1_id = sw2021_l1_name_to_id(name.str(i));
+      std::lock_guard<std::mutex> lk(mu[a]);
       p.industry_change.push_chain(a, ev);
-    });
+    }
   });
   p.industry_change.sort_chains();
   p.industry_change.finalize();
@@ -488,21 +506,29 @@ namespace itf_cn_stock_dividend {
 
 constexpr int CUTOFF = -1;
 
-void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   std::size_t n_a = static_cast<std::size_t>(axes.n_a());
   p.dividend.resize_chains(n_a);
   std::vector<std::mutex> mu(n_a);
 
-  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
-    per_file_event_apply(axes, f, root, CUTOFF, mu, "instrument",
-                         [&](int a, int row, yyjson_val *it) {
+  parallel_parse_months(files, [&](const pq::TableView &v) {
+    pq::Col vd = v.col("publish_date"), inst = v.col("instrument");
+    pq::Col rd = v.col("report_date"), ed = v.col("ex_date");
+    pq::Col cash = v.col("cash_after_tax");
+    EventRowMemo memo(axes, CUTOFF);
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
+      int row = memo.row(vd.yyyymmdd(i));
+      if (row < 0) continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0) continue;
       DividendEv ev;
       ev.v = row;
-      ev.report_date = as_yyyymmdd_int(yyjson_obj_get(it, "report_date"));
-      ev.ex_date = as_yyyymmdd_int(yyjson_obj_get(it, "ex_date"));
-      ev.cash_after_tax = as_float_or_nan(yyjson_obj_get(it, "cash_after_tax"));
+      ev.report_date = rd.yyyymmdd(i);
+      ev.ex_date = ed.yyyymmdd(i);
+      ev.cash_after_tax = cash.f32(i);
+      std::lock_guard<std::mutex> lk(mu[a]);
       p.dividend.push_chain(a, ev);
-    });
+    }
   });
   p.dividend.sort_chains();
   p.dividend.finalize();
@@ -518,27 +544,34 @@ namespace itf_cn_stock_financial_ttm_shift {
 
 constexpr int CUTOFF = -1;
 
-void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   std::size_t n_a = static_cast<std::size_t>(axes.n_a());
   p.financial_ttm.resize_chains(n_a);
   std::vector<std::mutex> mu(n_a);
 
-  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
-    per_file_event_apply(axes, f, root, CUTOFF, mu, "instrument",
-                         [&](int a, int row, yyjson_val *it) {
+  parallel_parse_months(files, [&](const pq::TableView &v) {
+    pq::Col date = v.col("date"), inst = v.col("instrument");
+    pq::Col shift = v.col("shift"), rd = v.col("report_date");
+    pq::Col rev = v.col("total_operating_revenue_ttm");
+    pq::Col np = v.col("net_profit_to_parent_shareholders_ttm");
+    pq::Col cf = v.col("net_cffoa_ttm");
+    EventRowMemo memo(axes, CUTOFF);
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       // 仅入 shift==0 (该 visible_date 最新报告期 TTM).
-      if (as_int_or_default(yyjson_obj_get(it, "shift"), -1) != 0) return;
+      if (shift.i32(i, -1) != 0) continue;
+      int row = memo.row(date.yyyymmdd(i));
+      if (row < 0) continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0) continue;
       FinancialTtmEv ev;
       ev.v = row;
-      ev.report_date = as_yyyymmdd_int(yyjson_obj_get(it, "report_date"));
-      ev.total_operating_revenue_ttm =
-          as_float_or_nan(yyjson_obj_get(it, "total_operating_revenue_ttm"));
-      ev.net_profit_to_parent_shareholders_ttm = as_float_or_nan(
-          yyjson_obj_get(it, "net_profit_to_parent_shareholders_ttm"));
-      ev.net_cffoa_ttm =
-          as_float_or_nan(yyjson_obj_get(it, "net_cffoa_ttm"));
+      ev.report_date = rd.yyyymmdd(i);
+      ev.total_operating_revenue_ttm = rev.f32(i);
+      ev.net_profit_to_parent_shareholders_ttm = np.f32(i);
+      ev.net_cffoa_ttm = cf.f32(i);
+      std::lock_guard<std::mutex> lk(mu[a]);
       p.financial_ttm.push_chain(a, ev);
-    });
+    }
   });
   p.financial_ttm.sort_chains();
   p.financial_ttm.finalize();
@@ -554,25 +587,33 @@ namespace itf_cn_stock_financial_balance_general_pit {
 
 constexpr int CUTOFF = -1;
 
-void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   std::size_t n_a = static_cast<std::size_t>(axes.n_a());
   p.financial_balance.resize_chains(n_a);
   std::vector<std::mutex> mu(n_a);
 
-  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
-    per_file_event_apply(axes, f, root, CUTOFF, mu, "instrument",
-                         [&](int a, int row, yyjson_val *it) {
+  parallel_parse_months(files, [&](const pq::TableView &v) {
+    pq::Col date = v.col("date"), inst = v.col("instrument");
+    pq::Col rd = v.col("report_date");
+    pq::Col toe = v.col("total_owner_equity");
+    pq::Col tep = v.col("total_equity_to_parent_shareholders");
+    pq::Col ta = v.col("total_assets");
+    EventRowMemo memo(axes, CUTOFF);
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       // 不过滤 fs_quarter_index — 季/半/年报均入; feature 层 max(report_date) MRQ.
+      int row = memo.row(date.yyyymmdd(i));
+      if (row < 0) continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0) continue;
       FinancialBalanceEv ev;
       ev.v = row;
-      ev.report_date = as_yyyymmdd_int(yyjson_obj_get(it, "report_date"));
-      ev.total_owner_equity =
-          as_float_or_nan(yyjson_obj_get(it, "total_owner_equity"));
-      ev.total_equity_to_parent_shareholders = as_float_or_nan(
-          yyjson_obj_get(it, "total_equity_to_parent_shareholders"));
-      ev.total_assets = as_float_or_nan(yyjson_obj_get(it, "total_assets"));
+      ev.report_date = rd.yyyymmdd(i);
+      ev.total_owner_equity = toe.f32(i);
+      ev.total_equity_to_parent_shareholders = tep.f32(i);
+      ev.total_assets = ta.f32(i);
+      std::lock_guard<std::mutex> lk(mu[a]);
       p.financial_balance.push_chain(a, ev);
-    });
+    }
   });
   p.financial_balance.sort_chains();
   p.financial_balance.finalize();
@@ -588,24 +629,30 @@ namespace itf_cn_stock_financial_income_general_pit {
 
 constexpr int CUTOFF = -1;
 
-void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   std::size_t n_a = static_cast<std::size_t>(axes.n_a());
   p.financial_income_annual.resize_chains(n_a);
   std::vector<std::mutex> mu(n_a);
 
-  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
-    per_file_event_apply(axes, f, root, CUTOFF, mu, "instrument",
-                         [&](int a, int row, yyjson_val *it) {
+  parallel_parse_months(files, [&](const pq::TableView &v) {
+    pq::Col date = v.col("date"), inst = v.col("instrument");
+    pq::Col fqi = v.col("fs_quarter_index"), rd = v.col("report_date");
+    pq::Col np = v.col("net_profit_to_parent_shareholders");
+    EventRowMemo memo(axes, CUTOFF);
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       // 仅入 fs_quarter_index==4 (年报) — 给 ni_raw / dividend_st 阈值用.
-      if (as_int_or_default(yyjson_obj_get(it, "fs_quarter_index"), -1) != 4)
-        return;
+      if (fqi.i32(i, -1) != 4) continue;
+      int row = memo.row(date.yyyymmdd(i));
+      if (row < 0) continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0) continue;
       FinancialIncomeAnnualEv ev;
       ev.v = row;
-      ev.report_date = as_yyyymmdd_int(yyjson_obj_get(it, "report_date"));
-      ev.net_profit_to_parent_shareholders = as_float_or_nan(
-          yyjson_obj_get(it, "net_profit_to_parent_shareholders"));
+      ev.report_date = rd.yyyymmdd(i);
+      ev.net_profit_to_parent_shareholders = np.f32(i);
+      std::lock_guard<std::mutex> lk(mu[a]);
       p.financial_income_annual.push_chain(a, ev);
-    });
+    }
   });
   p.financial_income_annual.sort_chains();
   p.financial_income_annual.finalize();
@@ -619,28 +666,32 @@ void cache_layout(PitPool &p, CacheVisitor &v) {
 
 namespace itf_forecast {
 
-// Tushare forecast: 字段用 ts_code; type 字符串一次性 map 到 enum.
+// Tushare forecast: 字段用 ts_code; 日期列是 "YYYYMMDD" string (tushare parquet).
 constexpr int CUTOFF = -1;
 
-void build(const Axes &axes, const std::vector<DayFile> &files, PitPool &p) {
+void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   std::size_t n_a = static_cast<std::size_t>(axes.n_a());
   p.forecast.resize_chains(n_a);
   std::vector<std::mutex> mu(n_a);
 
-  parallel_parse_dayfiles(files, [&](const DayFile &f, yyjson_val *root) {
-    per_file_event_apply(axes, f, root, CUTOFF, mu, "ts_code",
-                         [&](int a, int row, yyjson_val *it) {
+  parallel_parse_months(files, [&](const pq::TableView &v) {
+    pq::Col vd = v.col("ann_date"), inst = v.col("ts_code");
+    pq::Col ed = v.col("end_date"), type = v.col("type");
+    pq::Col lpn = v.col("last_parent_net");
+    EventRowMemo memo(axes, CUTOFF);
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
+      int row = memo.row(vd.yyyymmdd(i));
+      if (row < 0) continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0) continue;
       ForecastEv ev;
       ev.v = row;
-      ev.end_date = as_yyyymmdd_int(yyjson_obj_get(it, "end_date"));
-      yyjson_val *tv = yyjson_obj_get(it, "type");
-      const char *ts = as_cstr_or_null(tv);
-      std::size_t tl = ts ? yyjson_get_len(tv) : 0;
-      ev.type = parse_forecast_type(ts, tl);
-      ev.last_parent_net =
-          as_float_or_nan(yyjson_obj_get(it, "last_parent_net"));
+      ev.end_date = ed.yyyymmdd(i);
+      ev.type = parse_forecast_type(type.str(i));
+      ev.last_parent_net = lpn.f32(i);
+      std::lock_guard<std::mutex> lk(mu[a]);
       p.forecast.push_chain(a, ev);
-    });
+    }
   });
   p.forecast.sort_chains();
   p.forecast.finalize();
@@ -711,46 +762,44 @@ const int ITFS_COUNT = static_cast<int>(sizeof(ITFS) / sizeof(ITFS[0]));
 
 // ============================================================================
 // apply_meta_overlays — hybrid PIT 收尾.
+//   读 data/_meta/cn_stock_static_data.parquet (真盘前 09:00 快照), 把
+//   suspended / st_status 填充到 row=last_d (实盘当日). 历史天完全不动.
+//   _meta 不存在 ⇒ silent noop (纯历史回测场景).
 // ============================================================================
 void apply_meta_overlays(const Axes &axes, PitPool &pool) {
   namespace fs = std::filesystem;
-  fs::path meta_path =
-      misc::git_root() / "data" / "_meta" / "cn_stock_static_data.json";
+  fs::path meta_path = pq::meta_path("cn_stock_static_data");
   if (!fs::exists(meta_path)) return;
-
-  std::string buf = misc::read_file_all(meta_path);
-  if (buf.empty()) return;
 
   int n_d = axes.n_d();
   if (n_d <= 0) return;
   int last_d = n_d - 1;
-  std::size_t base_off = static_cast<std::size_t>(last_d);
 
-  yyjson_doc *doc = yyjson_read(buf.data(), buf.size(), 0);
-  assert(doc);
-  yyjson_val *root = yyjson_doc_get_root(doc);
-  assert(yyjson_is_arr(root));
+  pq::TableView v(pq::read_table(meta_path));
+  if (v.rows() == 0) return;
+
+  pq::Col date = v.col("date"), inst = v.col("instrument");
+  pq::Col st_c = v.col("st_status"), dl_c = v.col("in_delist");
+  pq::Col sp_c = v.col("suspended");
 
   // static_data 盘前更新, trading_days 可能盘后才补 CN 当日; 只校验快照为今天.
-  yyjson_val *first = yyjson_arr_get_first(root);
-  if (first) {
-    const char *snap_d = as_cstr_or_null(yyjson_obj_get(first, "date"));
-    assert(snap_d && "cn_stock_static_data row 缺 date 字段");
-    const std::string today = misc::today_yyyymmdd();
-    assert(today == snap_d && "cn_stock_static_data.MAX(date) 不是今天");
+  {
+    std::string today = misc::today_yyyymmdd();
+    std::string snap = ymd_str(date.yyyymmdd(0));
+    assert(!snap.empty() && "cn_stock_static_data 缺 date");
+    assert(today == snap && "cn_stock_static_data.MAX(date) 不是今天");
   }
 
   std::size_t n_d_sz = static_cast<std::size_t>(n_d);
-  std::size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(root, i, n, item) {
-    int a = lookup_a(axes, item, "instrument");
+  std::size_t base_off = static_cast<std::size_t>(last_d);
+  for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
+    int a = lookup_a(axes, inst.str(i));
     if (a < 0) continue;
     std::size_t off = static_cast<std::size_t>(a) * n_d_sz + base_off;
 
-    int st = as_int_or_default(yyjson_obj_get(item, "st_status"), 0);
-    int dl = as_int_or_default(yyjson_obj_get(item, "in_delist"), 0);
-    int sp = as_int_or_default(yyjson_obj_get(item, "suspended"), 0);
+    int st = st_c.i32(i, 0);
+    int dl = dl_c.i32(i, 0);
+    int sp = sp_c.i32(i, 0);
     std::int8_t out_st = (dl != 0) ? std::int8_t{3}
                          : (st == 1) ? std::int8_t{1}
                          : (st == 2) ? std::int8_t{2}
@@ -758,8 +807,6 @@ void apply_meta_overlays(const Axes &axes, PitPool &pool) {
     pool.status.st_status[off] = out_st;
     pool.status.suspended[off] = (sp != 0) ? std::uint8_t{1} : std::uint8_t{0};
   }
-
-  yyjson_doc_free(doc);
 }
 
 } // namespace feature

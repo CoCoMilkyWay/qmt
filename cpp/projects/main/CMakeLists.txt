@@ -109,21 +109,17 @@ set(SOURCES
     ../../src/main.cpp
     ../../src/misc/date.cpp
     ../../src/misc/fs.cpp
-    ../../src/misc/store.cpp
-    ../../src/misc/journal.cpp
+    ../../src/misc/parquet.cpp
     ../../src/misc/schedule.cpp
     ../../src/misc/logging.cpp
     ../../src/misc/npy.cpp
     ../../src/misc/mmap.cpp
     ../../src/api/bigquant/dai.cpp
     ../../src/api/bigquant/spec.cpp
-    ../../src/api/bigquant/parse.cpp
-    ../../src/api/bigquant/store.cpp
     ../../src/api/bigquant/pipeline.cpp
-    ../../src/api/bigquant/import.cpp
     ../../src/api/tushare/http.cpp
     ../../src/api/tushare/spec.cpp
-    ../../src/api/tushare/store.cpp
+    ../../src/api/tushare/parse.cpp
     ../../src/api/tushare/pipeline.cpp
     ../../src/feature/axis.cpp
     ../../src/feature/industry.cpp
@@ -145,8 +141,7 @@ set(HEADERS
     ../../include/package/yyjson/yyjson.h
     ../../include/misc/date.hpp
     ../../include/misc/fs.hpp
-    ../../include/misc/store.hpp
-    ../../include/misc/journal.hpp
+    ../../include/misc/parquet.hpp
     ../../include/misc/schedule.hpp
     ../../include/misc/timer.hpp
     ../../include/misc/print.hpp
@@ -159,13 +154,10 @@ set(HEADERS
     ../../include/misc/mmap.hpp
     ../../include/api/bigquant/dai.hpp
     ../../include/api/bigquant/spec.hpp
-    ../../include/api/bigquant/parse.hpp
-    ../../include/api/bigquant/store.hpp
     ../../include/api/bigquant/pipeline.hpp
-    ../../include/api/bigquant/import.hpp
     ../../include/api/tushare/http.hpp
     ../../include/api/tushare/spec.hpp
-    ../../include/api/tushare/store.hpp
+    ../../include/api/tushare/parse.hpp
     ../../include/api/tushare/pipeline.hpp
     ../../include/feature/axis.hpp
     ../../include/feature/industry.hpp

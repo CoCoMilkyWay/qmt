@@ -4,11 +4,10 @@
 #include "feature/pit.hpp"
 #include "misc/fs.hpp"
 #include "misc/mmap.hpp"
+#include "misc/parquet.hpp"
 
 #include <cassert>
-#include <cctype>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -28,7 +27,8 @@ namespace {
 //     u64 magic         = POOL_MAGIC
 //     u32 version       = POOL_VERSION
 //     u32 n_sections
-//     u64 cache_key     (FNV-1a over POOL_VERSION + file_name + dayfile list + axes meta)
+//     u64 cache_key     (FNV-1a over POOL_VERSION + file_name + 月 parquet 列表
+//                        + axes 语义 hash)
 //     u64 _reserved     (头对齐到 32)
 //   [Section Table  n × 16 bytes]
 //     per section: u64 file_offset, u64 bytes
@@ -36,13 +36,12 @@ namespace {
 //     每段 8 字节对齐, content = PoolArr<T> raw bytes.
 //
 // hit: mmap → 校验 magic/version/key → cache_layout(Map) 把 PoolArr.data 指过去.
-// miss: itf.build → cache_layout(Size) 算总长 → cache_layout(Write) 落盘 →
-//       重新 mmap 取代 owned (可选, 这里不做; 当次留 owned, 下次再 hit 即可).
+// miss: itf.build → cache_layout(Write) 落盘.
 // ============================================================================
 
 constexpr std::uint64_t POOL_MAGIC = 0x315441444c4f4f50ULL; // 'POOLDAT1'
 // POOL_VERSION: PitPool 字段 / Ev struct / cache_layout 顺序变更时手动 +1.
-constexpr std::uint32_t POOL_VERSION = 1;
+constexpr std::uint32_t POOL_VERSION = 2;
 
 constexpr std::uint64_t FNV_OFFSET = 1469598103934665603ULL;
 constexpr std::uint64_t FNV_PRIME = 1099511628211ULL;
@@ -57,14 +56,6 @@ struct PoolHeader {
 static_assert(sizeof(PoolHeader) == 32, "PoolHeader must be 32 bytes");
 
 using SectionEntry = std::pair<std::uint64_t, std::uint64_t>; // (offset, bytes)
-
-// axes _meta 文件: trading_days / cn_stock_basic_info 决定 D/A 轴.
-//   用文件内容 hash, 不用 mtime: emit_meta 每轮会重建 _meta, 内容不变不应失效.
-//   cn_stock_static_data 只参与 apply_meta_overlays, overlay 每次都跑, 不入 pool cache key.
-constexpr const char *AXIS_META_FILES[] = {
-    "trading_days.json",
-    "cn_stock_basic_info.json",
-};
 
 template <class T>
 void mix_pod(std::uint64_t &h, const T &v) {
@@ -82,68 +73,29 @@ void mix_string(std::uint64_t &h, std::string_view s) {
   }
 }
 
-// 沿用旧 enumerate_dayfiles 逻辑 (扫 data/YYYY/MM/DD/<itf>.json, path 升序).
-std::vector<DayFile> enumerate_dayfiles(const char *file_name) {
-  std::vector<DayFile> files;
-  fs::path data_root = misc::git_root() / "data";
-  assert(fs::exists(data_root));
-
-  for (auto &y_ent : fs::directory_iterator(data_root)) {
-    if (!y_ent.is_directory()) continue;
-    std::string y = y_ent.path().filename().string();
-    if (y.size() != 4 || !std::isdigit(static_cast<unsigned char>(y[0])))
-      continue;
-
-    for (auto &m_ent : fs::directory_iterator(y_ent.path())) {
-      if (!m_ent.is_directory()) continue;
-      std::string m = m_ent.path().filename().string();
-      if (m.size() != 2) continue;
-
-      for (auto &d_ent : fs::directory_iterator(m_ent.path())) {
-        if (!d_ent.is_directory()) continue;
-        std::string dd = d_ent.path().filename().string();
-        if (dd.size() != 2) continue;
-
-        std::string day = y + m + dd;
-        fs::path p = d_ent.path() / (std::string(file_name) + ".json");
-        if (fs::exists(p)) files.push_back(DayFile{std::move(day), std::move(p)});
-      }
-    }
-  }
-  std::sort(files.begin(), files.end(),
-            [](const DayFile &a, const DayFile &b) { return a.path < b.path; });
-  return files;
-}
-
-std::uint64_t compute_axes_meta_key() {
-  fs::path root = misc::git_root();
+// axes 语义 hash — 直接对 D 轴 / A 轴内容 hash (零文件依赖):
+//   _meta / trading_days parquet 每轮 update 重写 (mtime 变) 但轴内容通常不变,
+//   语义 hash 保证 cache 不被无谓打穿; 轴真变 (新交易日 / 新股) 时全部失效 (正确).
+std::uint64_t compute_axes_key(const Axes &axes) {
   std::uint64_t h = FNV_OFFSET;
-  for (const char *meta : AXIS_META_FILES) {
-    fs::path p = root / "data" / "_meta" / meta;
-    mix_string(h, std::string_view(meta));
-    bool exists = fs::exists(p);
-    mix_pod(h, exists);
-    if (!exists) continue;
-    std::string buf = misc::read_file_all(p);
-    std::uint64_t sz = static_cast<std::uint64_t>(buf.size());
-    mix_pod(h, sz);
-    mix_string(h, buf);
-  }
+  for (const std::string &d : axes.dates) mix_string(h, d);
+  for (const std::string &c : axes.codes) mix_string(h, c);
   return h;
 }
 
-// cache key — 看 dayfile mtime/size + axes meta 内容 (+ 代码 POOL_VERSION + itf name 防错配).
-//   dayfile 或 axes 内容变化 ⇒ cache 失效; 仅 _meta 重写但内容不变 ⇒ 复用.
+// cache key — 看该 itf 全部月 parquet 的 relpath/size/mtime + axes 语义 key
+//   (+ 代码 POOL_VERSION + itf name 防错配).
+//   开放月重拉 → mtime 变 ⇒ 仅该 itf cache 失效; 其他 itf 不受影响.
 std::uint64_t compute_cache_key(const ItfDesc &itf,
-                                const std::vector<DayFile> &files,
-                                std::uint64_t axes_meta_key) {
+                                const std::vector<MonthFile> &files,
+                                std::uint64_t axes_key) {
   fs::path root = misc::git_root();
   std::uint64_t h = FNV_OFFSET;
   mix_pod(h, POOL_VERSION);
   mix_string(h, itf.file_name);
-  mix_pod(h, axes_meta_key);
+  mix_pod(h, axes_key);
 
-  for (const DayFile &f : files) {
+  for (const MonthFile &f : files) {
     std::string rel = fs::relative(f.path, root).generic_string();
     mix_string(h, rel);
     std::uint64_t sz = static_cast<std::uint64_t>(fs::file_size(f.path));
@@ -153,6 +105,14 @@ std::uint64_t compute_cache_key(const ItfDesc &itf,
   }
 
   return h;
+}
+
+std::vector<MonthFile> enumerate_month_files(const char *file_name) {
+  std::vector<MonthFile> files;
+  for (auto &[ym, path] : misc::pq::list_month_files(file_name)) {
+    files.push_back(MonthFile{ym, path});
+  }
+  return files;
 }
 
 fs::path pool_cache_path(const ItfDesc &itf) {
@@ -198,39 +158,23 @@ bool try_map_pool_cache(const ItfDesc &itf, std::uint64_t key, PitPool &pool,
 
 // miss 路径收尾: itf.build 已写好 pool, 这里 dump 到 cache file.
 void dump_pool_cache(const ItfDesc &itf, std::uint64_t key, PitPool &pool) {
-  // section table 大小未知, 但 cache_layout 顺序一致 ⇒ 先跑 Write 模式拿
-  // table + 主体 buffer, 再回填 header.
   std::vector<SectionEntry> sections;
   std::string body;
-  // section 区在文件内的起点 = sizeof(header) + n_sections * 16, 但 n_sections
-  // 必须先知道. 跑一遍 cache_layout(Size) 数 sections 数:
-  std::size_t n_sections_pred = 0;
-  {
-    CacheVisitor v;
-    v.kind = CacheVisitor::Size;
-    // total_bytes 不关心, 借这个 mode 数 visit 次数.
-    // 用 lambda hack: 我们自己 wrap visitor; 这里偷个懒, 直接走 Write 模式但
-    // align_base 先用 0, 之后再 fix offset (offset 都 += 真正 align_base).
-    (void)v;
-  }
-  std::size_t section_base = 0; // 占位; Write 后回填
   {
     CacheVisitor v;
     v.kind = CacheVisitor::Write;
     v.write_out = &body;
     v.sections = &sections;
-    v.write_align_base = 0; // 临时
+    v.write_align_base = 0; // 临时; 真实 section_base 下面回填
     itf.cache_layout(pool, v);
   }
-  // 真实 section_base = header + table size:
   std::uint32_t n_sections = static_cast<std::uint32_t>(sections.size());
-  section_base = sizeof(PoolHeader) +
-                 static_cast<std::size_t>(n_sections) * sizeof(SectionEntry);
-  // 把 align_base 加回去 (Write 时 align_base=0 → body 内 offset 已自 8 对齐;
-  // section_base 自身需要也 8 对齐 — header(32) + table(16N) 必然 8 对齐 ✓).
+  std::size_t section_base =
+      sizeof(PoolHeader) +
+      static_cast<std::size_t>(n_sections) * sizeof(SectionEntry);
+  // header(32) + table(16N) 必然 8 对齐 → body 内 offset 加 base 后仍 8 对齐.
   for (auto &s : sections) s.first += section_base;
 
-  // 拼最终输出: header + table + body
   std::string out;
   out.reserve(section_base + body.size());
   PoolHeader hdr{};
@@ -250,20 +194,21 @@ void dump_pool_cache(const ItfDesc &itf, std::uint64_t key, PitPool &pool) {
 
 // ============================================================================
 // load_pit — Phase 1 入口.
-//   per-itf: 算 cache_key → 试 hit (mmap + 视图) → fallback miss (build + dump).
-//   全部 itf 都跑完后, 末段 overlay + ffill 统一过一遍 (不入 cache, 永远跑最新代码).
+//   per-itf: 枚举月 parquet → 算 cache_key → 试 hit (mmap + 视图) → fallback
+//   miss (build + dump). 全部 itf 都跑完后, 末段 overlay + ffill 统一过一遍
+//   (不入 cache, 永远跑最新代码).
 // ============================================================================
 void load_pit(const Axes &axes, PitPool &pool) {
   pool._cache_mmaps.resize(static_cast<std::size_t>(ITFS_COUNT));
 
-  std::uint64_t axes_meta_key = compute_axes_meta_key();
+  std::uint64_t axes_key = compute_axes_key(axes);
   std::size_t hit_count = 0;
   std::size_t total_files = 0;
   for (int i = 0; i < ITFS_COUNT; ++i) {
     const ItfDesc &itf = ITFS[i];
-    std::vector<DayFile> files = enumerate_dayfiles(itf.file_name);
+    std::vector<MonthFile> files = enumerate_month_files(itf.file_name);
     total_files += files.size();
-    std::uint64_t key = compute_cache_key(itf, files, axes_meta_key);
+    std::uint64_t key = compute_cache_key(itf, files, axes_key);
 
     bool hit = try_map_pool_cache(itf, key, pool, pool._cache_mmaps[i]);
     if (!hit) {
@@ -276,7 +221,7 @@ void load_pit(const Axes &axes, PitPool &pool) {
     }
   }
   std::cout << "[feature][load] pool cache " << hit_count << "/" << ITFS_COUNT
-            << " hits, " << total_files << " dayfiles" << std::endl;
+            << " hits, " << total_files << " month parquet(s)" << std::endl;
 
   // overlay (写 row=last_d 一行; mmap COW 触发) — 永远跑, 不入 cache.
   apply_meta_overlays(axes, pool);

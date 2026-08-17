@@ -35,11 +35,11 @@ struct PitPool;  // fwd decl
 // hit 路径 mmap(MAP_PRIVATE) → PoolArr.map_view 把 data 指针指过去 → 零 copy 零
 // 反序列化; 后续 overlay / ffill 写 PoolArr 由 OS 自动 COW (不脏文件).
 //
-// 数据源 (BigQuant + Tushare 新基建):
+// 数据源 (data/YYYY-MM/<itf>.parquet 月度分片):
 //   全部 BigQuant 表入库时间盘后 17:00 后, PIT 严格 = -1. 项目按业务可推出性分两类
 //   模式 (详见 README §cutoff):
-//     normal (CUTOFF=-1, 承认滞后): row D=T 取 T-1 day file 数据.
-//     hybrid (CUTOFF=0,  伪装盘前): 历史 day file 按 row=v_idx (假装盘前可见);
+//     normal (CUTOFF=-1, 承认滞后): row D=T 取 T-1 数据.
+//     hybrid (CUTOFF=0,  伪装盘前): 历史按 row=v_idx (假装盘前可见);
 //                                   最后一天 (= 实盘当日) 由 apply_meta_overlays
 //                                   用 cn_stock_static_data (真盘前 09:00) 填 row=last_d.
 //
@@ -201,7 +201,7 @@ struct GridShares {
 };
 
 // cn_stock_limit_price (CUTOFF=-1, normal): 当日适用涨跌停价 [元/股].
-//   实际 BigQuant 入库 17:00 → 承认滞后, row D=T 取 T-1 day file 的 limit.
+//   实际 BigQuant 入库 17:00 → 承认滞后, row D=T 取 T-1 的 limit.
 struct GridLimitPrice {
   PoolArr<float> upper_limit;
   PoolArr<float> lower_limit;
@@ -246,7 +246,7 @@ struct IndustryChangeEv {
 };
 
 // cn_stock_dividend (CUTOFF=-1): 分红事件.
-//   report_date / ex_date 为 YYYYMMDD int32 (前 = std::string, 现已 POD 化).
+//   report_date / ex_date 为 YYYYMMDD int32 (POD; 0 = 缺失).
 //   dy_raw 走 ex_date trailing 12M 窗口; dividend_st 用 cash_after_tax × share_raw[ev.v]
 //   推 3y 累计现金分红 (按 report_date.Y 窗口).
 struct DividendEv {
@@ -328,11 +328,11 @@ struct PitPool {
 };
 
 // ============================================================================
-// DayFile: (day, path) 二元组. itf.build 的输入. load.cpp 枚举给定 itf 的
-//   全部 dayfile (data/<Y>/<M>/<D>/<itf>.json) 升序排列后传入.
+// MonthFile: (ym, path) 二元组. itf.build 的输入. load.cpp 枚举给定 itf 的
+//   全部月度 parquet (data/YYYY-MM/<itf>.parquet) 升序排列后传入.
 // ============================================================================
-struct DayFile {
-  std::string day; // "YYYYMMDD"
+struct MonthFile {
+  std::string ym; // "YYYY-MM"
   std::filesystem::path path;
 };
 
@@ -404,9 +404,10 @@ struct CacheVisitor {
 //
 // 端到端单点:
 //   build(axes, files, pool):
-//     从 dayfile JSON 直接写入 pool 字段 (并行 / per-a mutex 由 itf 内部决定).
-//     全程串通 prealloc → parse → emplace → sort → finalize, 不经任何中间
-//     row 表示. miss 路径调一次. 调完 pool 字段就是"row D 已 cutoff 的合法数据".
+//     从月度 parquet (arrow 列) 直接写入 pool 字段 (并行 / per-a mutex 由 itf
+//     内部决定). 全程串通 prealloc → 读列 → emplace → sort → finalize, 不经
+//     任何中间 row 表示. miss 路径调一次. 调完 pool 字段就是"row D 已 cutoff
+//     的合法数据".
 //   cache_layout(pool, visitor):
 //     列出此 itf 在 cache 内的 PoolArr blob (固定顺序). dump / map / size 走同一表.
 //   post_ffill(axes, pool):
@@ -414,8 +415,8 @@ struct CacheVisitor {
 //     POOL_VERSION). 事件 itf 留 nullptr.
 // ============================================================================
 struct ItfDesc {
-  const char *file_name; // .json basename, 也是 log / cache file 用名
-  void (*build)(const Axes &, const std::vector<DayFile> &, PitPool &);
+  const char *file_name; // .parquet basename, 也是 log / cache file 用名
+  void (*build)(const Axes &, const std::vector<MonthFile> &, PitPool &);
   void (*cache_layout)(PitPool &, CacheVisitor &);
   void (*post_ffill)(const Axes &, PitPool &); // 网格 itf 才有
 };
@@ -427,7 +428,7 @@ extern const int ITFS_COUNT;
 // apply_meta_overlays — Phase 1 末段: 真盘前 _meta 快照填充 row=last_d.
 //   唯一 overlay: cn_stock_static_data → status 2 字段 (suspended, st_status).
 //
-//   语义"填充": status CUTOFF=0 假装盘前, 实盘当日 (last_d) day file 还未入库时
+//   语义"填充": status CUTOFF=0 假装盘前, 实盘当日 (last_d) 数据还未入库时
 //   row=last_d 是默认 0; static_data 真盘前 09:00 值写进去. 历史天 (T<last_d) 不动.
 //
 //   _meta 不存在 ⇒ silent noop; axes.n_d()==0 ⇒ noop; instrument 不在 codes ⇒ skip.

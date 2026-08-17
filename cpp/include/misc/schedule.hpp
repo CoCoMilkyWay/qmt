@@ -1,47 +1,43 @@
 #pragma once
 
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
 
 // ============================================================================
-// 统一抓取调度器 — bigquant DAI + tushare 共用入口.
+// 统一月度调度器 — bigquant / tushare 共用唯一入口.
 //
-// 输入: 表名 / outer [start, end] / lookback_days.
-// 输出: 升序的 FetchSegment 列表, 每段 = [seg.start, seg.end] (闭区间, "YYYYMMDD").
+// 数据集唯一落地形态 = data/YYYY-MM/<name>.parquet (0 行月也落 0 行文件).
+// 因此调度只有一条规则, 按月两轴判定:
 //
-// 三态判定 (与 misc::store::_empty.json 串联):
-//   day file 存在 → 拉过有数据
-//   day file 不存在 + 在 _empty → 拉过无数据 (跳过)
-//   day file 不存在 + 不在 _empty → 未拉 (必拉)
-// 加上 lookback (最近 N 个日历日) 强拉, 兜住当日未结算的累积缺失.
+//   关月 (月末 < today - lookback_days):
+//     parquet 存在 → skip (已冻结; 0 行文件 = 拉过为空, 同样 skip)
+//     parquet 缺失 → fetch 整月 [max(m01, start), m末]
+//       (bigquant 侧 fetch 自带 API_MIN_DATE 护栏: 历史月必须已在 archive,
+//        缺失即 assert — 历史不可在线补)
 //
-// 两个对仗 planner:
+//   开放月 (月末仍在 lookback 窗口内, 含当月):
+//     parquet mtime 距今 < dedup_seconds → skip (文件自身 mtime 即去重时间戳)
+//     否则 → fetch [max(m01, start), min(m末, today)] 整月覆盖 (幂等)
 //
-//   plan_day_segments(name, [s, e], lookback, can_range)
-//     - can_range = true:  整月空洞 → 月段 [m_first, m_last] (clamp 到 outer);
-//                          否则该月每个缺失日 → 单日段 [d, d].
-//     - can_range = false: 每个缺失日单独一段 [d, d] (per-day API 强制).
-//     用例: bigquant Day, tushare 所有 strategy.
-//
-//   plan_month_segments(name, [s, e], lookback)
-//     - 该月任一 day file 存在 → 整月跳过; 进入 lookback 窗口的月 → 必拉;
-//       否则 → 一段 [m_first, m_last] (clamp 到 outer).
-//     用例: bigquant MonthFirst (cn_stock_industry_component).
+// 完整性 / 去重全部由 "单文件存在性 + mtime" 判定, 无额外状态文件.
 // ============================================================================
 namespace misc {
 
-struct FetchSegment {
-  std::string start; // YYYYMMDD
-  std::string end;   // YYYYMMDD; per-day 段 start == end
+struct FetchMonth {
+  std::string ym;    // "YYYY-MM" (data/ 子目录名)
+  std::string start; // YYYYMMDD 闭区间
+  std::string end;   // YYYYMMDD 闭区间
 };
 
-std::vector<FetchSegment>
-plan_day_segments(std::string_view name, std::string_view start,
-                  std::string_view end, int lookback_days, bool can_range);
+std::vector<FetchMonth> plan_months(std::string_view name,
+                                    std::string_view start_date,
+                                    std::string_view today, int lookback_days,
+                                    int dedup_seconds);
 
-std::vector<FetchSegment>
-plan_month_segments(std::string_view name, std::string_view start,
-                    std::string_view end, int lookback_days);
+// 文件存在且 mtime 距今 < seconds — _meta 单文件表 (Static / Snapshot) 的
+// dedup 判定与开放月同语义 (文件自身 mtime 即去重时间戳).
+bool file_fresh(const std::filesystem::path &p, int seconds);
 
 } // namespace misc

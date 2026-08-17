@@ -37,48 +37,24 @@ inline constexpr int TUSHARE_HTTP_RETRY_INTERVAL_SECONDS = 30;
 
 // ============================================================================
 // C. 抓取流水线 (main.cpp 主入口; 公共参数)
+//   数据集唯一落地形态 = data/YYYY-MM/<name>.parquet 月度分片 (+ _meta 单文件).
+//   调度单点 misc::plan_months (bigquant / tushare 共用), 规则:
+//     关月 (月末 < today - LOOKBACK): parquet 存在 → skip; 缺失 → 整月 fetch
+//     开放月 (含当月): parquet mtime 距今 < DEDUP → skip; 否则整月重拉覆盖
+//
 //   PIPELINE_START_DATE              首日; A 股财报电子化从 2015 起逐渐完整
-//   PIPELINE_LOOKBACK_DAYS           最近 N 日历日强制重拉 (PK upsert 幂等); ≥5 交易日兜底
-//   PIPELINE_DEDUP_WINDOW_SECONDS    单 itf 去重窗口: 上次成功距今 < 该值则跳过整段
-//                                    (时间戳落 data/_meta/<name>.lastupdate)
-// 单段切分语义 (调度入口见 misc/schedule.hpp):
-//   plan_day_segments + can_range=true (bigquant Day / tushare range-capable):
-//       missing 按自然月聚合, 月内 (clamp 到 outer) 全缺失 → 整月段; 否则 → 每个缺失日单段.
-//       lookback 强拉最近 N 个日历日, 通常落在当前月, 形成 N 个单日段, 避免为补 7 天拉一整月.
-//   plan_day_segments + can_range=false (tushare per-day API: day_params 非空):
-//       每个缺失日 [d, d] 单日段, strategy 按 day_params 数量倍增 task.
-//   plan_month_segments (bigquant MonthFirst, industry_component):
-//       该月任一 day file 存在则跳过; 否则一段 [m_first, m_last] (clamp 到 outer).
-//   bigquant Static: DAI 一次响应直写 _meta, 不走调度.
-//   bigquant emit_meta (axis 源): 走 plan_day_segments 正常 day file, 末尾聚合 _meta.
+//   PIPELINE_LOOKBACK_DAYS           月末仍在该窗口内的月视为开放月 (兜服务端回填修订)
+//   PIPELINE_DEDUP_WINDOW_SECONDS    去重窗口: 开放月/单文件 parquet 自身 mtime 距今
+//                                    < 该值则跳过 (无额外 lastupdate 状态文件)
 // ============================================================================
 inline constexpr const char *PIPELINE_START_DATE = "20150101";
 inline constexpr int PIPELINE_LOOKBACK_DAYS = 7;
 inline constexpr int PIPELINE_DEDUP_WINDOW_SECONDS = 60 * 60;
 
-// ============================================================================
-// C.1 BigQuant parquet 月数据库导入 (独立阶段, 与 DAI 完全解耦)
-//   BIGQUANT_IMPORT          true 时启用 (与 DAI 阶段独立, 不依赖任何 DAI 配置)
-//   BIGQUANT_DATABASE        parquet 月数据库根目录 (相对 git root 或绝对路径)
-//                            预期布局 (与 doc/bigquant/fetch.py 输出一致):
-//                              <root>/<yyyy>-<mm>/<table>.parquet
-//                            静态表 (_meta/<table>.parquet) 不走 import, 留给 DAI.
-//   行为: 扫 <root>/ 下所有 "YYYY-MM" 子目录 (其他名字如 _meta 静默跳过), 按 yyyymm
-//     升序对每个月每张表 (SPECS 中 kind != Static) 执行 "整月替换覆盖":
-//     1. 读 parquet → arrow::Table; 文件不存在 → 静默跳过
-//     2. 走整月事务: stage 到 data/_journal/, atomic 写 manifest (commit point),
-//        apply 把 staged day file rename 到 data/YYYY/MM/DD/<name>.json + 清掉本月
-//        [01, 月末] 内不在 manifest 的残留 target + 更新 data/YYYY/MM/_empty.json,
-//        cleanup
-//     3. 进程启动时优先扫 data/_journal/ 重放残留 manifest (crash recovery)
-//   完整性: 整月原子 (中断不留脏月) + 整月覆盖 (已有月先删后写).
-// ============================================================================
-inline constexpr bool BIGQUANT_IMPORT = false;
-inline constexpr const char *BIGQUANT_DATABASE = "import/parquet";
-
 // BigQuant DAI 拉取的最早允许 visible_date (dashed, "YYYY-MM-DD"; bigquant::fetch 处校验).
-//   API 额度有限按日刷新, 此日期之前的历史数据必须走 BIGQUANT_IMPORT 压缩 archive 通道,
-//   不再消耗在线调用配额. 任何 start < 本阈值的 DAI 查询在 fetch 直接 assert fail.
+//   API 额度有限按日刷新, 此日期之前的历史 = data/YYYY-MM parquet archive (已冻结),
+//   不再消耗在线调用配额. 任何 start < 本阈值的 DAI 查询在 fetch 直接 assert fail
+//   (调度器只会在历史月 parquet 缺失时打到这里 = archive 不完整, 需离线补齐).
 inline constexpr const char *BIGQUANT_API_MIN_DATE = "2026-05-01";
 
 // ============================================================================

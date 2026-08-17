@@ -23,7 +23,7 @@ namespace bigquant {
 //   Where     : visible_date 不是分区列. 用 SQL WHERE 过滤
 //               (publish_date / end_date 等事件列).
 //   Snapshot  : 有 date 列, 但仅取 [s,e] 内 MAX(<vd>) 一天的全量快照, 落
-//               data/_meta/<name>.json 单文件 (像 Static 一样不走 day file).
+//               data/_meta/<name>.parquet 单文件 (像 Static 一样不走月度分片).
 //               用于"真盘前"表 (cn_stock_static_data 09:00) 给 PIT overlay
 //               最后一天 row D 用. 与 MonthFirst 对仗 (MIN vs MAX).
 enum class FetchKind { Static, Partition, Where, Snapshot };
@@ -38,16 +38,6 @@ struct TableSpec {
   std::string visible_date; // 因果安全可见日列名; Static 为空 ""
   FetchKind kind;
   FetchFreq freq;
-  // 同次响应去重 PK (字段名列表). 同一 visible_date day file 内, 同 PK 多条 → assert
-  // (BigQuant PIT 服务端通常保证单次响应 PK 唯一, 此处 fail-fast 兜底).
-  // Static 表 PK = 表唯一身份键 (e.g. instrument); 其他表通常含 (visible_date, instrument).
-  std::vector<std::string> pk;
-  // true ⇒ 该表是 axis 源 (trading_days / holidays), 走普通 Partition+Day day file 落盘
-  // 路径, 但 pipeline 每轮末尾额外把所有 day file 聚合成 data/_meta/<name>.json 单文件,
-  // 供 axis.cpp 一次性读出 D 轴. day file 由 dedup + lookback + 缺失扫描兜底完整性;
-  // _meta 只是聚合产物, 每轮无条件重建 (廉价: 小表, 几千行). Static 表 (无 date 列) 不
-  // 走 day file, 自有 write_meta 单文件全量整刷路径, emit_meta 必须 false.
-  bool emit_meta = false;
 };
 
 // api.md 中"需要支持"的全部表 (26 张), 顺序与 api.md 自上而下一致.

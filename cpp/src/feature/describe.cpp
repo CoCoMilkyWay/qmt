@@ -176,7 +176,7 @@ std::vector<YearBucket> build_buckets(const Axes &axes) {
 }
 
 // ---- 输出: stdout 等宽 + tsv -----------------------------------------------
-//   旧 n_finite / nan% 替换为 7 个百分比列: %0 %+ %- %+inf %-inf %nan %finite
+//   7 个百分比列: %0 %+ %- %+inf %-inf %nan %finite
 //   (前 6 列两两互斥, 总和 = 100%; %finite = %0 + %+ + %-)
 constexpr const char *COLS[] = {
     "feature", "year", "n_total",

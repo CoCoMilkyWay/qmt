@@ -7,6 +7,7 @@
 #include "misc/date.hpp"
 #include "misc/fs.hpp"
 #include "misc/npy.hpp"
+#include "misc/parquet.hpp"
 #include "misc/timer.hpp"
 #include "package/yyjson/yyjson.h"
 
@@ -69,12 +70,6 @@ inline void wi(const fs::path &p, const std::vector<std::int32_t> &v) {
                      std::span<const std::size_t>(shape, 1));
 }
 
-inline std::string json_str(yyjson_val *obj, const char *key) {
-  yyjson_val *v = yyjson_obj_get(obj, key);
-  assert(v && yyjson_is_str(v));
-  return std::string(yyjson_get_str(v), yyjson_get_len(v));
-}
-
 struct NameInterval {
   int lo;
   int hi;
@@ -85,28 +80,12 @@ struct NameTimeline {
   std::vector<std::vector<NameInterval>> by_a;
 };
 
-std::vector<fs::path> enumerate_name_change_files() {
-  std::vector<fs::path> files;
-  fs::path data_root = misc::git_root() / "data";
-  assert(fs::exists(data_root));
-
-  for (auto &y_ent : fs::directory_iterator(data_root)) {
-    if (!y_ent.is_directory()) continue;
-    std::string y = y_ent.path().filename().string();
-    if (y.size() != 4) continue;
-    for (auto &m_ent : fs::directory_iterator(y_ent.path())) {
-      if (!m_ent.is_directory()) continue;
-      std::string m = m_ent.path().filename().string();
-      if (m.size() != 2) continue;
-      for (auto &d_ent : fs::directory_iterator(m_ent.path())) {
-        if (!d_ent.is_directory()) continue;
-        fs::path p = d_ent.path() / "cn_stock_name_change.json";
-        if (fs::exists(p)) files.push_back(std::move(p));
-      }
-    }
-  }
-  std::sort(files.begin(), files.end());
-  return files;
+// yyyymmdd int32 → "YYYYMMDD"; <= 0 → 空串.
+inline std::string ymd_str(std::int32_t v) {
+  if (v <= 0) return {};
+  char buf[9];
+  std::snprintf(buf, sizeof(buf), "%08d", v);
+  return std::string(buf, 8);
 }
 
 void add_name_interval(const feature::Axes &axes, std::vector<NameInterval> &v,
@@ -125,55 +104,41 @@ NameTimeline load_name_timeline(const feature::Axes &axes) {
   tl.by_a.resize(static_cast<std::size_t>(n_a));
   std::vector<std::string> last_end(static_cast<std::size_t>(n_a));
 
-  for (const fs::path &p : enumerate_name_change_files()) {
-    std::string buf = misc::read_file_all(p);
-    assert(!buf.empty());
-    yyjson_doc *doc = yyjson_read(buf.data(), buf.size(), 0);
-    assert(doc);
-    yyjson_val *root = yyjson_doc_get_root(doc);
-    assert(yyjson_is_arr(root));
-
-    std::size_t i, n;
-    yyjson_val *item;
-    yyjson_arr_foreach(root, i, n, item) {
-      std::string ins = json_str(item, "instrument");
-      auto it = axes.code_idx.find(ins);
+  // 历史简称区间: cn_stock_name_change 月度 parquet 全扫.
+  for (auto &[ym, path] : misc::pq::list_month_files("cn_stock_name_change")) {
+    misc::pq::TableView v(misc::pq::read_table(path));
+    if (v.rows() == 0) continue;
+    misc::pq::Col ins = v.col("instrument"), nm = v.col("name");
+    misc::pq::Col sd = v.col("start_date"), ed = v.col("end_date");
+    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
+      auto it = axes.code_idx.find(std::string(ins.str(i)));
       if (it == axes.code_idx.end()) continue;
       int a = it->second;
-      std::string start = json_str(item, "start_date");
-      std::string end = json_str(item, "end_date");
-      std::string name = json_str(item, "name");
+      std::string start = ymd_str(sd.yyyymmdd(i));
+      std::string end = ymd_str(ed.yyyymmdd(i));
+      if (start.empty() || end.empty()) continue;
       add_name_interval(axes, tl.by_a[static_cast<std::size_t>(a)], start, end,
-                        std::move(name));
+                        std::string(nm.str(i)));
       std::string &mx = last_end[static_cast<std::size_t>(a)];
       if (mx.empty() || end > mx) mx = std::move(end);
     }
-    yyjson_doc_free(doc);
   }
 
-  fs::path static_path =
-      misc::git_root() / "data" / "_meta" / "cn_stock_static_data.json";
-  assert(fs::exists(static_path));
-  std::string static_buf = misc::read_file_all(static_path);
-  assert(!static_buf.empty());
-  yyjson_doc *doc = yyjson_read(static_buf.data(), static_buf.size(), 0);
-  assert(doc);
-  yyjson_val *root = yyjson_doc_get_root(doc);
-  assert(yyjson_is_arr(root));
-
-  std::size_t i, n;
-  yyjson_val *item;
-  yyjson_arr_foreach(root, i, n, item) {
-    std::string ins = json_str(item, "instrument");
-    auto it = axes.code_idx.find(ins);
+  // 当前简称: 真盘前快照兜住 [last_end+1, 最新日] 尾段.
+  auto static_path = misc::pq::meta_path("cn_stock_static_data");
+  assert(fs::exists(static_path) &&
+         "data/_meta/cn_stock_static_data.parquet missing — 先跑 bigquant::update");
+  misc::pq::TableView sv(misc::pq::read_table(static_path));
+  misc::pq::Col ins = sv.col("instrument"), nm = sv.col("name");
+  for (std::int64_t i = 0, nr = sv.rows(); i < nr; ++i) {
+    auto it = axes.code_idx.find(std::string(ins.str(i)));
     if (it == axes.code_idx.end()) continue;
     int a = it->second;
     const std::string &mx = last_end[static_cast<std::size_t>(a)];
     std::string start = mx.empty() ? axes.dates.front() : misc::add_days(mx, 1);
     add_name_interval(axes, tl.by_a[static_cast<std::size_t>(a)], start,
-                      axes.dates.back(), json_str(item, "name"));
+                      axes.dates.back(), std::string(nm.str(i)));
   }
-  yyjson_doc_free(doc);
 
   for (auto &v : tl.by_a) {
     std::sort(v.begin(), v.end(), [](const NameInterval &x,

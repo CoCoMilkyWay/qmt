@@ -11,8 +11,8 @@ namespace feature {
 
 // ============================================================================
 // D 轴 + A 轴 + 反向索引. 由 load_axes() 一次性构造, 此后只读.
-//   dates: data/_meta/trading_days.json 中 market_code='CN' 的 date 升序去重
-//   codes: data/_meta/cn_stock_basic_info.json 中 instrument 升序去重 — 已过滤
+//   dates: data/YYYY-MM/trading_days.parquet 中 market_code='CN' 的 date 升序去重
+//   codes: data/_meta/cn_stock_basic_info.parquet 中 instrument 升序去重 — 已过滤
 //          delist_date < PIPELINE_START_DATE 的标的 (axis 内永远 NaN, 纯冗员).
 //          含 window 内已退市标的 (它们在 delist 之前的 row 是 finite, delist 之后
 //          被 grid_ffill 延续 last close — 但下游 pool 用 ¬is_finite(delist_age)
@@ -36,7 +36,7 @@ struct Axes {
 
 // ============================================================================
 // per-A 静态信息 (asset 维), 与 Axes.codes 同序同长.
-//   来源: data/_meta/cn_stock_basic_info.json (BigQuant Static 全量 snapshot)
+//   来源: data/_meta/cn_stock_basic_info.parquet (BigQuant Static 全量 snapshot)
 //
 //   name        — instrument 当前简称 (诊断/日志用, 非 PIT — 历史改名走时变 feature)
 //   list_date   — YYYYMMDD; 空串 = 未上市 (理论不应出现)
@@ -48,8 +48,8 @@ struct Axes {
 //   注: industry_l1 不再是 meta 静态 — 由 ts_industry_l1 inter feature 从
 //       cn_stock_industry_component (月初快照) + cn_stock_industry_change (日内
 //       增量) per-(D, A) 计算, 编码为 SW2021 一级行业 ID (见 feature/industry.hpp).
-//   注: name_history 已删除 — risk_warn 简化版直接读 cn_stock_status.st_status,
-//       无需再用 namechange 修正 ST 状态边界.
+//   注: risk_warn 直接读 cn_stock_status.st_status, 不用 namechange 修正 ST
+//       状态边界 (历史简称仅 backtest 报表展示用, 见 backtest NameTimeline).
 // ============================================================================
 struct StockMeta {
   std::vector<std::string> name;
