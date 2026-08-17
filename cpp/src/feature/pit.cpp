@@ -1,5 +1,6 @@
 #include "feature/pit.hpp"
 
+#include "config.hpp"
 #include "feature/axis.hpp"
 #include "feature/industry.hpp"
 #include "misc/affinity.hpp"
@@ -53,17 +54,20 @@ constexpr float InfF = std::numeric_limits<float>::infinity();
 // NaN (数据缺失) 透传留给 ffill; finite 满足约束 → 原值; finite 违反约束 → +inf
 // 保"业务异常"标记 (ffill 不传播 +inf, 不污染下游).
 inline float positive_or_inf(float v) {
-  if (std::isnan(v)) return v;
+  if (std::isnan(v))
+    return v;
   return (std::isfinite(v) && v > 0.0f) ? v : InfF;
 }
 inline float non_negative_or_inf(float v) {
-  if (std::isnan(v)) return v;
+  if (std::isnan(v))
+    return v;
   return (std::isfinite(v) && v >= 0.0f) ? v : InfF;
 }
 
 // yyyymmdd int32 → "YYYYMMDD"; <= 0 → 空串.
 inline std::string ymd_str(std::int32_t v) {
-  if (v <= 0) return {};
+  if (v <= 0)
+    return {};
   char buf[9];
   std::snprintf(buf, sizeof(buf), "%08d", v);
   return std::string(buf, 8);
@@ -71,7 +75,8 @@ inline std::string ymd_str(std::int32_t v) {
 
 // instrument / ts_code → a 索引; 不在 code_idx → -1.
 inline int lookup_a(const Axes &axes, std::string_view code) {
-  if (code.empty()) return -1;
+  if (code.empty())
+    return -1;
   auto it = axes.code_idx.find(std::string(code));
   return it == axes.code_idx.end() ? -1 : it->second;
 }
@@ -104,12 +109,14 @@ public:
   GridRowMemo(const Axes &axes, int cutoff) : axes_(axes), cutoff_(cutoff) {}
   int row(std::int32_t ymd) { // -1 = skip
     auto it = memo_.find(ymd);
-    if (it != memo_.end()) return it->second;
+    if (it != memo_.end())
+      return it->second;
     int r = -1;
     auto di = axes_.date_idx.find(ymd_str(ymd));
     if (di != axes_.date_idx.end()) {
       int cand = di->second - cutoff_;
-      if (cand >= 0 && cand < axes_.n_d()) r = cand;
+      if (cand >= 0 && cand < axes_.n_d())
+        r = cand;
     }
     memo_.emplace(ymd, r);
     return r;
@@ -126,12 +133,14 @@ public:
   EventRowMemo(const Axes &axes, int cutoff) : axes_(axes), cutoff_(cutoff) {}
   int row(std::int32_t ymd) { // -1 = skip
     auto it = memo_.find(ymd);
-    if (it != memo_.end()) return it->second;
+    if (it != memo_.end())
+      return it->second;
     int r = -1;
     int v_idx = axes_.floor_date(ymd_str(ymd));
     if (v_idx >= 0) {
       int cand = v_idx - cutoff_;
-      if (cand >= 0 && cand < axes_.n_d()) r = cand;
+      if (cand >= 0 && cand < axes_.n_d())
+        r = cand;
     }
     memo_.emplace(ymd, r);
     return r;
@@ -151,25 +160,32 @@ template <class Body>
 inline void parallel_parse_months(const std::vector<MonthFile> &files,
                                   Body body) {
   std::size_t n = files.size();
-  if (n == 0) return;
+  if (n == 0)
+    return;
   unsigned nt = misc::Affinity::core_count();
-  if (nt == 0) nt = 1;
-  if (static_cast<std::size_t>(nt) > n) nt = static_cast<unsigned>(n);
+  if (nt == 0)
+    nt = 1;
+  if (static_cast<std::size_t>(nt) > n)
+    nt = static_cast<unsigned>(n);
 
   std::atomic<std::size_t> next{0};
   auto worker = [&]() {
     for (;;) {
       std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
-      if (i >= n) break;
+      if (i >= n)
+        break;
       pq::TableView v(pq::read_table(files[i].path));
-      if (v.rows() == 0) continue;
+      if (v.rows() == 0)
+        continue;
       body(v);
     }
   };
   std::vector<std::thread> ts;
   ts.reserve(nt);
-  for (unsigned t = 0; t < nt; ++t) ts.emplace_back(worker);
-  for (auto &t : ts) t.join();
+  for (unsigned t = 0; t < nt; ++t)
+    ts.emplace_back(worker);
+  for (auto &t : ts)
+    t.join();
 }
 
 // 网格字段 per-A forward fill:
@@ -213,9 +229,11 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     GridRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       int row = memo.row(date.yyyymmdd(i));
-      if (row < 0) continue;
+      if (row < 0)
+        continue;
       int a = lookup_a(axes, inst.str(i));
-      if (a < 0) continue;
+      if (a < 0)
+        continue;
       std::size_t off = static_cast<std::size_t>(a) * n_d +
                         static_cast<std::size_t>(row);
       p.bar1d.close[off] = positive_or_inf(close.f32(i));
@@ -253,9 +271,11 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     GridRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       int row = memo.row(date.yyyymmdd(i));
-      if (row < 0) continue;
+      if (row < 0)
+        continue;
       int a = lookup_a(axes, inst.str(i));
-      if (a < 0) continue;
+      if (a < 0)
+        continue;
       std::size_t off = static_cast<std::size_t>(a) * n_d +
                         static_cast<std::size_t>(row);
       p.shares.total_shares[off] = positive_or_inf(ts.f32(i));
@@ -294,9 +314,11 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     GridRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       int row = memo.row(date.yyyymmdd(i));
-      if (row < 0) continue;
+      if (row < 0)
+        continue;
       int a = lookup_a(axes, inst.str(i));
-      if (a < 0) continue;
+      if (a < 0)
+        continue;
       std::size_t off = static_cast<std::size_t>(a) * n_d +
                         static_cast<std::size_t>(row);
       // > 0; 0 / 负 / non-finite (含 2015-2017 部分缺口) → +inf 标记 "无限制",
@@ -339,9 +361,11 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     GridRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       int row = memo.row(date.yyyymmdd(i));
-      if (row < 0) continue;
+      if (row < 0)
+        continue;
       int a = lookup_a(axes, inst.str(i));
-      if (a < 0) continue;
+      if (a < 0)
+        continue;
       std::size_t off = static_cast<std::size_t>(a) * n_d +
                         static_cast<std::size_t>(row);
       int st = st_c.i32(i, 0);
@@ -350,7 +374,7 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
       // 4 态派生: st 1/2 优先; 否则 risk_warning=1 → 3 (退市整理期); else 0.
       // 退市整理期: 交易所摘 *ST 后 st 翻 0 但 is_risk_warning 仍 1; 用 3
       // 保留识别力 (实测 *ST大通 2023/06/19 进整理期后 st_status=0/rw=1).
-      std::int8_t out_st = (st == 1) ? std::int8_t{1}
+      std::int8_t out_st = (st == 1)   ? std::int8_t{1}
                            : (st == 2) ? std::int8_t{2}
                            : (rw != 0) ? std::int8_t{3}
                                        : std::int8_t{0};
@@ -388,9 +412,11 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     GridRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       int row = memo.row(date.yyyymmdd(i));
-      if (row < 0) continue;
+      if (row < 0)
+        continue;
       int a = lookup_a(axes, inst.str(i));
-      if (a < 0) continue;
+      if (a < 0)
+        continue;
       std::size_t off = static_cast<std::size_t>(a) * n_d +
                         static_cast<std::size_t>(row);
       p.margin_detail.is_margin[off] = 1;
@@ -419,8 +445,10 @@ namespace {
 
 // Tushare forecast type string → enum (业务只关心 首亏/续亏).
 inline ForecastType parse_forecast_type(std::string_view s) {
-  if (s == "首亏") return ForecastType::FirstLoss;
-  if (s == "续亏") return ForecastType::ContinueLoss;
+  if (s == "首亏")
+    return ForecastType::FirstLoss;
+  if (s == "续亏")
+    return ForecastType::ContinueLoss;
   return ForecastType::Other;
 }
 
@@ -441,11 +469,14 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     pq::Col ind = v.col("industry"), l1 = v.col("industry_level1_name");
     EventRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
-      if (ind.str(i) != "sw2021") continue;
+      if (ind.str(i) != "sw2021")
+        continue;
       int row = memo.row(date.yyyymmdd(i));
-      if (row < 0) continue;
+      if (row < 0)
+        continue;
       int a = lookup_a(axes, inst.str(i));
-      if (a < 0) continue;
+      if (a < 0)
+        continue;
       IndustryComponentEv ev{};
       ev.v = row;
       ev.l1_id = sw2021_l1_name_to_id(l1.str(i));
@@ -478,13 +509,18 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     pq::Col flag = v.col("change_flag"), name = v.col("industry_name");
     EventRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
-      if (ind.str(i) != "sw2021") continue;
-      if (lvl.i32(i, 0) != 1) continue;
-      if (flag.i32(i, -1) != 1) continue;
+      if (ind.str(i) != "sw2021")
+        continue;
+      if (lvl.i32(i, 0) != 1)
+        continue;
+      if (flag.i32(i, -1) != 1)
+        continue;
       int row = memo.row(date.yyyymmdd(i));
-      if (row < 0) continue;
+      if (row < 0)
+        continue;
       int a = lookup_a(axes, inst.str(i));
-      if (a < 0) continue;
+      if (a < 0)
+        continue;
       IndustryChangeEv ev{};
       ev.v = row;
       ev.l1_id = sw2021_l1_name_to_id(name.str(i));
@@ -518,9 +554,11 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     EventRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       int row = memo.row(vd.yyyymmdd(i));
-      if (row < 0) continue;
+      if (row < 0)
+        continue;
       int a = lookup_a(axes, inst.str(i));
-      if (a < 0) continue;
+      if (a < 0)
+        continue;
       DividendEv ev;
       ev.v = row;
       ev.report_date = rd.yyyymmdd(i);
@@ -558,11 +596,14 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     EventRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       // 仅入 shift==0 (该 visible_date 最新报告期 TTM).
-      if (shift.i32(i, -1) != 0) continue;
+      if (shift.i32(i, -1) != 0)
+        continue;
       int row = memo.row(date.yyyymmdd(i));
-      if (row < 0) continue;
+      if (row < 0)
+        continue;
       int a = lookup_a(axes, inst.str(i));
-      if (a < 0) continue;
+      if (a < 0)
+        continue;
       FinancialTtmEv ev;
       ev.v = row;
       ev.report_date = rd.yyyymmdd(i);
@@ -602,9 +643,11 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       // 不过滤 fs_quarter_index — 季/半/年报均入; feature 层 max(report_date) MRQ.
       int row = memo.row(date.yyyymmdd(i));
-      if (row < 0) continue;
+      if (row < 0)
+        continue;
       int a = lookup_a(axes, inst.str(i));
-      if (a < 0) continue;
+      if (a < 0)
+        continue;
       FinancialBalanceEv ev;
       ev.v = row;
       ev.report_date = rd.yyyymmdd(i);
@@ -641,11 +684,14 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     EventRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       // 仅入 fs_quarter_index==4 (年报) — 给 ni_raw / dividend_st 阈值用.
-      if (fqi.i32(i, -1) != 4) continue;
+      if (fqi.i32(i, -1) != 4)
+        continue;
       int row = memo.row(date.yyyymmdd(i));
-      if (row < 0) continue;
+      if (row < 0)
+        continue;
       int a = lookup_a(axes, inst.str(i));
-      if (a < 0) continue;
+      if (a < 0)
+        continue;
       FinancialIncomeAnnualEv ev;
       ev.v = row;
       ev.report_date = rd.yyyymmdd(i);
@@ -681,9 +727,11 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     EventRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
       int row = memo.row(vd.yyyymmdd(i));
-      if (row < 0) continue;
+      if (row < 0)
+        continue;
       int a = lookup_a(axes, inst.str(i));
-      if (a < 0) continue;
+      if (a < 0)
+        continue;
       ForecastEv ev;
       ev.v = row;
       ev.end_date = ed.yyyymmdd(i);
@@ -769,38 +817,47 @@ const int ITFS_COUNT = static_cast<int>(sizeof(ITFS) / sizeof(ITFS[0]));
 void apply_meta_overlays(const Axes &axes, PitPool &pool) {
   namespace fs = std::filesystem;
   fs::path meta_path = pq::meta_path("cn_stock_static_data");
-  if (!fs::exists(meta_path)) return;
+  if (!fs::exists(meta_path))
+    return;
 
   int n_d = axes.n_d();
-  if (n_d <= 0) return;
+  if (n_d <= 0)
+    return;
   int last_d = n_d - 1;
 
   pq::TableView v(pq::read_table(meta_path));
-  if (v.rows() == 0) return;
+  if (v.rows() == 0)
+    return;
 
   pq::Col date = v.col("date"), inst = v.col("instrument");
   pq::Col st_c = v.col("st_status"), dl_c = v.col("in_delist");
   pq::Col sp_c = v.col("suspended");
 
   // static_data 盘前更新, trading_days 可能盘后才补 CN 当日; 只校验快照为今天.
+  //   仅在联网同步过 (config::PIPELINE_UPDATE) 时校验新鲜度: 离线跑吃的是上次
+  //   落盘的旧快照, overlay 到 row=last_d 的值不再是"真盘前当日"值, 但历史天
+  //   完全不受影响 ⇒ 回测/分析照常可跑, 只有实盘当日那一行退化为旧值.
   {
-    std::string today = misc::today_yyyymmdd();
     std::string snap = ymd_str(date.yyyymmdd(0));
     assert(!snap.empty() && "cn_stock_static_data 缺 date");
-    assert(today == snap && "cn_stock_static_data.MAX(date) 不是今天");
+    if (::config::PIPELINE_UPDATE) {
+      assert(misc::today_yyyymmdd() == snap &&
+             "cn_stock_static_data.MAX(date) 不是今天");
+    }
   }
 
   std::size_t n_d_sz = static_cast<std::size_t>(n_d);
   std::size_t base_off = static_cast<std::size_t>(last_d);
   for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
     int a = lookup_a(axes, inst.str(i));
-    if (a < 0) continue;
+    if (a < 0)
+      continue;
     std::size_t off = static_cast<std::size_t>(a) * n_d_sz + base_off;
 
     int st = st_c.i32(i, 0);
     int dl = dl_c.i32(i, 0);
     int sp = sp_c.i32(i, 0);
-    std::int8_t out_st = (dl != 0) ? std::int8_t{3}
+    std::int8_t out_st = (dl != 0)   ? std::int8_t{3}
                          : (st == 1) ? std::int8_t{1}
                          : (st == 2) ? std::int8_t{2}
                                      : std::int8_t{0};

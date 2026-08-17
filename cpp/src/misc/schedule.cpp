@@ -43,6 +43,14 @@ long file_age_seconds(const fs::path &p) {
   return std::chrono::duration_cast<std::chrono::seconds>(now - mt).count();
 }
 
+// 文件 mtime → 写盘日 "YYYYMMDD"; 不存在返回空串.
+std::string file_write_date(const fs::path &p) {
+  if (!fs::exists(p)) return {};
+  auto sys = std::chrono::clock_cast<std::chrono::system_clock>(
+      fs::last_write_time(p));
+  return fmt_yyyymmdd(std::chrono::floor<std::chrono::days>(sys));
+}
+
 } // namespace
 
 std::vector<FetchMonth> plan_months(std::string_view name,
@@ -65,7 +73,12 @@ std::vector<FetchMonth> plan_months(std::string_view name,
     bool closed = m_last < frozen_before;
 
     if (closed) {
-      if (!fs::exists(p)) {
+      // 冻结条件 = 写盘日 ≥ 月末 + lookback: 开放月 fetch 只覆盖到写盘日
+      // (end = min(月末, today)), 写盘时该月已出 lookback 窗口才能保证
+      // "整月行 + 全部回填" 都已入盘. 月中写的半月文件在跑批空窗期后关月,
+      // 此处整月重拉一次 (写盘日=today ⇒ 之后永久冻结).
+      std::string wd = file_write_date(p);
+      if (wd.empty() || wd < add_days(m_last, lookback_days)) {
         out.push_back({ym, std::max(m_first, std::string(start_date)), m_last});
       }
     } else {

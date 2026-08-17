@@ -1,9 +1,6 @@
 #include "api/bigquant/spec.hpp"
 
-#include "config.hpp"
-
 #include <cassert>
-#include <iostream>
 #include <string>
 #include <string_view>
 
@@ -73,22 +70,6 @@ std::string to_dashed(std::string_view yyyymmdd) {
   return out;
 }
 
-// 配额护栏: pre-cutoff 日期一律拒绝走 DAI (按日刷新的额度只留给近端增量).
-//   历史月 (< BIGQUANT_API_MIN_DATE) 必须已在 data/YYYY-MM/*.parquet archive 中;
-//   调度器发现历史月缺失时会走到这里 fail fast — 补 archive, 不补在线调用.
-void assert_post_cutoff(const TableSpec &spec, const std::string &start,
-                        const std::string &end) {
-  if (start >= ::config::BIGQUANT_API_MIN_DATE)
-    return;
-  std::cerr << "[bigquant.spec] BLOCK pre-cutoff DAI 调用: table=" << spec.name
-            << " start=" << start << " end=" << end << "\n"
-            << "  " << ::config::BIGQUANT_API_MIN_DATE
-            << " 之前的历史数据不得走在线接口 (额度护栏);\n"
-            << "  该月 parquet 应已存在于 data/YYYY-MM/ archive — 缺失说明 "
-            << "archive 不完整, 需离线补齐." << std::endl;
-  assert(false && "BigQuant DAI pre-cutoff access blocked");
-}
-
 } // namespace
 
 std::shared_ptr<arrow::Table> fetch(DaiClient &client, const TableSpec &spec,
@@ -109,15 +90,9 @@ std::shared_ptr<arrow::Table> fetch(DaiClient &client, const TableSpec &spec,
 
   if (spec.kind == FetchKind::Snapshot) {
     // Snapshot: 取窗口内最新一天的全量行 (假日则顺延前; 与 MonthFirst MIN 对仗).
-    //   start 仅决定服务端分区扫描下界, 不影响 MAX(<vd>) 结果. 调度器传进来的 start
-    //   可能远早于 BIGQUANT_API_MIN_DATE (= 历史回测起点), 这里 clamp 到 API 最小日;
-    //   保证 _meta 单文件 refresh 始终命中近端 (最新一天的真盘前快照).
-    //   clamp 后若 ds > de, sub-select 自然返回空集, write_meta 落 0 行 (实盘前夕
-    //   首日跑可能出现; 后续天有数据即恢复).
+    //   start 仅决定服务端分区扫描下界, 不影响 MAX(<vd>) 结果, 也不影响配额
+    //   (配额按返回 cell 数计, 与扫描窗口无关) — 故窗口原样透传.
     assert(spec.freq == FetchFreq::Day && "Snapshot 当前仅支持 FetchFreq::Day");
-    if (ds < ::config::BIGQUANT_API_MIN_DATE)
-      ds = ::config::BIGQUANT_API_MIN_DATE;
-    assert_post_cutoff(spec, ds, de);
     std::string sql = "SELECT * FROM " + spec.name + " WHERE " +
                       spec.visible_date + " = (SELECT MAX(" +
                       spec.visible_date + ") FROM " + spec.name + " WHERE " +
@@ -125,8 +100,6 @@ std::shared_ptr<arrow::Table> fetch(DaiClient &client, const TableSpec &spec,
                       spec.visible_date + " <= '" + de + "')";
     return client.query(sql, {{"date", {ds, de}}});
   }
-
-  assert_post_cutoff(spec, ds, de);
 
   if (spec.kind == FetchKind::Partition) {
     // 分区裁剪走 filters; Day SQL 不带 WHERE, MonthFirst 仍带 sub-select.

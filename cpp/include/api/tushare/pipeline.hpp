@@ -13,4 +13,9 @@ namespace tushare {
 void update(std::string_view start, std::string_view end,
             const std::vector<InterfaceSpec> &specs, int lookback_days);
 
+// preflight 探针 — 证明 token 积分 ≥ 5000 (SPECS 里 *_vip 接口的门槛).
+// 传一个必然无数据的 period: 服务端先判权限再查数据 ⇒ 有权限返回 code=0 + 0 行
+// (最小响应); 积分不足则 code != 0, Http::call 直接 assert fail.
+void probe();
+
 } // namespace tushare

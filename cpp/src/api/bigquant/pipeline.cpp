@@ -40,8 +40,7 @@ void update(std::string_view start, std::string_view end,
         continue;
       }
       std::cout << "\n[" << spec.name << "] meta refresh ..." << std::flush;
-      // Static 忽略窗口; Snapshot 取窗口内 MAX(date) 一天 (fetch 内部 clamp 到
-      // BIGQUANT_API_MIN_DATE, 始终命中近端).
+      // Static 忽略窗口; Snapshot 取窗口内 MAX(date) 一天 (= 最新一份真盘前快照).
       auto t = fetch(client, spec, start, end);
       misc::pq::write_table_atomic(p, t);
       std::cout << " " << t->num_rows() << " rows -> _meta" << std::endl;

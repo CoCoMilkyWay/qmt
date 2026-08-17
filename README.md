@@ -13,7 +13,7 @@ qmt/
 ├── cpp/                             # C++23 实现 (Clang/Linux, header-only boost + yyjson + arrow)
 │   ├── projects/main/               # CMake 构建 (DEBUG / PROFILE / ASSERT / PRODUCTION)
 │   ├── include/
-│   │   ├── config.hpp               # 全局常量 (BigQuant host/token, Tushare host/token, 起始日, lookback, 去重窗口)
+│   │   ├── config.hpp               # 全局常量 (BigQuant host/token, Tushare host/token, update 开关, 起始日, lookback, 去重窗口)
 │   │   ├── misc/                    # 通用工具 (date / fs / parquet / schedule / logging / npy / mmap / progress / timer / affinity)
 │   │   │                              # fs.hpp:      git_root / read_file_all / atomic_write / atomic_write_json
 │   │   │                              # parquet.hpp: 统一 parquet 存储层 — month_path / meta_path / list_month_files /
@@ -24,17 +24,18 @@ qmt/
 │   │   ├── package/arrow/           # Arrow Flight + Parquet (从 pyarrow vendor, 见 vendor_from_pyarrow.sh)
 │   │   ├── api/                     # 数据接入子系统 (数据入); 两侧 API 完全对仗
 │   │   │   ├── bigquant/            # 26 张表 DAI Arrow Flight (明文 gRPC, Basic Token → JWT)
-│   │   │   │   ├── dai.hpp          # DaiClient (lazy Flight + query → arrow::Table)
+│   │   │   │   ├── dai.hpp          # DaiClient (lazy Flight + query → arrow::Table; quota → 周配额 Quota)
 │   │   │   │   ├── spec.hpp         # SPECS + fetch(client, spec, start, end) (SQL 模板内置)
 │   │   │   │   └── pipeline.hpp     # update: plan_months → fetch(月) → 月 parquet; Static/Snapshot → _meta parquet
 │   │   │   └── tushare/             # 3 张事件表 (forecast / express / disclosure) HTTP+JSON
 │   │   │       ├── http.hpp         # boost.beast HTTP 客户端 (走 80 端口, 无 SSL)
 │   │   │       ├── spec.hpp         # SPECS (day_params 判别 range / per-day; drop_fields 防未来信息泄漏)
 │   │   │       ├── parse.hpp        # 响应 JSON → arrow::Table (列类型推断 + drop_fields 剥离)
-│   │   │       └── pipeline.hpp     # update: plan_months → fetch_month → 月 parquet (与 bigquant 对仗)
+│   │   │       └── pipeline.hpp     # update: plan_months → fetch_month → 月 parquet (与 bigquant 对仗); probe: 积分门槛探针
 │   │   └── feature/                 # feature 子系统头文件 (张量出)
 │   └── src/
-│       ├── main.cpp                 # bigquant::update → tushare::update → feature::build → Tensor T[F][A][D]
+│       ├── main.cpp                 # [preflight → bigquant::update → tushare::update] → feature::build → Tensor T[F][A][D]
+│       │                            # 方括号段由 config::PIPELINE_UPDATE 门控 (见 §抓取开关)
 │       ├── api/
 │       │   ├── bigquant/            # dai / spec / pipeline
 │       │   └── tushare/             # http / spec / parse / pipeline
@@ -136,12 +137,12 @@ qmt/
 
 BigQuant FetchKind (`<vd>` = `TableSpec::visible_date` — Static 为空, Partition 通常是 `date`, Where 通常是 `publish_date` / `end_date`):
 
-| kind      | freq       | SQL 写法                                                                 | filters          | 适用                                                                                                                                      |
-| --------- | ---------- | ------------------------------------------------------------------------ | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Static    | Day        | `SELECT * FROM <name>`                                                   | `{}`             | `cn_stock_basic_info` (无 date 维)                                                                                                        |
-| Partition | Day        | `SELECT * FROM <name>`                                                   | `{"date":[s,e]}` | 日频网格 (行情 / 状态 / 财务 PIT / ...)                                                                                                   |
-| Partition | MonthFirst | `WHERE <vd> = (SELECT MIN(<vd>) FROM <name> WHERE <vd> BETWEEN s AND e)` | `{"date":[s,e]}` | `cn_stock_industry_component` 月初一份全行业成分, 月内变动靠 `cn_stock_industry_change` (Day) 增量 cover                                  |
-| Where     | Day        | `SELECT * FROM <name> WHERE <vd> >= s AND <vd> <= e`                     | `{}`             | 事件型 (`publish_date` / `end_date` 等非分区列)                                                                                           |
+| kind      | freq       | SQL 写法                                                                 | filters          | 适用                                                                                                                                         |
+| --------- | ---------- | ------------------------------------------------------------------------ | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Static    | Day        | `SELECT * FROM <name>`                                                   | `{}`             | `cn_stock_basic_info` (无 date 维)                                                                                                           |
+| Partition | Day        | `SELECT * FROM <name>`                                                   | `{"date":[s,e]}` | 日频网格 (行情 / 状态 / 财务 PIT / ...)                                                                                                      |
+| Partition | MonthFirst | `WHERE <vd> = (SELECT MIN(<vd>) FROM <name> WHERE <vd> BETWEEN s AND e)` | `{"date":[s,e]}` | `cn_stock_industry_component` 月初一份全行业成分, 月内变动靠 `cn_stock_industry_change` (Day) 增量 cover                                     |
+| Where     | Day        | `SELECT * FROM <name> WHERE <vd> >= s AND <vd> <= e`                     | `{}`             | 事件型 (`publish_date` / `end_date` 等非分区列)                                                                                              |
 | Snapshot  | Day        | `WHERE <vd> = (SELECT MAX(<vd>) FROM <name> WHERE <vd> BETWEEN s AND e)` | `{"date":[s,e]}` | `cn_stock_static_data` 真盘前 09:00 全市场快照, 取窗口内 MAX(date) 一日, 落 `data/_meta/<name>.parquet` 单文件; PIT overlay 给 row=last_d 用 |
 
 **落地** (`data/YYYY-MM/<name>.parquet` 月度分片, 全 parquet)
@@ -151,7 +152,7 @@ BigQuant FetchKind (`<vd>` = `TableSpec::visible_date` — Static 为空, Partit
   - `cn_stock_basic_info` (补充 meta, Static, 无 date 列): DAI 一次响应整刷; 仅用于 `static_data` 没有的字段 (`list_date` / `delist_date` / `list_sector` / `industry` / ...). 实际盘后更新, 按 -1 滞后理解, 业务上字段几乎不变.
   - `trading_days` / `holidays` (axis 源): 普通月度表, `axis.cpp` 直接扫全部月 parquet 读出 D 轴 (小表, 每月 KB 级).
 - **完整性设计** (BigQuant / Tushare 共用 `misc::plan_months` 单点调度; 判定全部落在"单文件存在性 + mtime", 无额外状态文件):
-  - **关月冻结** (月末 < today − `lookback_days`): 文件存在 → 跳过 (0 行文件 = 拉过为空, 同样跳过); 缺失 → 整月拉. BigQuant 侧历史月 (< `BIGQUANT_API_MIN_DATE`) 缺失会撞 fetch 配额护栏 assert — 历史必须已在 archive, 只能离线补.
+  - **关月冻结** (月末 < today − `lookback_days`): 文件存在且写盘日 ≥ 月末 + lookback → 跳过 (写盘时该月已出窗 ⇒ 整月行 + 全部回填已入盘; 0 行文件 = 拉过为空, 同样跳过); 缺失或写盘日过早 (月中写的半月文件在跑批空窗期后关月) → 整月重拉一次后永久冻结.
   - **开放月重拉** (月末仍在 lookback 窗口内, 含当月): 文件 mtime 距今 < `PIPELINE_DEDUP_WINDOW_SECONDS` → 跳过; 否则整月重拉覆盖 (幂等, 吃服务端回填/修订).
   - **tmp+rename 原子写**: 单文件替换, 中断不留半成品.
 - 外部资料: 入库时机 (BigQuant `doc/bigquant/api.md` 更新时间列, 多数 17:00–20:00 盘后批发; Tushare `doc/tushare/help/数据更新说明.md` 及各 API 自身 doc); 公告披露时段 (`doc/exchange/公告类别和发布时间.md`, SSE/SZSE 各时段 + 非交易日 13–17 / 12–16 直通).
@@ -162,10 +163,10 @@ BigQuant FetchKind (`<vd>` = `TableSpec::visible_date` — Static 为空, Partit
 
 **全部 BigQuant 表实际入库时间都是盘后 17:00+** (`api.md` 更新时间列实测). 项目按业务可推出性把所有 itf 归到下面两种 cutoff 模式之一:
 
-| 模式              | offset | 含义                                                                                                                                                                                                                                                  | 适用                                                                          |
-| ----------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| **normal**        | `−1`   | 承认滞后, row D=T 取 T-1 数据. T-1 盘后公告 + T-1 至 T 之间的周末/节假日公告 (含 SSE/SZSE 非交易日直通时段) 自然划入 T 行.                                                                                                                           | 绝大多数 itf — 默认安全选项                                                   |
-| **hybrid (伪装)** | `0`    | 假装盘前: 历史按 row=v_idx 消化 (T 当日就用 T 当日记录); 最后一天 (= 实盘当日, 当日记录还没入库) 由 `apply_meta_overlays` 用 `cn_stock_static_data` 真盘前 09:00 快照**填充** row=last_d (仅写这一行, 历史天完全不动 ⇒ "填充而非覆盖").               | 仅 `cn_stock_status`. (`cn_stock_suspend` 同类语义但代码未消费, 见入库时机表) |
+| 模式              | offset | 含义                                                                                                                                                                                                                                    | 适用                                                                          |
+| ----------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| **normal**        | `−1`   | 承认滞后, row D=T 取 T-1 数据. T-1 盘后公告 + T-1 至 T 之间的周末/节假日公告 (含 SSE/SZSE 非交易日直通时段) 自然划入 T 行.                                                                                                              | 绝大多数 itf — 默认安全选项                                                   |
+| **hybrid (伪装)** | `0`    | 假装盘前: 历史按 row=v_idx 消化 (T 当日就用 T 当日记录); 最后一天 (= 实盘当日, 当日记录还没入库) 由 `apply_meta_overlays` 用 `cn_stock_static_data` 真盘前 09:00 快照**填充** row=last_d (仅写这一行, 历史天完全不动 ⇒ "填充而非覆盖"). | 仅 `cn_stock_status`. (`cn_stock_suspend` 同类语义但代码未消费, 见入库时机表) |
 
 hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际确定** (即使 API 入库晚也不会失真). 严格 PIT 下应 −1, 但 −1 会显著伤害 alpha (例: ST 翻转日整体滞后 1-2 天); hybrid 在保证因果性的同时拿回 T 当日真值:
 - ✅ `cn_stock_status` (st_status / suspended): ST / 停牌当日开盘前即生效, 静态确定 → 适用 hybrid.
@@ -176,7 +177,7 @@ hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际�
 - **网格** (D=trade_date, A=instrument): 每条记录唯一 (D, A) 单元. row D 取 `max{ visible_date ≤ T + offset }` (offset=0 → 自身; offset=−1 → 上一交易日, 周末/假日 visible_date 不存在自动跳过).
 - **事件 sparse PIT** (D, A): 每 (A, group_key) 取 `visible_date ≤ T + offset` 的最新一条. group_key 见 §字段表 deps (例: `forecast` / `income_general_pit` / `cashflow_general_pit` / `balance_general_pit` 按 `report_date`, `dividend` 按 `publish_date`, `name_change` 按 `end_date`). 状态机型 (`profit_st` / `revenue_st` / `dividend_st`) 同样按此 cutoff 回放 `visible_date` 升序流.
 - **月初快照** (D, A): `cn_stock_industry_component` 月初落一份, build 时取 `max{ visible_date ≤ T }` 的快照广播到 (D, A); 月内细变动叠加 `cn_stock_industry_change` 事件流 → `industry_l1` inter feature.
-- **overlay** (row=last_d 单行填充): `cn_stock_static_data` (`_meta` 单文件) → `status.{suspended, st_status}` 2 字段. 仅写 row=last_d, 历史日子完全不动. 详见 §cutoff 表里的 hybrid 模式.
+- **overlay** (row=last_d 单行填充): `cn_stock_static_data` (`_meta` 单文件) → `status.{suspended, st_status}` 2 字段. 仅写 row=last_d, 历史日子完全不动. 详见 §cutoff 表里的 hybrid 模式. 快照新鲜度 (`MAX(date)` 必须是今天) 仅在 `config::PIPELINE_UPDATE = true` 时断言; 离线跑用旧快照, 见 §抓取开关.
 - **asset 静态**: `cn_stock_basic_info` 全量 snapshot 广播到 (D, A); `list_date / delist_date` 决定 (D, A) 行有效, 不走 `visible_date`.
 - **axis**: `trading_days` WHERE `market_code='CN'` 生成 D 轴; `cn_stock_basic_info.instrument` 全量生成 A 轴.
 
@@ -300,12 +301,12 @@ hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际�
 
 **Phase 切分动机**
 
-| phase  | 数据形态          | 任务粒度 | 并行性             | 主要工作                                                        |
-| ------ | ----------------- | -------- | ------------------ | --------------------------------------------------------------- |
-| 0 axes | 标量级元数据      | 主线程   | 无                 | 一次性确定 D / A / per-A 静态                                   |
-| 1 load | itf PIT pool      | itf ≈ 12 | mmap cache + build | hit: mmap pool.bin; miss: 并行读月 parquet → 直写 pool + dump   |
-| 2 时序 | 列式 (per-A 全 D) | a ≈ 5500 | embarrassingly (A) | 单调时间序列计算 + 状态机                                       |
-| 3 截面 | 行式 (per-D 全 A) | d ≈ 2750 | embarrassingly (D) | 截面归一 + universe 选取                                        |
+| phase  | 数据形态          | 任务粒度 | 并行性             | 主要工作                                                      |
+| ------ | ----------------- | -------- | ------------------ | ------------------------------------------------------------- |
+| 0 axes | 标量级元数据      | 主线程   | 无                 | 一次性确定 D / A / per-A 静态                                 |
+| 1 load | itf PIT pool      | itf ≈ 12 | mmap cache + build | hit: mmap pool.bin; miss: 并行读月 parquet → 直写 pool + dump |
+| 2 时序 | 列式 (per-A 全 D) | a ≈ 5500 | embarrassingly (A) | 单调时间序列计算 + 状态机                                     |
+| 3 截面 | 行式 (per-D 全 A) | d ≈ 2750 | embarrassingly (D) | 截面归一 + universe 选取                                      |
 
 **设计原则** (业务密集化 + 性能选择, 改字段表/计算图不动外层):
 - **agnostic 外层 + 单点真理**: `pit.cpp` (itf 维, 每 itf 一组 `{build, cache_layout, post_ffill?}` + `ITFS[]` 表挂载), `feature.cpp` (feature 维, 每 feature 一个 `ts_xxx` / `cs_xxx` + `FEATURES[]` 表挂载); 外层 flow (`load.cpp` / `ts.cpp` / `cs.cpp` / `build.cpp`) 仅通过函数指针表迭代调度, 不出现任何具体 itf 名 / feature 名.

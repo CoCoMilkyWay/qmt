@@ -68,4 +68,10 @@ void update(std::string_view start, std::string_view end,
   std::cout << "\n[tushare.update] done" << std::endl;
 }
 
+void probe() {
+  Http http(::config::TUSHARE_TOKEN);
+  yyjson_doc *doc = http.call("forecast_vip", {{"period", "19900331"}});
+  yyjson_doc_free(doc);
+}
+
 } // namespace tushare

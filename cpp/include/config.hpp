@@ -17,7 +17,7 @@ namespace config {
 // ============================================================================
 inline constexpr const char *BIGQUANT_AK = "6dS0GYgxocXL";
 inline constexpr const char *BIGQUANT_SK = "bKDM141Hz2etbj3QTLf9GA6aGmEZRu68MJuvaJBJyPgq22E3fNNDRehFCbgComTQ";
-inline constexpr const char *TUSHARE_TOKEN = "439b79afc0af96f0abb32a3be27df99b9e8fe9fa83f8d555d66fba72";
+inline constexpr const char *TUSHARE_TOKEN = "6b5ea435a4626b1eeedefb2115bcf9e84fc64a0d212d21cf2be03d54";
 
 // ============================================================================
 // B. 数据源端点 (网关 host / port / 超时 / 重试)
@@ -42,20 +42,19 @@ inline constexpr int TUSHARE_HTTP_RETRY_INTERVAL_SECONDS = 30;
 //     关月 (月末 < today - LOOKBACK): parquet 存在 → skip; 缺失 → 整月 fetch
 //     开放月 (含当月): parquet mtime 距今 < DEDUP → skip; 否则整月重拉覆盖
 //
+//   PIPELINE_UPDATE                  true  = main 先跑 preflight (两路 API 状态彩色
+//                                            展示 + 交互确认), 确认后才联网同步;
+//                                    false = 完全不联网, 直接用 data/ 现有 parquet
+//                                            跑 build / backtest / analysis
 //   PIPELINE_START_DATE              首日; A 股财报电子化从 2015 起逐渐完整
 //   PIPELINE_LOOKBACK_DAYS           月末仍在该窗口内的月视为开放月 (兜服务端回填修订)
 //   PIPELINE_DEDUP_WINDOW_SECONDS    去重窗口: 开放月/单文件 parquet 自身 mtime 距今
 //                                    < 该值则跳过 (无额外 lastupdate 状态文件)
 // ============================================================================
+inline constexpr bool PIPELINE_UPDATE = false;
 inline constexpr const char *PIPELINE_START_DATE = "20150101";
 inline constexpr int PIPELINE_LOOKBACK_DAYS = 7;
 inline constexpr int PIPELINE_DEDUP_WINDOW_SECONDS = 60 * 60;
-
-// BigQuant DAI 拉取的最早允许 visible_date (dashed, "YYYY-MM-DD"; bigquant::fetch 处校验).
-//   API 额度有限按日刷新, 此日期之前的历史 = data/YYYY-MM parquet archive (已冻结),
-//   不再消耗在线调用配额. 任何 start < 本阈值的 DAI 查询在 fetch 直接 assert fail
-//   (调度器只会在历史月 parquet 缺失时打到这里 = archive 不完整, 需离线补齐).
-inline constexpr const char *BIGQUANT_API_MIN_DATE = "2026-05-01";
 
 // ============================================================================
 // D. Pool (basic + universe)

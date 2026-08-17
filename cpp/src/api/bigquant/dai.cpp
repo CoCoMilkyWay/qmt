@@ -3,6 +3,7 @@
 #include "config.hpp"
 #include "package/yyjson/yyjson.h"
 
+#include <arrow/buffer.h>
 #include <arrow/flight/api.h>
 #include <arrow/flight/client.h>
 #include <arrow/flight/types.h>
@@ -11,6 +12,7 @@
 #include <arrow/table.h>
 
 #include <cassert>
+#include <cstddef>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -115,6 +117,37 @@ DaiClient::query(std::string_view sql, const DaiFilters &filters) {
   std::shared_ptr<arrow::Table> table = unwrap(std::move(table_r), "FlightStreamReader::ToTable");
   assert(table);
   return table;
+}
+
+Quota DaiClient::quota() {
+  ensure_flight();
+
+  flight::FlightCallOptions opts;
+  opts.headers.emplace_back(flight_auth_.first, flight_auth_.second);
+
+  flight::Action action{"quota", arrow::Buffer::FromString("")};
+  auto stream_r = flight_->DoAction(opts, action);
+  std::unique_ptr<flight::ResultStream> stream =
+      unwrap(std::move(stream_r), "DoAction(quota)");
+
+  auto res_r = stream->Next();
+  std::unique_ptr<flight::Result> res =
+      unwrap(std::move(res_r), "ResultStream::Next");
+  assert(res && res->body && "DAI quota: 空响应");
+
+  yyjson_doc *doc =
+      yyjson_read(reinterpret_cast<const char *>(res->body->data()),
+                  static_cast<std::size_t>(res->body->size()), 0);
+  assert(doc && "DAI quota: 响应 JSON 解析失败");
+  yyjson_val *root = yyjson_doc_get_root(doc);
+  yyjson_val *w = yyjson_obj_get(root, "weekly_quota");
+  yyjson_val *u = yyjson_obj_get(root, "used_quota");
+  assert(w && u && "DAI quota: 响应缺 weekly_quota / used_quota");
+  Quota q{yyjson_get_sint(w), yyjson_get_sint(u)};
+  yyjson_doc_free(doc);
+
+  assert(q.weekly > 0 && "DAI quota: weekly_quota 非正");
+  return q;
 }
 
 } // namespace bigquant

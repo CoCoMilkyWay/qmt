@@ -12,10 +12,10 @@
 // 因此调度只有一条规则, 按月两轴判定:
 //
 //   关月 (月末 < today - lookback_days):
-//     parquet 存在 → skip (已冻结; 0 行文件 = 拉过为空, 同样 skip)
-//     parquet 缺失 → fetch 整月 [max(m01, start), m末]
-//       (bigquant 侧 fetch 自带 API_MIN_DATE 护栏: 历史月必须已在 archive,
-//        缺失即 assert — 历史不可在线补)
+//     parquet 存在 ∧ 写盘日 ≥ 月末 + lookback → skip (写盘时该月已出窗 ⇒
+//       整月行 + 全部回填已入盘, 冻结; 0 行文件 = 拉过为空, 同样 skip)
+//     否则 (缺失 / 月中写的半月文件在跑批空窗期后关月) → fetch 整月
+//       [max(m01, start), m末]
 //
 //   开放月 (月末仍在 lookback 窗口内, 含当月):
 //     parquet mtime 距今 < dedup_seconds → skip (文件自身 mtime 即去重时间戳)
