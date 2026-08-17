@@ -19,7 +19,8 @@ qmt/
 │   │   │                              # parquet.hpp: 统一 parquet 存储层 — month_path / meta_path / list_month_files /
 │   │   │                              #              read_table / write_table_atomic (zstd + tmp+rename) /
 │   │   │                              #              TableView 类型化列访问 (pipeline / pit / axis / backtest 共用)
-│   │   │                              # schedule.hpp: plan_months 月度调度器 (bigquant + tushare 共用) + file_fresh
+│   │   │                              # schedule.hpp: plan_months 月度调度器 (bigquant + tushare 共用;
+│   │   │                              #              关月冻结 + 开放月水位增量) + meta_fresh (_meta 单文件判定)
 │   │   ├── package/yyjson/          # JSON 库 (tushare 响应解析 + output/meta.json)
 │   │   ├── package/arrow/           # Arrow Flight + Parquet (从 pyarrow vendor, 见 vendor_from_pyarrow.sh)
 │   │   ├── api/                     # 数据接入子系统 (数据入); 两侧 API 完全对仗
@@ -34,8 +35,9 @@ qmt/
 │   │   │       └── pipeline.hpp     # update: plan_months → fetch_month → 月 parquet (与 bigquant 对仗); probe: 积分门槛探针
 │   │   └── feature/                 # feature 子系统头文件 (张量出)
 │   └── src/
-│       ├── main.cpp                 # [preflight → bigquant::update → tushare::update] → feature::build → Tensor T[F][A][D]
-│       │                            # 方括号段由 config::PIPELINE_UPDATE 门控 (见 §抓取开关)
+│       ├── main.cpp                 # [pending? → preflight → bigquant::update → tushare::update] → feature::build → Tensor T[F][A][D]
+│       │                            # 方括号段由 config::PIPELINE_UPDATE 门控 (见 §抓取开关);
+│       │                            # pending 纯本地判定全 fresh ⇒ 整段跳过 (连跑零网络)
 │       ├── api/
 │       │   ├── bigquant/            # dai / spec / pipeline
 │       │   └── tushare/             # http / spec / parse / pipeline
@@ -63,8 +65,8 @@ qmt/
 │   ├── pool/<itf>.bin               # Phase-1 PitPool cache (POD blob, mmap hit 路径; 见 §构建流水线)
 │   └── YYYY-MM/                     # 月度分片 = 数据集唯一落地形态
 │       └── <name>.parquet           # 该月 visible_date ∈ [01, 月末] 的服务端响应原样 (zstd 列存)
-│                                    # 0 行月也落 0 行文件 (= 拉过为空); 文件存在性 + mtime
-│                                    # 即完整性 / 去重判定, 无额外状态文件
+│                                    # 0 行月也落 0 行文件 (= 拉过为空); 完整性 / 去重判定 =
+│                                    # 文件存在性 + mtime + 文件内 max(vd) 水位, 无额外状态文件
 │                                    #
 │                                    # 27 张表 (同构月度分片):
 │                                    #   BigQuant 24 (DAI Arrow Flight → arrow::Table 直落):
@@ -148,12 +150,13 @@ BigQuant FetchKind (`<vd>` = `TableSpec::visible_date` — Static 为空, Partit
 **落地** (`data/YYYY-MM/<name>.parquet` 月度分片, 全 parquet)
 - 月度表: 每表每月一个文件, 内容 = 该月 `visible_date ∈ [01, 月末]` 的服务端响应原样 (zstd 列存, 行结构 / 去重语义信任服务端 PIT). BigQuant fetch 直接得 `arrow::Table`; Tushare 响应 JSON 经 `parse::docs_to_table` 转 `arrow::Table` (列类型推断, `drop_fields` 剥离); 两侧同走 `misc::pq::write_table_atomic` 落盘.
 - 单文件 `_meta`: `data/_meta/{cn_stock_static_data, cn_stock_basic_info}.parquet`
-  - `cn_stock_static_data` (**主 meta**, Snapshot, 真盘前 09:00): DAI 取窗口内 `MAX(date)` 一日的全市场快照, 一次响应整刷. 用于 hybrid PIT overlay 给实盘当日 (= `axes.last_d`) 的 `status` 字段填充真盘前值 (见 §cutoff).
-  - `cn_stock_basic_info` (补充 meta, Static, 无 date 列): DAI 一次响应整刷; 仅用于 `static_data` 没有的字段 (`list_date` / `delist_date` / `list_sector` / `industry` / ...). 实际盘后更新, 按 -1 滞后理解, 业务上字段几乎不变.
+  - `cn_stock_static_data` (**主 meta**, Snapshot, 真盘前 09:00): DAI 取窗口内 `MAX(date)` 一日的全市场快照, 一次响应整刷. 用于 hybrid PIT overlay 给实盘当日 (= `axes.last_d`) 的 `status` 字段填充真盘前值 (见 §cutoff). 刷新判定 `meta_fresh`: 文件内快照日 ≥ horizon(avail_hour=9) → skip ⇒ 每天 09:00 后首个触发整刷一次.
+  - `cn_stock_basic_info` (补充 meta, Static, 无 date 列): DAI 一次响应整刷; 仅用于 `static_data` 没有的字段 (`list_date` / `delist_date` / `list_sector` / `industry` / ...). 实际盘后更新, 按 -1 滞后理解, 业务上字段几乎不变. 无水位可言 ⇒ 写盘日 == today → skip (日级整刷).
   - `trading_days` / `holidays` (axis 源): 普通月度表, `axis.cpp` 直接扫全部月 parquet 读出 D 轴 (小表, 每月 KB 级).
-- **完整性设计** (BigQuant / Tushare 共用 `misc::plan_months` 单点调度; 判定全部落在"单文件存在性 + mtime", 无额外状态文件):
-  - **关月冻结** (月末 < today − `lookback_days`): 文件存在且写盘日 ≥ 月末 + lookback → 跳过 (写盘时该月已出窗 ⇒ 整月行 + 全部回填已入盘; 0 行文件 = 拉过为空, 同样跳过); 缺失或写盘日过早 (月中写的半月文件在跑批空窗期后关月) → 整月重拉一次后永久冻结.
-  - **开放月重拉** (月末仍在 lookback 窗口内, 含当月): 文件 mtime 距今 < `PIPELINE_DEDUP_WINDOW_SECONDS` → 跳过; 否则整月重拉覆盖 (幂等, 吃服务端回填/修订).
+- **完整性设计** (BigQuant / Tushare 共用 `misc::plan_months` 单点调度; 判定全部落在"单文件存在性 + mtime + 文件内 max(vd) 水位", 无额外状态文件. 背景: DAI 配额按**返回 cell 数**计费, 与查询次数/扫描窗口无关 ⇒ 省流量 = 让重复查询返回 0 新行):
+  - **关月冻结** (月末 < today − `lookback_days`): 文件存在且写盘日 ≥ 月末 + lookback → 跳过; 否则整月重拉覆盖一次后永久冻结. 这是**唯一的完整性兜底** — 月内增量漏掉的服务端回填/修订在此全部吃回.
+  - **开放月水位增量** (月末仍在 lookback 窗口内, 含当月): 每表一个 `avail_hour` (spec 内声明: day X 数据于 X 日该小时后完整; 盘后批统一 20 / 真盘前 9~10 / 排程提前 0 / 全天涓流 24) ⇒ horizon = 当前已完整的最晚数据日. 水位 W = 月文件内 max(visible_date); 只拉 `vd ∈ [W+1, min(月末, horizon)]` **append** 到月文件, 已到水位连查询都不发. 稳态下每表每天只为新增一天数据付费一次; 月内完整性降一级 (漏回填), 关月兜回.
+  - **节流** (连跑零网络): 文件 mtime 距今 < `PIPELINE_DEDUP_WINDOW_SECONDS` → 本表直接跳过; 0 行探测响应只 touch mtime (探测本身计入 dedup 窗). main 入口先跑两侧 `pending()` 纯本地判定, 全部 fresh ⇒ 跳过 preflight + 联网, 直接 build.
   - **tmp+rename 原子写**: 单文件替换, 中断不留半成品.
 - 外部资料: 入库时机 (BigQuant `doc/bigquant/api.md` 更新时间列, 多数 17:00–20:00 盘后批发; Tushare `doc/tushare/help/数据更新说明.md` 及各 API 自身 doc); 公告披露时段 (`doc/exchange/公告类别和发布时间.md`, SSE/SZSE 各时段 + 非交易日 13–17 / 12–16 直通).
 
@@ -177,12 +180,12 @@ hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际�
 - **网格** (D=trade_date, A=instrument): 每条记录唯一 (D, A) 单元. row D 取 `max{ visible_date ≤ T + offset }` (offset=0 → 自身; offset=−1 → 上一交易日, 周末/假日 visible_date 不存在自动跳过).
 - **事件 sparse PIT** (D, A): 每 (A, group_key) 取 `visible_date ≤ T + offset` 的最新一条. group_key 见 §字段表 deps (例: `forecast` / `income_general_pit` / `cashflow_general_pit` / `balance_general_pit` 按 `report_date`, `dividend` 按 `publish_date`, `name_change` 按 `end_date`). 状态机型 (`profit_st` / `revenue_st` / `dividend_st`) 同样按此 cutoff 回放 `visible_date` 升序流.
 - **月初快照** (D, A): `cn_stock_industry_component` 月初落一份, build 时取 `max{ visible_date ≤ T }` 的快照广播到 (D, A); 月内细变动叠加 `cn_stock_industry_change` 事件流 → `industry_l1` inter feature.
-- **overlay** (row=last_d 单行填充): `cn_stock_static_data` (`_meta` 单文件) → `status.{suspended, st_status}` 2 字段. 仅写 row=last_d, 历史日子完全不动. 详见 §cutoff 表里的 hybrid 模式. 快照新鲜度 (`MAX(date)` 必须是今天) 仅在 `config::PIPELINE_UPDATE = true` 时断言; 离线跑用旧快照, 见 §抓取开关.
+- **overlay** (row=last_d 单行填充): `cn_stock_static_data` (`_meta` 单文件) → `status.{suspended, st_status}` 2 字段. 仅写 row=last_d, 历史日子完全不动. 详见 §cutoff 表里的 hybrid 模式. 快照新鲜度不变量 (快照日 == D 轴 last_d 的日期, 即"用 last_d 当日真盘前快照填 last_d 行") 仅在 `config::PIPELINE_UPDATE = true` 时断言 — 盘前/凌晨跑时当日快照未生成、last_d 也还是上一交易日, 自洽通过; 离线跑用旧快照, 见 §抓取开关.
 - **asset 静态**: `cn_stock_basic_info` 全量 snapshot 广播到 (D, A); `list_date / delist_date` 决定 (D, A) 行有效, 不走 `visible_date`.
 - **axis**: `trading_days` WHERE `market_code='CN'` 生成 D 轴; `cn_stock_basic_info.instrument` 全量生成 A 轴.
 
 **一致性** (build 完成 → 张量 PIT-clean, 下游无未来数据风险)
-- **跨次修正** (replay 安全): 服务端 PIT 表以新 `visible_date` 行发布修订, 历史行不改写 → 修订落进所属月的 parquet, replay 任意 T 按上述 cutoff 自动选当时可见版本. 关月冻结后不再变动; 开放月整月重拉覆盖吃回填.
+- **跨次修正** (replay 安全): 服务端 PIT 表以新 `visible_date` 行发布修订, 历史行不改写 → 修订落进所属月的 parquet, replay 任意 T 按上述 cutoff 自动选当时可见版本. 关月冻结后不再变动; 开放月水位增量天然吃到新 `visible_date` 行的修订, 对旧日期的回填月内看不见, 关月整月重拉时吃回.
 - **回测 = 实盘**: 同一份 build 代码 + 同一组 offset → 同一份 PIT 张量.
 - 已知 best-effort 瑕疵 (不可消除, 接受):
   1. 公告级时间戳缺失 → 同 `visible_date` 内盘前/盘中/盘后无法区分, 统一按盘后保守 → 计入 next-day cutoff (实盘错过 T 当日盘前直通公告, 与回测一致).

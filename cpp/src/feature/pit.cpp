@@ -4,7 +4,6 @@
 #include "feature/axis.hpp"
 #include "feature/industry.hpp"
 #include "misc/affinity.hpp"
-#include "misc/date.hpp"
 #include "misc/parquet.hpp"
 
 #include <algorithm>
@@ -833,16 +832,18 @@ void apply_meta_overlays(const Axes &axes, PitPool &pool) {
   pq::Col st_c = v.col("st_status"), dl_c = v.col("in_delist");
   pq::Col sp_c = v.col("suspended");
 
-  // static_data 盘前更新, trading_days 可能盘后才补 CN 当日; 只校验快照为今天.
-  //   仅在联网同步过 (config::PIPELINE_UPDATE) 时校验新鲜度: 离线跑吃的是上次
-  //   落盘的旧快照, overlay 到 row=last_d 的值不再是"真盘前当日"值, 但历史天
-  //   完全不受影响 ⇒ 回测/分析照常可跑, 只有实盘当日那一行退化为旧值.
+  // 新鲜度不变量: 快照日必须 == 被填充行 (row=last_d) 的日期 — overlay 语义是
+  //   "用 last_d 当日的真盘前快照填 last_d 行". 绑日历今天会在盘前/凌晨误杀
+  //   (当日快照 09:00 才生成, D 轴 last_d 也还是上一交易日, 此时 快照日==last_d
+  //   自洽); 而真正的陈旧 (盘中 last_d 已推进到今天, 快照还是昨天) 仍被抓住.
+  //   仅在联网同步过 (config::PIPELINE_UPDATE) 时校验: 离线跑吃旧快照, 历史天
+  //   完全不受影响 ⇒ 回测/分析照常可跑, 只有 last_d 那一行退化为旧值.
   {
     std::string snap = ymd_str(date.yyyymmdd(0));
     assert(!snap.empty() && "cn_stock_static_data 缺 date");
     if (::config::PIPELINE_UPDATE) {
-      assert(misc::today_yyyymmdd() == snap &&
-             "cn_stock_static_data.MAX(date) 不是今天");
+      assert(axes.dates[static_cast<std::size_t>(last_d)] == snap &&
+             "cn_stock_static_data.MAX(date) != D 轴 last_d");
     }
   }
 

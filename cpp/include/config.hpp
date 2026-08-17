@@ -40,7 +40,9 @@ inline constexpr int TUSHARE_HTTP_RETRY_INTERVAL_SECONDS = 30;
 //   数据集唯一落地形态 = data/YYYY-MM/<name>.parquet 月度分片 (+ _meta 单文件).
 //   调度单点 misc::plan_months (bigquant / tushare 共用), 规则:
 //     关月 (月末 < today - LOOKBACK): parquet 存在 → skip; 缺失 → 整月 fetch
-//     开放月 (含当月): parquet mtime 距今 < DEDUP → skip; 否则整月重拉覆盖
+//     开放月 (含当月): 水位增量 — 只拉 vd ∈ [文件内 max(vd)+1, horizon] 新行
+//       append (horizon 由每表 avail_hour 定, 见 misc/schedule.hpp; DAI 配额
+//       按返回 cell 数计, 已到水位 0 行响应免费; 月内漏的回填关月重拉兜回)
 //
 //   PIPELINE_UPDATE                  true  = main 先跑 preflight (两路 API 状态彩色
 //                                            展示 + 交互确认), 确认后才联网同步;
@@ -51,7 +53,7 @@ inline constexpr int TUSHARE_HTTP_RETRY_INTERVAL_SECONDS = 30;
 //   PIPELINE_DEDUP_WINDOW_SECONDS    去重窗口: 开放月/单文件 parquet 自身 mtime 距今
 //                                    < 该值则跳过 (无额外 lastupdate 状态文件)
 // ============================================================================
-inline constexpr bool PIPELINE_UPDATE = false;
+inline constexpr bool PIPELINE_UPDATE = true;
 inline constexpr const char *PIPELINE_START_DATE = "20150101";
 inline constexpr int PIPELINE_LOOKBACK_DAYS = 7;
 inline constexpr int PIPELINE_DEDUP_WINDOW_SECONDS = 60 * 60;

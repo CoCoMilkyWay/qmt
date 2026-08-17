@@ -70,7 +70,8 @@ void write_meta(const feature::Axes &axes, const feature::Tensor &T,
   yyjson_mut_obj_add_val(doc, root, "config", cfg);
 
   std::size_t tensor_bytes = 0;
-  for (const auto &m : T.mats) tensor_bytes += m.size() * sizeof(float);
+  for (const auto &m : T.mats)
+    tensor_bytes += m.size() * sizeof(float);
   yyjson_mut_val *timing = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_real(doc, timing, "backtest_seconds", bt_seconds);
   yyjson_mut_obj_add_real(doc, timing, "analysis_seconds", an_seconds);
@@ -93,8 +94,10 @@ constexpr const char *C_CYAN = "\033[36m";
 
 // 周配额已用比例配色: < 60% 绿 / < 85% 黄 / 否则红.
 const char *usage_color(double pct) {
-  if (pct < 60.0) return C_GREEN;
-  if (pct < 85.0) return C_YELLOW;
+  if (pct < 60.0)
+    return C_GREEN;
+  if (pct < 85.0)
+    return C_YELLOW;
   return C_RED;
 }
 
@@ -104,7 +107,8 @@ const char *usage_color(double pct) {
 //     (配额按返回 cell 数计, 每周重置; 服务端不返回重置时刻, 故不展示)
 // 返回 true 表示放行 (y / Y / 回车), 其余一律取消.
 bool preflight() {
-  std::cout << "\n" << C_BOLD << "preflight" << C_RESET << "\n";
+  std::cout << "\n"
+            << C_BOLD << "preflight" << C_RESET << "\n";
 
   tushare::probe();
   std::cout << "  " << C_CYAN << "tushare " << C_RESET << " " << C_GREEN << "OK"
@@ -121,7 +125,8 @@ bool preflight() {
             << C_DIM << "(" << q.used << " / " << q.weekly << ")" << C_RESET
             << "\n";
 
-  std::cout << "\n" << C_BOLD << "拉取数据? [Y/n] " << C_RESET << std::flush;
+  std::cout << "\n"
+            << C_BOLD << "拉取数据? [Y/n] " << C_RESET << std::flush;
   std::string line;
   std::getline(std::cin, line);
   return line.empty() || line == "y" || line == "Y";
@@ -133,18 +138,33 @@ int main() {
   std::string today = misc::today_yyyymmdd();
 
   // config::PIPELINE_UPDATE = false ⇒ 完全不联网, 直接用 data/ 现有 parquet 跑.
+  // pending 纯本地判定: 全部表在 dedup 窗口内 / 已到水位 ⇒ 连 preflight 都跳过
+  // (零网络, 连跑秒过); 有任一待拉才走 preflight → 确认 → update.
   if (::config::PIPELINE_UPDATE) {
-    if (!preflight()) {
-      std::cout << C_YELLOW << "已取消." << C_RESET << std::endl;
-      return 0;
+    bool need = bigquant::pending(::config::PIPELINE_START_DATE, today,
+                                  bigquant::SPECS,
+                                  ::config::PIPELINE_LOOKBACK_DAYS) ||
+                tushare::pending(::config::PIPELINE_START_DATE, today,
+                                 tushare::SPECS,
+                                 ::config::PIPELINE_LOOKBACK_DAYS);
+    if (!need) {
+      std::cout << "\n"
+                << C_DIM
+                << "[update] 全部表在 dedup 窗口内 / 已到水位, 跳过联网同步"
+                << C_RESET << std::endl;
+    } else {
+      if (!preflight()) {
+        std::cout << C_YELLOW << "已取消." << C_RESET << std::endl;
+        return 0;
+      }
+      std::cout << std::endl;
+
+      bigquant::update(::config::PIPELINE_START_DATE, today, bigquant::SPECS,
+                       ::config::PIPELINE_LOOKBACK_DAYS);
+
+      tushare::update(::config::PIPELINE_START_DATE, today, tushare::SPECS,
+                      ::config::PIPELINE_LOOKBACK_DAYS);
     }
-    std::cout << std::endl;
-
-    bigquant::update(::config::PIPELINE_START_DATE, today, bigquant::SPECS,
-                     ::config::PIPELINE_LOOKBACK_DAYS);
-
-    tushare::update(::config::PIPELINE_START_DATE, today, tushare::SPECS,
-                    ::config::PIPELINE_LOOKBACK_DAYS);
   }
 
   // ---- Phase 2: feature build → Tensor T[F][A][D] ----

@@ -16,8 +16,9 @@ namespace bigquant {
 
 // ============================================================================
 // BigQuant DAI 月度流水线 (与 tushare::update 完全对仗)
-//   Static / Snapshot → data/_meta/<name>.parquet 单文件整刷 (mtime dedup)
+//   Static / Snapshot → data/_meta/<name>.parquet 单文件整刷 (meta_fresh 判定)
 //   其余              → misc::plan_months → fetch(月) → data/YYYY-MM/<name>.parquet
+//                       (关月/初次: 整段覆盖; 开放月: 水位增量 append)
 // 落盘 = 服务端响应原样 (单文件 tmp+rename 原子; 0 行月也落 0 行文件).
 // ============================================================================
 void update(std::string_view start, std::string_view end,
@@ -35,7 +36,8 @@ void update(std::string_view start, std::string_view end,
 
     if (is_meta) {
       auto p = misc::pq::meta_path(spec.name);
-      if (misc::file_fresh(p, ::config::PIPELINE_DEDUP_WINDOW_SECONDS)) {
+      if (misc::meta_fresh(p, spec.visible_date, spec.avail_hour, end,
+                           ::config::PIPELINE_DEDUP_WINDOW_SECONDS)) {
         std::cout << "\n[" << spec.name << "] skip (fresh)" << std::endl;
         continue;
       }
@@ -47,19 +49,47 @@ void update(std::string_view start, std::string_view end,
       continue;
     }
 
-    auto months = misc::plan_months(spec.name, start, end, lookback_days,
-                                    ::config::PIPELINE_DEDUP_WINDOW_SECONDS);
+    auto months =
+        misc::plan_months(spec.name, spec.visible_date, spec.avail_hour, start,
+                          end, lookback_days,
+                          ::config::PIPELINE_DEDUP_WINDOW_SECONDS);
     std::cout << "\n[" << spec.name << "] " << months.size() << " month(s)"
               << std::endl;
     for (const auto &m : months) {
-      std::cout << "  " << m.ym << " ... " << std::flush;
-      auto t = fetch(client, spec, m.start, m.end);
-      misc::pq::write_table_atomic(misc::pq::month_path(m.ym, spec.name), t);
+      bool inc = !m.inc_from.empty();
+      std::cout << "  " << m.ym << (inc ? " +[" + m.inc_from + "..] ... " : " ... ")
+                << std::flush;
+      auto t = fetch(client, spec, m.start, m.end, m.inc_from);
+      auto p = misc::pq::month_path(m.ym, spec.name);
+      if (inc)
+        misc::pq::append_table_atomic(p, t);
+      else
+        misc::pq::write_table_atomic(p, t);
       std::cout << t->num_rows() << " rows" << std::endl;
     }
   }
 
   std::cout << "\n[bigquant.update] done" << std::endl;
+}
+
+bool pending(std::string_view start, std::string_view end,
+             const std::vector<TableSpec> &specs, int lookback_days) {
+  for (const auto &spec : specs) {
+    bool is_meta = (spec.kind == FetchKind::Static) ||
+                   (spec.kind == FetchKind::Snapshot);
+    if (is_meta) {
+      if (!misc::meta_fresh(misc::pq::meta_path(spec.name), spec.visible_date,
+                            spec.avail_hour, end,
+                            ::config::PIPELINE_DEDUP_WINDOW_SECONDS))
+        return true;
+    } else if (!misc::plan_months(spec.name, spec.visible_date, spec.avail_hour,
+                                  start, end, lookback_days,
+                                  ::config::PIPELINE_DEDUP_WINDOW_SECONDS)
+                    .empty()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 } // namespace bigquant

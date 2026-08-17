@@ -93,6 +93,25 @@ void write_table_atomic(const fs::path &path,
   fs::rename(tmp, path);
 }
 
+void append_table_atomic(const fs::path &path,
+                         const std::shared_ptr<arrow::Table> &t) {
+  assert(t);
+  if (!fs::exists(path)) {
+    write_table_atomic(path, t);
+    return;
+  }
+  if (t->num_rows() == 0) {
+    // 0 行探测: 只 touch mtime — 让探测本身进 dedup 窗口, 连跑不重复发查询.
+    // 代价: 该表 pool cache key (含 mtime) 被打穿一次, 每 dedup 窗口最多一次.
+    fs::last_write_time(path, fs::file_time_type::clock::now());
+    return;
+  }
+  auto old = read_table(path);
+  auto res = arrow::ConcatenateTables({old, t});
+  assert(res.ok() && "pq::append_table_atomic: schema 不一致");
+  write_table_atomic(path, res.ValueOrDie());
+}
+
 // ----------------------------------------------------------------------------
 // Col
 // ----------------------------------------------------------------------------

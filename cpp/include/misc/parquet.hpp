@@ -41,6 +41,13 @@ std::shared_ptr<arrow::Table> read_table(const std::filesystem::path &path);
 void write_table_atomic(const std::filesystem::path &path,
                         const std::shared_ptr<arrow::Table> &t);
 
+// 增量 append — 旧文件 + t 拼接后原子重写 (开放月水位增量落盘).
+//   旧文件不存在 → 等价 write_table_atomic (0 行也落文件建档);
+//   旧文件存在 ∧ t 0 行 → 只 touch mtime (探测计入 dedup 窗口, 连跑不重发查询);
+//   schema 不一致 → assert (服务端同表 schema 稳定; 变了 fail fast).
+void append_table_atomic(const std::filesystem::path &path,
+                         const std::shared_ptr<arrow::Table> &t);
+
 class Col {
 public:
   Col() = default;
