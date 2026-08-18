@@ -31,7 +31,8 @@
 namespace {
 
 // output/meta.json: py/report.py 直读的元数据 + 计时.
-//   schema 仅含 py 实际消费的字段 (dates / codes / factor_names / config.ic_ma_window /
+//   schema 仅含 py 实际消费的字段 (dates / codes / factor_names /
+//   config.{ic_ma_window, hold_n} /
 //   timing.{backtest_seconds, analysis_seconds, tensor_bytes}); 其他诊断字段不写.
 //   yyjson + misc::atomic_write_json (与 bigquant / tushare store 对仗).
 void write_meta(const feature::Axes &axes, const feature::Tensor &T,
@@ -67,6 +68,7 @@ void write_meta(const feature::Axes &axes, const feature::Tensor &T,
   yyjson_mut_val *cfg = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_int(doc, cfg, "ic_ma_window",
                          ::config::ANALYSIS_IC_MA_WINDOW);
+  yyjson_mut_obj_add_int(doc, cfg, "hold_n", ::config::BACKTEST_HOLD_N);
   yyjson_mut_obj_add_val(doc, root, "config", cfg);
 
   std::size_t tensor_bytes = 0;

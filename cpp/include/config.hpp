@@ -86,7 +86,7 @@ inline constexpr std::array<int8_t, 1> POOL_LIST_SECTOR_WHITELIST = {{
     1, // 主板
 }};
 
-inline constexpr std::array<std::string_view, 28> POOL_INDUSTRY_L1_WHITELIST = {{
+inline constexpr std::array<std::string_view, 25> POOL_INDUSTRY_L1_WHITELIST = {{
     "基础化工",
     "有色金属",
     "建筑材料",
@@ -112,13 +112,13 @@ inline constexpr std::array<std::string_view, 28> POOL_INDUSTRY_L1_WHITELIST = {
     "煤炭",
     "石油石化",
     "美容护理",
-    "农林牧渔",
-    "钢铁",
-    "银行",
+    //"农林牧渔",
+    //"钢铁",
+    //"银行",
 }};
 
 inline constexpr bool POOL_INCLUDE_MARGIN = true; // true = 池内含两融 (与 py margin_tradings=["两融标的","非两融标的"] 等价)
-inline constexpr int POOL_UNIVERSE_SIZE = 100;
+inline constexpr int POOL_UNIVERSE_SIZE = 500;
 
 // ============================================================================
 // E. 策略 (cs_tradable filter 子集 + cs_factor_score 加权)
@@ -139,9 +139,10 @@ struct FactorWeight {
   feature::F f;
   float w;
 };
-inline constexpr std::array<FactorWeight, 2> STRATEGY_FACTOR_WEIGHTS = {{
-    {feature::F::mcap, 0.6f},
-    {feature::F::close, 0.4f},
+inline constexpr std::array<FactorWeight, 3> STRATEGY_FACTOR_WEIGHTS = {{
+    {feature::F::mcap, 0.7f},
+    {feature::F::fmcap, 0.7f},
+    {feature::F::close, 0.1f},
 }};
 
 // ============================================================================
@@ -154,17 +155,15 @@ inline constexpr std::array<FactorWeight, 2> STRATEGY_FACTOR_WEIGHTS = {{
 //   BACKTEST_BUY_COST              单边买入成本 (万 3)
 //   BACKTEST_SELL_COST             单边卖出成本 (万 13)
 //   BACKTEST_MIN_COST              单笔最低成本 [元]
-//   BACKTEST_REBALANCE_THRESHOLD   持仓与目标差额 ≥ THD × pv_after 才补仓
 // ============================================================================
 inline constexpr const char *BACKTEST_START_DATE = "20170101";
 inline constexpr int BACKTEST_HOLD_N = 10;
-inline constexpr float BACKTEST_EXIT_RATIO = 1.0f;
+inline constexpr float BACKTEST_EXIT_RATIO = 2.0f;
 inline constexpr float BACKTEST_CAPITAL_BASE = 1.0e6f;
 inline constexpr float BACKTEST_PRICE_LIMIT_EPS = 1e-4f;
 inline constexpr float BACKTEST_BUY_COST = 3e-4f;
 inline constexpr float BACKTEST_SELL_COST = 13e-4f;
 inline constexpr float BACKTEST_MIN_COST = 5.0f;
-inline constexpr float BACKTEST_REBALANCE_THRESHOLD = 0.02f;
 
 // ============================================================================
 // G. 分析 (因子分层 + IC 移动平均)
@@ -187,7 +186,7 @@ inline constexpr bool DESCRIBE_BY_YEAR = false;
 //   TENSOR_DUMP_ENABLE  总开关; 开启后写 output/tensor/<feature>.npy
 //                       全量 47 feature × n_a × n_d × 4B ≈ 3 GB, 对账完毕应关回
 // ============================================================================
-inline constexpr bool TENSOR_DUMP_ENABLE = false;
+inline constexpr bool TENSOR_DUMP_ENABLE = true;
 
 // ============================================================================
 // I. Build 契约 (build 末尾必须全 finite 的 feature 白名单; fail fast)

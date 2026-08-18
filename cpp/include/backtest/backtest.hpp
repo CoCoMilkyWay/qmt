@@ -22,12 +22,17 @@ namespace backtest {
 //   - pool_nav.npy           [n_d_bt] float32 (pool 内等权 benchmark, 起点同)
 //   - position_count.npy     [n_d_bt] int32  (持仓股票数)
 //   - position_pct.npy       [n_d_bt] float32 (持仓市值 / 组合市值)
-//   - turnover.npy           [n_d_bt] float32 (当日 卖+买 / HOLD_N)
+//   - turnover.npy           [n_d_bt] float32 (当日 买卖额 / 组合市值;
+//                              1 个成分股满额换手 = 1/HOLD_N, 再平衡碎股按额计)
 //   - susp_pct.npy           [n_d_bt] float32 (持仓中停牌比例)
 //   - executable_pct.npy     [n_d_bt] float32 (可执行订单 / 想下订单)
 //   - holdings_offsets.npy   [n_d_bt+1] int32 (CSR offset)
 //   - holdings_codes.npy     [total]    int32 (a 索引; per-d 内按权重降序)
 //   - holdings_weights.npy   [total]    float32 (持仓占组合市值)
+//   - watch_offsets.npy      [n_d_bt+1] int32 (CSR offset)
+//   - watch_codes.npy        [total]    int32 (a 索引; per-d 内因子降序,
+//                              长度 = min(HOLD_N*2, n_cands))
+//   - watch_scores.npy       [total]    float32 (当日 factor_score)
 //   - trades_inst.npy        [n_trades] int32  (a 索引)
 //   - trades_open_d.npy      [n_trades] int32
 //   - trades_close_d.npy     [n_trades] int32
@@ -35,7 +40,8 @@ namespace backtest {
 //   - trades_close_px.npy    [n_trades] float32
 //   - labels.json            JSON {trades_open_names[],
 //                                   trades_close_names[],
-//                                   holdings_names[]}  // 当日历史简称
+//                                   holdings_names[],
+//                                   watch_names[]}  // 当日历史简称
 //
 // 同时返回 elapsed_seconds (写入 meta.json).
 double run(const feature::Axes &axes, const feature::StockMeta &meta,

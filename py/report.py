@@ -5,8 +5,9 @@
 
 布局: 4 个 TAG 板块, 每块用 view-buttons 在子视图间切换.
     TAG 1: 指标卡 (策略 / pool 指数) | 交易统计
-    TAG 2: 收益曲线+日仓位曲线 (1 张 3:1 叠图, 含买/卖 marker 与持仓 hover)
-           | 回撤曲线 | 收益分布 (年/月/周) | 月换手率分布
+    TAG 2: 回测曲线 (净值/回撤/仓位 3 子图, 含买/卖 marker 与因子 top-2N hover,
+             legendgroup 按策略统一, 支持多策略对比)
+           | 收益分布 (年/月/周) | 月换手率分布
            | 年收益表 | 月收益表 | 交易收益分布
     TAG 3: 每天持仓 | 交易记录
     TAG 4: 排名分析 (分层年收益/累计/聚合IC) | 因子相关性 (单因子IC/汇总表/相关阵)
@@ -51,10 +52,17 @@ _FONT_HEADER = 12
 _FONT_CELL = 12
 _HEADER_H = 22
 _CELL_H = 22
+_STRAT_COLOR = "crimson"
+_HOVER_LABEL = dict(
+    bgcolor="white",
+    bordercolor="#ddd",
+    font=dict(size=8, color="#111"),
+    align="left",
+)
 
 
 def _fit_cell_h(total_h: int, n_rows: int,
-               margin: dict = _MARGIN_TBL) -> int:
+                margin: dict = _MARGIN_TBL) -> int:
     """让单元格高度以紧凑值为主, 小屏下不致撑开."""
     assert n_rows > 0, "n_rows must be > 0"
     avail = total_h - margin["t"] - margin["b"] - _HEADER_H
@@ -104,6 +112,10 @@ def _load() -> dict:
         "holdings_codes": np.load(BT_DIR / "holdings_codes.npy"),
         "holdings_weights": np.load(BT_DIR / "holdings_weights.npy"),
         "holdings_names": np.asarray(labels["holdings_names"], dtype=object),
+        "watch_offsets": np.load(BT_DIR / "watch_offsets.npy"),
+        "watch_codes": np.load(BT_DIR / "watch_codes.npy"),
+        "watch_scores": np.load(BT_DIR / "watch_scores.npy"),
+        "watch_names": np.asarray(labels["watch_names"], dtype=object),
         "trades_inst": np.load(BT_DIR / "trades_inst.npy"),
         "trades_open_d": np.load(BT_DIR / "trades_open_d.npy"),
         "trades_close_d": np.load(BT_DIR / "trades_close_d.npy"),
@@ -115,6 +127,12 @@ def _load() -> dict:
     # 健全性: labels 长度对齐
     assert len(bt["holdings_names"]) == len(bt["holdings_codes"]), \
         "labels.holdings_names 与 holdings_codes 长度不一致"
+    assert len(bt["watch_names"]) == len(bt["watch_codes"]), \
+        "labels.watch_names 与 watch_codes 长度不一致"
+    assert len(bt["watch_scores"]) == len(bt["watch_codes"]), \
+        "watch_scores 与 watch_codes 长度不一致"
+    assert len(bt["watch_offsets"]) == len(bt["holdings_offsets"]), \
+        "watch_offsets 与 holdings_offsets 长度不一致"
     assert len(bt["trades_open_names"]) == len(bt["trades_inst"]), \
         "labels.trades_open_names 与 trades_inst 长度不一致"
     assert len(bt["trades_close_names"]) == len(bt["trades_inst"]), \
@@ -122,6 +140,7 @@ def _load() -> dict:
 
     an_d_idx = np.load(AN_DIR / "dates.npy")
     assert np.array_equal(an_d_idx, bt_d_idx), "analysis/backtest dates 不一致"
+    assert "hold_n" in meta["config"], "meta.json config 缺 hold_n"
     an = {
         "dates": bt_dates,
         "factor_ic": np.load(AN_DIR / "factor_ic.npy"),
@@ -261,17 +280,22 @@ def _stat_indicators(bt, an, meta) -> dict:
 def _trade_stats(bt, an, meta) -> dict:
     """TAG 1 视图2: 交易统计."""
     n_trades = len(bt["trades_inst"])
-    if n_trades == 0:
-        return {"换股次数": 0}
-    holding_days = bt["trades_close_d"] - bt["trades_open_d"]
-    rets = bt["trades_close_px"] / bt["trades_open_px"] - 1.0
-    pos_rets = rets[rets > 0]
-    neg_rets = rets[rets < 0]
-    win_rate = float((rets > 0).mean())
+    rets = (bt["trades_close_px"] / bt["trades_open_px"] - 1.0
+            if n_trades else np.array([]))
+    pos_rets = rets[rets > 0] if n_trades else rets
+    neg_rets = rets[rets < 0] if n_trades else rets
+    win_rate = float((rets > 0).mean()) if n_trades else float("nan")
 
     nav_s = bt["strategy_nav"]
     n_d = len(nav_s)
-    years = n_d / TRADING_DAYS
+    hold_n = int(meta["config"]["hold_n"])
+    turn = bt["turnover"]
+    mean_turn = float(np.nanmean(turn)) if n_d else float("nan")
+    # turnover = 当日买卖额 / 组合市值; 满额换 1 个成分股 = 1/HOLD_N
+    # 换股次数 = 双边成分股换手单位 / 2 (一轮卖+买 = 1 次换股)
+    n_replace = (float(np.nansum(turn) * hold_n / 2.0)
+                 if n_d else 0.0)
+    avg_hold_days = (2.0 / mean_turn) if mean_turn > 0 else float("nan")
 
     daily_ret_s = np.concatenate([[0.0], np.diff(nav_s) / nav_s[:-1]])
 
@@ -283,14 +307,14 @@ def _trade_stats(bt, an, meta) -> dict:
     monthly = daily_df.resample("ME").apply(lambda x: (1 + x).prod() - 1)
 
     return {
-        "年换手率": float(np.nanmean(bt["turnover"]) * TRADING_DAYS),
-        "平均持有天数": float(np.mean(holding_days)),
+        "年换手率": mean_turn * TRADING_DAYS,
+        "平均持有天数": avg_hold_days,
         "平均持仓股票数": float(np.mean(bt["position_count"])),
-        "平均交易收益": float(np.mean(rets)),
+        "平均交易收益": float(np.mean(rets)) if n_trades else float("nan"),
         "正收益平均": float(np.mean(pos_rets)) if len(pos_rets) else float("nan"),
         "负收益平均": float(np.mean(neg_rets)) if len(neg_rets) else float("nan"),
         "交易赢率": win_rate,
-        "换股次数": int(n_trades),
+        "换股次数": n_replace,
         "持仓停牌股票比例": float(np.nanmean(bt["susp_pct"])),
         "月赢率": float((monthly["ret"] > 0).mean()),
         "周赢率": float((weekly["ret"] > 0).mean()),
@@ -319,7 +343,7 @@ _PCT_METRICS = {"年化", "波动率", "最大回撤", "Alpha", "跟踪误差",
                 "平均交易收益", "正收益平均", "负收益平均", "交易赢率",
                 "持仓停牌股票比例", "月赢率", "周赢率", "日赢率",
                 "调仓指令可执行比例", "指数跟踪误差", "平均持仓仓位"}
-_INT_METRICS  = {"天数", "创新高最长天数", "换股次数"}
+_INT_METRICS = {"天数", "创新高最长天数"}
 
 
 def _fmt_v(v, key=""):
@@ -350,7 +374,8 @@ def _transposed_table(col_headers: list,
     for metric in col_headers:
         cols.append([_fmt_v(row.get(metric, "—"), metric) for row in row_data])
 
-    ch = _fit_cell_h(_TAG1_H, n_rows=n_rows) if cell_height is None else cell_height
+    ch = _fit_cell_h(
+        _TAG1_H, n_rows=n_rows) if cell_height is None else cell_height
 
     return go.Table(
         header=_tbl_header(["指标"] + col_headers, align="center"),
@@ -359,9 +384,9 @@ def _transposed_table(col_headers: list,
 
 
 def _wide_metric_table(index: pd.Index,
-                      rows: pd.DataFrame,
-                      *,
-                      align: str = "left") -> go.Table:
+                       rows: pd.DataFrame,
+                       *,
+                       align: str = "left") -> go.Table:
     """指标行在左, 期次列在上，适配较宽的年度/月度表.
 
     目标: 横向布局 + 仅保留标准表头，不出现“指标/数值”二级表头。
@@ -450,12 +475,13 @@ def fig_tag1(bt, an, meta) -> list[tuple[str, go.Figure]]:
 
     # ── view1: 策略指标横排 (3 行: 策略 / pool指数 / 超额) ──
     strat = indicators["策略"]
-    pool  = indicators["pool指数"]
+    pool = indicators["pool指数"]
 
     excess: dict = {}
     for k in ["年化", "波动率", "夏普", "最大回撤"]:
         sv, pv = strat.get(k), pool.get(k)
-        excess[k] = (sv - pv) if isinstance(sv, float) and isinstance(pv, float) else "—"
+        excess[k] = (sv - pv) if isinstance(sv,
+                                            float) and isinstance(pv, float) else "—"
     for k in ["信息比率", "Alpha", "跟踪误差"]:
         excess[k] = strat.get(k, "—")
 
@@ -513,14 +539,12 @@ def _resample_table(daily_ret: np.ndarray, daily_bench: np.ndarray,
     return out
 
 
-def _build_trade_markers(bt, codes, side: str, nav_norm: np.ndarray,
-                          y_offset: float):
+def _build_trade_markers(bt, codes, side: str, nav_norm: np.ndarray):
     """聚合同日多笔为一个 marker. side ∈ {'buy','sell'}.
 
-    返回 (xs, ys, hovers).
+    返回 (xs, ys, hovers). marker 直接落在 NAV 曲线上.
     - buy:  x=open_d, name 取 trades_open_names (PIT 开仓日)
     - sell: x=close_d, name 取 trades_close_names (PIT 平仓日)
-    - y_offset: marker 相对曲线点的纵向偏移 (买<0 下移, 卖>0 上移)
     """
     inst = bt["trades_inst"]
     px_open = bt["trades_open_px"]
@@ -545,7 +569,8 @@ def _build_trade_markers(bt, codes, side: str, nav_norm: np.ndarray,
         if i_bt < 0 or i_bt >= n_d_bt:
             continue
         a = int(inst[k])
-        op = float(px_open[k]); cp = float(px_close[k])
+        op = float(px_open[k])
+        cp = float(px_close[k])
         pnl = (cp / op - 1.0) * 100.0 if op > 0 else float("nan")
         if side == "buy":
             line = f"{names[k]} ({codes[a]}) @ {op:.2f}"
@@ -558,28 +583,29 @@ def _build_trade_markers(bt, codes, side: str, nav_norm: np.ndarray,
     label = "买入" if side == "buy" else "卖出"
     for i_bt in sorted(by_d):
         xs.append(bt_dates[i_bt])
-        ys.append(float(nav_norm[i_bt]) + y_offset)
+        ys.append(float(nav_norm[i_bt]))
         lines = by_d[i_bt]
         head = f"<b>{label} ×{len(lines)}</b>"
         hovers.append(head + "<br>" + "<br>".join(lines))
     return xs, ys, hovers
 
 
-def _build_strategy_hover(bt, codes) -> list[str]:
-    """每个 bt 交易日的 hover 文本: 持仓 (pos_pct) + 各标的持有天数 +
-    当天买入/卖出 (含买入占 NAV%, 卖出 PnL% / 卖前占 NAV%).
+def _build_strategy_hover(bt) -> list[str]:
+    """每个 bt 交易日的 hover: 因子 top-(HOLD_N*2), 持仓用策略色+粗体.
 
-    精确按 bt 索引拼接, 避免 plotly "x unified" 就近匹配把相邻日的
-    marker 合并进 tooltip.
+    买卖不写入 tooltip (marker 已 hoverinfo=skip); 再平衡不加仓记录,
+    只有因子换股 / 全额开平仓才有黑点 (见 trades_*).
     """
     n = len(bt["dates"])
     off = bt["holdings_offsets"]
     hcodes = bt["holdings_codes"]
     hweights = bt["holdings_weights"]
-    hnames = bt["holdings_names"]
     pos_pct = bt["position_pct"]
+    woff = bt["watch_offsets"]
+    wcodes = bt["watch_codes"]
+    wscores = bt["watch_scores"]
+    wnames = bt["watch_names"]
 
-    # 1) days held per CSR slot — 维护 a -> 连续持仓起点 (bt index).
     streak_start: dict[int, int] = {}
     days_held = [0] * len(hcodes)
     for i in range(n):
@@ -595,62 +621,32 @@ def _build_strategy_hover(bt, codes) -> list[str]:
             if a not in cur:
                 del streak_start[a]
 
-    # 2) (bt_idx, a) -> 当日 (执行后) 持仓权重, 用于查买入/卖前的 NAV 占比.
-    weight_map: dict[tuple[int, int], float] = {}
+    held_info: dict[tuple[int, int], tuple[float, int]] = {}
     for i in range(n):
         lo, hi = int(off[i]), int(off[i + 1])
         for k in range(lo, hi):
-            weight_map[(i, int(hcodes[k]))] = float(hweights[k])
+            a = int(hcodes[k])
+            held_info[(i, a)] = (float(hweights[k]), days_held[k])
 
-    # 3) 按 bt 日聚合当天买/卖.
-    inst = bt["trades_inst"]
-    open_d = bt["trades_open_d"]; close_d = bt["trades_close_d"]
-    px_open = bt["trades_open_px"]; px_close = bt["trades_close_px"]
-    open_names = bt["trades_open_names"]
-    close_names = bt["trades_close_names"]
-    dates_idx = bt["dates_idx"]
-    d0 = int(dates_idx[0]) if len(dates_idx) > 0 else 0
-
-    buys: dict[int, list[str]] = {}
-    sells: dict[int, list[str]] = {}
-    for k in range(len(inst)):
-        a = int(inst[k])
-        op = float(px_open[k]); cp = float(px_close[k])
-        ob = int(open_d[k]) - d0
-        cb = int(close_d[k]) - d0
-        if 0 <= ob < n:
-            # 买入后该 code 的 holdings_weights == 买入金额/NAV
-            w_buy = weight_map.get((ob, a), 0.0) * 100.0
-            buys.setdefault(ob, []).append(
-                f"{open_names[k]} ({codes[a]}) @ {op:.2f} ({w_buy:.1f}%)")
-        if 0 <= cb < n:
-            pnl = (cp / op - 1.0) * 100.0 if op > 0 else float("nan")
-            # 卖前权重 ≈ close_d-1 那天 (执行后) 的权重
-            w_pre = weight_map.get((cb - 1, a), 0.0) * 100.0
-            sells.setdefault(cb, []).append(
-                f"{close_names[k]} ({codes[a]}) @ {cp:.2f} "
-                f"({pnl:+.2f}%, {w_pre:.1f}%)")
-
-    # 4) 拼接每日 hover.
     out = [""] * n
     for i in range(n):
-        lo, hi = int(off[i]), int(off[i + 1])
+        lo, hi = int(woff[i]), int(woff[i + 1])
         if hi == lo:
-            holding_str = "(空仓)"
+            watch_str = "(空)"
         else:
-            holding_str = "<br>".join(
-                f"{hnames[k]} ({codes[int(hcodes[k])]}) "
-                f"{hweights[k] * 100:.1f}% / {days_held[k]}d"
-                for k in range(lo, hi)
-            )
-        parts = [f"<b>持仓 ({pos_pct[i] * 100:.1f}%)</b><br>{holding_str}"]
-        if i in buys:
-            parts.append(
-                f"<b>买入 ×{len(buys[i])}</b><br>" + "<br>".join(buys[i]))
-        if i in sells:
-            parts.append(
-                f"<b>卖出 ×{len(sells[i])}</b><br>" + "<br>".join(sells[i]))
-        out[i] = "<br><br>".join(parts)
+            lines = []
+            for k in range(lo, hi):
+                a = int(wcodes[k])
+                score = float(wscores[k])
+                text = f"{wnames[k]} {score:.2f}"
+                info = held_info.get((i, a))
+                if info is not None:
+                    w, dh = info
+                    text = (f'<span style="color:{_STRAT_COLOR}">'
+                            f"<b>{text} {w * 100:.0f}%/{dh}d</b></span>")
+                lines.append(text)
+            watch_str = "<br>".join(lines)
+        out[i] = f"仓位 {pos_pct[i] * 100:.0f}%<br>{watch_str}"
     return out
 
 
@@ -671,93 +667,111 @@ def fig_tag2(bt, an, meta, codes) -> list[tuple[str, go.Figure]]:
                           autosize=True, font=dict(size=_FONT_CELL), **kw)
         return fig
 
-    # view 1: 收益曲线 (3) + 日仓位曲线 (1), shared x.
-    #   - 收益曲线 hover: 当日持仓 (历史简称 / code / 权重, 权重降序)
-    #   - 同日多笔买/卖 聚合为 1 个 marker (▲买 / ▼卖), hover 列明
+    # view 1: 回测曲线 — 净值 / 回撤 / 仓位 3 子图, shared x.
+    #   - 净值 hover: 因子 top-(HOLD_N*2) (历史简称 / code / 分数, 持仓高亮)
+    #   - 同日多笔买/卖 聚合为 1 个圆点 marker, 直接落在 NAV 曲线上
+    #   - legendgroup 按策略名统一: 一个 legend 项联动该策略在 3 个子图的
+    #     全部 trace, 后续多策略横向对比同一套 legend 语义
     nav_s_norm = nav_s / nav_s[0]
     nav_p_norm = nav_p / nav_p[0]
-    strat_hover = _build_strategy_hover(bt, codes)
+    strat_hover = _build_strategy_hover(bt)
 
     fig1 = make_subplots(
-        rows=2, cols=1, shared_xaxes=True,
-        row_heights=[3, 1], vertical_spacing=0.04,
+        rows=3, cols=1, shared_xaxes=True,
+        row_heights=[3, 1, 1], vertical_spacing=0.04,
     )
 
     fig1.add_trace(go.Scatter(
         x=dates, y=nav_s_norm, mode="lines", name="策略",
-        line=dict(color="crimson"),
+        legendgroup="策略", line=dict(color=_STRAT_COLOR),
         customdata=strat_hover,
         hovertemplate="%{customdata}<extra></extra>",
+        hoverlabel=_HOVER_LABEL,
     ), row=1, col=1)
     fig1.add_trace(go.Scatter(
         x=dates, y=nav_p_norm, mode="lines", name="pool指数",
-        line=dict(color="steelblue"),
+        legendgroup="pool指数", line=dict(color="steelblue"),
         hoverinfo="skip",
     ), row=1, col=1)
 
-    # marker 纵向偏移: 买曲线下 / 卖曲线上, 偏移 ≈ 整段 y range 的 2%.
-    # marker 仅作视觉提示, hoverinfo='skip' 避免 "x unified" 把相邻日 marker
-    # 合并进策略曲线的 tooltip; 当天买卖明细已嵌入策略 trace 的 customdata.
-    y_max = float(max(nav_s_norm.max(), nav_p_norm.max()))
-    y_min = float(min(nav_s_norm.min(), nav_p_norm.min()))
-    off = (y_max - y_min) * 0.02
-
-    bx, by, _ = _build_trade_markers(bt, codes, "buy",  nav_s_norm, -off)
-    sx, sy, _ = _build_trade_markers(bt, codes, "sell", nav_s_norm, +off)
+    # 买卖小黑点: 仅因子换股 / 全额开平仓 (trades_*, 不含再平衡加仓).
+    # hoverinfo='skip' — 不抢净值 tooltip.
+    bx, by, _ = _build_trade_markers(bt, codes, "buy",  nav_s_norm)
+    sx, sy, _ = _build_trade_markers(bt, codes, "sell", nav_s_norm)
     if bx:
         fig1.add_trace(go.Scatter(
             x=bx, y=by, mode="markers", name="买入",
-            marker=dict(symbol="triangle-up", color="green", size=6),
+            legendgroup="策略", showlegend=False,
+            marker=dict(symbol="circle", color="black", size=4),
             hoverinfo="skip",
         ), row=1, col=1)
     if sx:
         fig1.add_trace(go.Scatter(
             x=sx, y=sy, mode="markers", name="卖出",
-            marker=dict(symbol="triangle-down", color="red", size=6),
+            legendgroup="策略", showlegend=False,
+            marker=dict(symbol="circle", color="black", size=4),
             hoverinfo="skip",
         ), row=1, col=1)
 
     fig1.add_trace(go.Scatter(
-        x=dates, y=bt["position_pct"], mode="lines", name="仓位",
-        line=dict(color="seagreen"), fill="tozeroy",
-        fillcolor="rgba(46,139,87,0.18)",
+        x=dates, y=dd_s, mode="lines", name="策略",
+        legendgroup="策略", showlegend=False,
+        line=dict(color="crimson"), fill="tozeroy",
+        hoverinfo="skip",
+    ), row=2, col=1)
+    fig1.add_trace(go.Scatter(
+        x=dates, y=dd_p, mode="lines", name="pool指数",
+        legendgroup="pool指数", showlegend=False,
+        line=dict(color="steelblue"), fill="tozeroy",
         hoverinfo="skip",
     ), row=2, col=1)
 
-    fig1.update_yaxes(title_text="净值 (归一)", row=1, col=1)
+    fig1.add_trace(go.Scatter(
+        x=dates, y=bt["position_pct"], mode="lines", name="策略",
+        legendgroup="策略", showlegend=False,
+        line=dict(color="crimson"), fill="tozeroy",
+        fillcolor="rgba(220,20,60,0.18)",
+        hoverinfo="skip",
+    ), row=3, col=1)
+
+    # zoom 只支持横向: 三个子图 y 轴全部 fixedrange (纵向由前端 JS 在横向
+    # zoom 后对净值图重算 full range, 见 RENORM_JS).
+    fig1.update_yaxes(title_text="净值 (归一)", fixedrange=True, row=1, col=1)
+    fig1.update_yaxes(title_text="回撤", tickformat=".0%",
+                      fixedrange=True, row=2, col=1)
     fig1.update_yaxes(title_text="仓位", tickformat=".0%",
-                      range=[0, 1.02], row=2, col=1)
+                      range=[0, 1.02], fixedrange=True, row=3, col=1)
     fig1.update_layout(
         height=_TAG2_H, margin=_MARGIN_PLT, autosize=True,
         font=dict(size=_FONT_CELL),
-        hovermode="x unified",
+        hovermode="closest", hoverdistance=10,
+        hoverlabel=_HOVER_LABEL,
         legend=dict(orientation="h", y=1.06, x=0),
-    )
-
-    # view 2: 回撤曲线
-    fig2 = _chart(
-        go.Scatter(x=dates, y=dd_s, mode="lines",
-                   name="策略回撤", line=dict(color="crimson"), fill="tozeroy"),
-        go.Scatter(x=dates, y=dd_p, mode="lines",
-                   name="pool回撤", line=dict(color="steelblue"), fill="tozeroy"),
     )
 
     # view 3: 年/月/周收益分布
     df = pd.DataFrame({"d": dates, "r": daily_s}).set_index("d")
-    yearly = df.resample("YE").apply(lambda x: (1 + x).prod() - 1)["r"].dropna().values
-    monthly = df.resample("ME").apply(lambda x: (1 + x).prod() - 1)["r"].dropna().values
-    weekly = df.resample("W").apply(lambda x: (1 + x).prod() - 1)["r"].dropna().values
+    yearly = df.resample("YE").apply(
+        lambda x: (1 + x).prod() - 1)["r"].dropna().values
+    monthly = df.resample("ME").apply(
+        lambda x: (1 + x).prod() - 1)["r"].dropna().values
+    weekly = df.resample("W").apply(lambda x: (
+        1 + x).prod() - 1)["r"].dropna().values
     fig3 = _chart(
-        go.Histogram(x=yearly, name="年", marker_color="darkred", xbins=dict(size=0.05)),
-        go.Histogram(x=monthly, name="月", marker_color="orange", xbins=dict(size=0.02)),
-        go.Histogram(x=weekly, name="周", marker_color="gold", xbins=dict(size=0.01)),
+        go.Histogram(x=yearly, name="年", marker_color="darkred",
+                     xbins=dict(size=0.05)),
+        go.Histogram(x=monthly, name="月", marker_color="orange",
+                     xbins=dict(size=0.02)),
+        go.Histogram(x=weekly, name="周", marker_color="gold",
+                     xbins=dict(size=0.01)),
         barmode="group",
     )
 
     # view 4: 月换手率分布
     turn_df = pd.DataFrame({"d": dates, "t": bt["turnover"]}).set_index("d")
     monthly_turn = turn_df.resample("ME").sum()["t"].dropna().values
-    fig4 = _chart(go.Histogram(x=monthly_turn, name="月换手率", marker_color="purple"))
+    fig4 = _chart(go.Histogram(x=monthly_turn,
+                  name="月换手率", marker_color="purple"))
 
     # view 5: 年收益表
     yt = _resample_table(daily_s, daily_p, dates, "YE")
@@ -772,13 +786,13 @@ def fig_tag2(bt, an, meta, codes) -> list[tuple[str, go.Figure]]:
     # view 7: 交易收益分布
     if len(bt["trades_open_px"]) > 0:
         rets = bt["trades_close_px"] / bt["trades_open_px"] - 1.0
-        fig7 = _chart(go.Histogram(x=rets, name="交易收益", nbinsx=80, marker_color="teal"))
+        fig7 = _chart(go.Histogram(x=rets, name="交易收益",
+                      nbinsx=80, marker_color="teal"))
     else:
         fig7 = _chart(go.Scatter(x=[], y=[], name="无交易"))
 
     return [
-        ("收益曲线 + 仓位曲线", fig1),
-        ("回撤曲线", fig2),
+        ("回测曲线", fig1),
         ("年/月/周收益分布", fig3),
         ("月换手率分布", fig4),
         ("年收益表", fig5),
@@ -924,7 +938,8 @@ def fig_tag4(an, meta) -> list[tuple[str, go.Figure]]:
     colors_f = px_colors(n_factor)
     fig4 = go.Figure()
     for f in range(n_factor):
-        ic_ma = _rolling_mean(an["factor_ic"][f], meta["config"]["ic_ma_window"])
+        ic_ma = _rolling_mean(an["factor_ic"][f],
+                              meta["config"]["ic_ma_window"])
         fig4.add_trace(go.Scatter(x=dates, y=ic_ma, mode="lines",
                                   name=factor_names[f], line=dict(color=colors_f[f])))
     fig4.update_layout(height=_TAG4_H, margin=_MARGIN_PLT,
@@ -941,9 +956,11 @@ def fig_tag4(an, meta) -> list[tuple[str, go.Figure]]:
         ic_ma_now = ic_ma_full[-1]
         ic_mean = float(np.nanmean(ic_full))
         ic_std = float(np.nanstd(ic_full))
-        ir = ic_mean / ic_std * np.sqrt(TRADING_DAYS) if ic_std > 0 else float("nan")
+        ir = ic_mean / ic_std * \
+            np.sqrt(TRADING_DAYS) if ic_std > 0 else float("nan")
         turn = float(np.nanmean(an["factor_turnover"][f]))
-        summary_rows.append((factor_names[f], ic_now, ic_ma_now, ic_mean, ir, turn))
+        summary_rows.append(
+            (factor_names[f], ic_now, ic_ma_now, ic_mean, ir, turn))
     df_sum = pd.DataFrame(summary_rows, columns=[
         "因子", "当期IC", f"IC均值({meta['config']['ic_ma_window']})",
         "平均IC(全range)", "IR", "换手率"])
@@ -1034,6 +1051,109 @@ function showView(tagIdx, viewIdx) {
 
 REPORT_FOOT = "</body></html>\n"
 
+# 回测曲线 (tag2_view1) 横向 zoom 后重新 normalize 净值子图:
+#   - 窗口起点归一 (每个 legendgroup 各自锚定窗口首日 = 1, 买卖点跟随缩放)
+#   - 纵向按窗口内可见数据重算 full range (仅净值子图; 回撤/仓位不动)
+#   - 双击 reset (xaxis.autorange) 恢复全程归一
+RENORM_JS = """<script>
+(function () {
+  var gd = document.getElementById('tag2_view1');
+  if (!gd) return;
+  function ready() {
+    if (!gd.data || !gd._fullData || !gd._fullLayout) {
+      setTimeout(ready, 80); return;
+    }
+
+    // gd.data 里的数值数组可能是 {dtype, bdata} base64 编码 (plotly.py >= 6);
+    // 一律从 gd._fullData 取已解码的 TypedArray 作基线.
+    function toArr(v) { return Array.prototype.slice.call(v); }
+
+    // 净值子图 (yaxis 'y') 上按 legendgroup 归组, 记录初始 y (全程归一基线)
+    var navTraces = [];  // {idx, group, y0}
+    var lines = {};      // group -> {y0} (line trace, 归一锚)
+    var xs = null;       // line trace 的 x (ms), 各 group 共用同一 D 轴
+    gd.data.forEach(function (tr, i) {
+      if ((tr.yaxis || 'y') !== 'y' || !tr.legendgroup) return;
+      var ft = gd._fullData[i];
+      var y0 = toArr(ft.y);
+      if (!y0.length) return;
+      navTraces.push({ idx: i, group: tr.legendgroup, y0: y0 });
+      if (tr.mode && tr.mode.indexOf('lines') !== -1) {
+        lines[tr.legendgroup] = { y0: y0 };
+        if (xs === null)
+          xs = toArr(ft.x).map(function (v) {
+            return new Date(v).getTime();
+          });
+      }
+    });
+    var groups = Object.keys(lines);
+    if (!groups.length || xs === null) return;
+
+    function renorm(t0, t1) {
+      var i0 = 0, i1 = xs.length - 1;
+      if (t0 !== null) {
+        while (i0 < i1 && xs[i0] < t0) i0++;
+        while (i1 > i0 && xs[i1] > t1) i1--;
+      }
+      var factor = {}, ok = true;
+      groups.forEach(function (g) {
+        var f = 1.0 / lines[g].y0[i0];
+        if (!isFinite(f)) ok = false;
+        factor[g] = f;
+      });
+      if (!ok) return;
+      var ys = navTraces.map(function (t) {
+        var f = factor[t.group];
+        return t.y0.map(function (v) { return v * f; });
+      });
+      var idxs = navTraces.map(function (t) { return t.idx; });
+      Plotly.restyle(gd, { y: ys }, idxs).then(function () {
+        var lo = Infinity, hi = -Infinity;
+        groups.forEach(function (g) {
+          var f = factor[g], y0 = lines[g].y0;
+          for (var i = i0; i <= i1; i++) {
+            var v = y0[i] * f;
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+          }
+        });
+        var pad = (hi - lo) * 0.05 || 0.05;
+        return Plotly.relayout(gd, { 'yaxis.range': [lo - pad, hi + pad] });
+      });
+    }
+
+    gd.on('plotly_relayout', function (ev) {
+      if (!ev) return;
+      var keys = Object.keys(ev);
+      var reset = keys.some(function (k) {
+        return /^xaxis\\d*\\.autorange$/.test(k) && ev[k];
+      });
+      if (reset) { renorm(null, null); return; }
+      var t0 = null, t1 = null;
+      keys.forEach(function (k) {
+        var m = k.match(/^xaxis\\d*\\.range(?:\\[(\\d)\\])?$/);
+        if (!m) return;
+        if (m[1] === '0') t0 = ev[k];
+        else if (m[1] === '1') t1 = ev[k];
+        else { t0 = ev[k][0]; t1 = ev[k][1]; }
+      });
+      if (t0 === null || t1 === null) return;
+      // plotly range 字符串是 '2021-03-04 12:34:56.789' (空格分隔),
+      // 换成 'T' 保证 Date 解析跨浏览器一致.
+      function ms(v) {
+        if (typeof v === 'string') v = v.replace(' ', 'T');
+        var t = new Date(v).getTime();
+        return isNaN(t) ? null : t;
+      }
+      var a = ms(t0), b = ms(t1);
+      if (a === null || b === null) return;
+      renorm(a, b);
+    });
+  }
+  ready();
+})();
+</script>"""
+
 
 def main():
     data = _load()
@@ -1045,7 +1165,7 @@ def main():
 
     tag_views = [
         ("TAG 1: 策略指标 / 交易统计", fig_tag1(bt, an, meta)),
-        ("TAG 2: 收益曲线 / 分布 / 表格", fig_tag2(bt, an, meta, codes)),
+        ("TAG 2: 回测曲线 / 分布 / 表格", fig_tag2(bt, an, meta, codes)),
         ("TAG 3: 每天持仓 / 交易记录", fig_tag3(bt, codes, dates_all)),
         ("TAG 4: 排名分析 / 因子相关性", fig_tag4(an, meta)),
     ]
@@ -1077,6 +1197,7 @@ def main():
             parts.append(f'<div class="{cls}">{div}</div>')
         parts.append('</div>')
         parts.append('</div>')
+    parts.append(RENORM_JS)
     parts.append(REPORT_FOOT)
     out_path.write_text("\n".join(parts), encoding="utf-8")
     print(f"report -> {out_path}")
