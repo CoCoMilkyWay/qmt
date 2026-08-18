@@ -177,6 +177,12 @@ int main() {
     feature::describe(axes, T);
   }
 
+  // ---- Phase 2.6: 逐 (a,d) 张量导出 → output/tensor/*.npy (gate
+  //   config::TENSOR_DUMP_ENABLE), 供 test/ Python 参考实现逐点对账
+  if (::config::TENSOR_DUMP_ENABLE) {
+    feature::dump_tensor(axes, T);
+  }
+
   // ---- Phase 3: backtest (per-D 状态机) → output/backtest/*.npy + labels.json
   double bt_seconds = backtest::run(axes, meta, T);
 

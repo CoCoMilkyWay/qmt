@@ -41,7 +41,7 @@ namespace {
 
 constexpr std::uint64_t POOL_MAGIC = 0x315441444c4f4f50ULL; // 'POOLDAT1'
 // POOL_VERSION: PitPool 字段 / Ev struct / cache_layout 顺序变更时手动 +1.
-constexpr std::uint32_t POOL_VERSION = 2;
+constexpr std::uint32_t POOL_VERSION = 4;
 
 constexpr std::uint64_t FNV_OFFSET = 1469598103934665603ULL;
 constexpr std::uint64_t FNV_PRIME = 1099511628211ULL;
@@ -78,8 +78,10 @@ void mix_string(std::uint64_t &h, std::string_view s) {
 //   语义 hash 保证 cache 不被无谓打穿; 轴真变 (新交易日 / 新股) 时全部失效 (正确).
 std::uint64_t compute_axes_key(const Axes &axes) {
   std::uint64_t h = FNV_OFFSET;
-  for (const std::string &d : axes.dates) mix_string(h, d);
-  for (const std::string &c : axes.codes) mix_string(h, c);
+  for (const std::string &d : axes.dates)
+    mix_string(h, d);
+  for (const std::string &c : axes.codes)
+    mix_string(h, c);
   return h;
 }
 
@@ -126,22 +128,29 @@ fs::path pool_cache_path(const ItfDesc &itf) {
 bool try_map_pool_cache(const ItfDesc &itf, std::uint64_t key, PitPool &pool,
                         misc::MmapFile &mmap_holder) {
   fs::path p = pool_cache_path(itf);
-  if (!fs::exists(p)) return false;
+  if (!fs::exists(p))
+    return false;
 
   mmap_holder.open(p);
-  if (!mmap_holder.valid()) return false;
-  if (mmap_holder.size() < sizeof(PoolHeader)) return false;
+  if (!mmap_holder.valid())
+    return false;
+  if (mmap_holder.size() < sizeof(PoolHeader))
+    return false;
 
   const auto *hdr =
       reinterpret_cast<const PoolHeader *>(mmap_holder.data());
-  if (hdr->magic != POOL_MAGIC) return false;
-  if (hdr->version != POOL_VERSION) return false;
-  if (hdr->cache_key != key) return false;
+  if (hdr->magic != POOL_MAGIC)
+    return false;
+  if (hdr->version != POOL_VERSION)
+    return false;
+  if (hdr->cache_key != key)
+    return false;
 
   std::size_t table_off = sizeof(PoolHeader);
   std::size_t table_bytes =
       static_cast<std::size_t>(hdr->n_sections) * sizeof(SectionEntry);
-  if (mmap_holder.size() < table_off + table_bytes) return false;
+  if (mmap_holder.size() < table_off + table_bytes)
+    return false;
   const auto *sections = reinterpret_cast<const SectionEntry *>(
       mmap_holder.data() + table_off);
 
@@ -173,7 +182,8 @@ void dump_pool_cache(const ItfDesc &itf, std::uint64_t key, PitPool &pool) {
       sizeof(PoolHeader) +
       static_cast<std::size_t>(n_sections) * sizeof(SectionEntry);
   // header(32) + table(16N) 必然 8 对齐 → body 内 offset 加 base 后仍 8 对齐.
-  for (auto &s : sections) s.first += section_base;
+  for (auto &s : sections)
+    s.first += section_base;
 
   std::string out;
   out.reserve(section_base + body.size());
@@ -228,7 +238,8 @@ void load_pit(const Axes &axes, PitPool &pool) {
 
   // post_ffill (网格 per-A linear; mmap COW 写到 dirty 页) — 永远跑.
   for (int i = 0; i < ITFS_COUNT; ++i) {
-    if (ITFS[i].post_ffill) ITFS[i].post_ffill(axes, pool);
+    if (ITFS[i].post_ffill)
+      ITFS[i].post_ffill(axes, pool);
   }
 }
 

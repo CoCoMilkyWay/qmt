@@ -1,12 +1,14 @@
 #include "feature/describe.hpp"
 
-#include "feature/feature.hpp"
 #include "config.hpp"
+#include "feature/feature.hpp"
 #include "misc/affinity.hpp"
 #include "misc/fs.hpp"
+#include "misc/npy.hpp"
 #include "misc/timer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cmath>
@@ -32,11 +34,11 @@ namespace {
 struct Stats {
   std::size_t n_total;
   std::size_t n_zero;
-  std::size_t n_pos;   // finite & > 0
-  std::size_t n_neg;   // finite & < 0
-  std::size_t n_pinf;  // +inf
-  std::size_t n_ninf;  // -inf
-  std::size_t n_nan;   // NaN
+  std::size_t n_pos;  // finite & > 0
+  std::size_t n_neg;  // finite & < 0
+  std::size_t n_pinf; // +inf
+  std::size_t n_ninf; // -inf
+  std::size_t n_nan;  // NaN
   float mean;
   float std_;
   float min_;
@@ -53,9 +55,9 @@ inline Stats nan_stats(std::size_t n_total, std::size_t n_pinf,
   float nan = std::nanf("");
   Stats z{};
   z.n_total = n_total;
-  z.n_pinf  = n_pinf;
-  z.n_ninf  = n_ninf;
-  z.n_nan   = n_nan;
+  z.n_pinf = n_pinf;
+  z.n_ninf = n_ninf;
+  z.n_nan = n_nan;
   z.mean = z.std_ = z.min_ = z.p5 = z.p25 = z.p50 = z.p75 = z.p95 = z.max_ = nan;
   return z;
 }
@@ -66,8 +68,14 @@ inline void classify_nonfinite(float v, std::size_t &n_pinf,
                                std::size_t &n_ninf, std::size_t &n_nan) {
   std::uint32_t bits;
   std::memcpy(&bits, &v, sizeof(bits));
-  if ((bits & 0x007fffffu) != 0) { ++n_nan; return; }
-  if (bits & 0x80000000u)        { ++n_ninf; return; }
+  if ((bits & 0x007fffffu) != 0) {
+    ++n_nan;
+    return;
+  }
+  if (bits & 0x80000000u) {
+    ++n_ninf;
+    return;
+  }
   ++n_pinf;
 }
 
@@ -92,25 +100,29 @@ Stats compute_stats(const std::vector<float> &mat, int n_a, int n_d, int d_lo,
       float v = row[d];
       if (is_finite(v)) {
         scratch.push_back(v);
-        if (v > 0.0f)      ++n_pos;
-        else if (v < 0.0f) ++n_neg;
-        else               ++n_zero; // 含 +0 / -0
+        if (v > 0.0f)
+          ++n_pos;
+        else if (v < 0.0f)
+          ++n_neg;
+        else
+          ++n_zero; // 含 +0 / -0
       } else {
         classify_nonfinite(v, n_pinf, n_ninf, n_nan);
       }
     }
   }
 
-  if (scratch.empty()) return nan_stats(n_total, n_pinf, n_ninf, n_nan);
+  if (scratch.empty())
+    return nan_stats(n_total, n_pinf, n_ninf, n_nan);
 
   Stats s;
   s.n_total = n_total;
-  s.n_zero  = n_zero;
-  s.n_pos   = n_pos;
-  s.n_neg   = n_neg;
-  s.n_pinf  = n_pinf;
-  s.n_ninf  = n_ninf;
-  s.n_nan   = n_nan;
+  s.n_zero = n_zero;
+  s.n_pos = n_pos;
+  s.n_neg = n_neg;
+  s.n_pinf = n_pinf;
+  s.n_ninf = n_ninf;
+  s.n_nan = n_nan;
 
   std::sort(scratch.begin(), scratch.end());
   s.min_ = scratch.front();
@@ -123,7 +135,7 @@ Stats compute_stats(const std::vector<float> &mat, int n_a, int n_d, int d_lo,
     float frac = idx - static_cast<float>(lo);
     return scratch[lo] * (1.0f - frac) + scratch[hi] * frac;
   };
-  s.p5  = pct(0.05f);
+  s.p5 = pct(0.05f);
   s.p25 = pct(0.25f);
   s.p50 = pct(0.50f);
   s.p75 = pct(0.75f);
@@ -133,7 +145,7 @@ Stats compute_stats(const std::vector<float> &mat, int n_a, int n_d, int d_lo,
   double sum = 0.0, sum2 = 0.0;
   for (float v : scratch) {
     double d = static_cast<double>(v);
-    sum  += d;
+    sum += d;
     sum2 += d * d;
   }
   double n = static_cast<double>(scratch.size());
@@ -160,7 +172,8 @@ struct YearBucket {
 std::vector<YearBucket> build_buckets(const Axes &axes) {
   std::vector<YearBucket> out;
   out.push_back({"all", 0, axes.n_d()});
-  if (!::config::DESCRIBE_BY_YEAR) return out;
+  if (!::config::DESCRIBE_BY_YEAR)
+    return out;
 
   int n_d = axes.n_d();
   int i = 0;
@@ -168,7 +181,8 @@ std::vector<YearBucket> build_buckets(const Axes &axes) {
     assert(axes.dates[i].size() >= 4);
     std::string y = axes.dates[i].substr(0, 4);
     int j = i;
-    while (j < n_d && axes.dates[j].compare(0, 4, y) == 0) ++j;
+    while (j < n_d && axes.dates[j].compare(0, 4, y) == 0)
+      ++j;
     out.push_back({y, i, j});
     i = j;
   }
@@ -179,9 +193,25 @@ std::vector<YearBucket> build_buckets(const Axes &axes) {
 //   7 个百分比列: %0 %+ %- %+inf %-inf %nan %finite
 //   (前 6 列两两互斥, 总和 = 100%; %finite = %0 + %+ + %-)
 constexpr const char *COLS[] = {
-    "feature", "year", "n_total",
-    "%0",      "%+",   "%-",     "%+inf", "%-inf", "%nan", "%finite",
-    "mean",    "std",  "min",    "5%",    "25%",   "50%",  "75%", "95%", "max",
+    "feature",
+    "year",
+    "n_total",
+    "%0",
+    "%+",
+    "%-",
+    "%+inf",
+    "%-inf",
+    "%nan",
+    "%finite",
+    "mean",
+    "std",
+    "min",
+    "5%",
+    "25%",
+    "50%",
+    "75%",
+    "95%",
+    "max",
 };
 constexpr int N_COL = sizeof(COLS) / sizeof(COLS[0]);
 
@@ -202,7 +232,7 @@ void emit_row_stdout(const char *name, const std::string &year,
               "%12.4g %12.4g %12.4g %12.4g %12.4g %12.4g %12.4g %12.4g %12.4g\n",
               name, year.c_str(), s.n_total,
               pct_of(s.n_zero, s.n_total), pct_of(s.n_pos, s.n_total),
-              pct_of(s.n_neg, s.n_total),  pct_of(s.n_pinf, s.n_total),
+              pct_of(s.n_neg, s.n_total), pct_of(s.n_pinf, s.n_total),
               pct_of(s.n_ninf, s.n_total), pct_of(s.n_nan, s.n_total),
               pct_of(n_finite, s.n_total),
               s.mean, s.std_, s.min_, s.p5, s.p25, s.p50, s.p75, s.p95, s.max_);
@@ -220,7 +250,7 @@ void emit_row_tsv(std::ofstream &os, const char *name, const std::string &year,
   std::size_t n_finite = s.n_zero + s.n_pos + s.n_neg;
   os << name << '\t' << year << '\t' << s.n_total << '\t'
      << pct_of(s.n_zero, s.n_total) << '\t' << pct_of(s.n_pos, s.n_total) << '\t'
-     << pct_of(s.n_neg, s.n_total)  << '\t' << pct_of(s.n_pinf, s.n_total) << '\t'
+     << pct_of(s.n_neg, s.n_total) << '\t' << pct_of(s.n_pinf, s.n_total) << '\t'
      << pct_of(s.n_ninf, s.n_total) << '\t' << pct_of(s.n_nan, s.n_total) << '\t'
      << pct_of(n_finite, s.n_total) << '\t'
      << s.mean << '\t' << s.std_ << '\t' << s.min_ << '\t'
@@ -257,7 +287,8 @@ void describe(const Axes &axes, const Tensor &T) {
     std::vector<float> scratch;
     for (;;) {
       std::size_t f = next.fetch_add(1, std::memory_order_relaxed);
-      if (f >= FEATURES.size()) break;
+      if (f >= FEATURES.size())
+        break;
       const std::vector<float> &mat = T.mats[f];
       for (std::size_t bi = 0; bi < buckets.size(); ++bi) {
         const YearBucket &b = buckets[bi];
@@ -268,14 +299,17 @@ void describe(const Axes &axes, const Tensor &T) {
   };
 
   unsigned n_threads = misc::Affinity::core_count();
-  if (n_threads == 0) n_threads = 1;
+  if (n_threads == 0)
+    n_threads = 1;
   if (n_threads > FEATURES.size())
     n_threads = static_cast<unsigned>(FEATURES.size());
 
   std::vector<std::thread> threads;
   threads.reserve(n_threads);
-  for (unsigned t = 0; t < n_threads; ++t) threads.emplace_back(worker);
-  for (auto &th : threads) th.join();
+  for (unsigned t = 0; t < n_threads; ++t)
+    threads.emplace_back(worker);
+  for (auto &th : threads)
+    th.join();
 
   for (std::size_t f = 0; f < FEATURES.size(); ++f) {
     const FeatureMeta &fm = FEATURES[f];
@@ -285,6 +319,24 @@ void describe(const Axes &axes, const Tensor &T) {
       emit_row_stdout(fm.name, b.label, s);
       emit_row_tsv(ofs, fm.name, b.label, s);
     }
+  }
+}
+
+void dump_tensor(const Axes &axes, const Tensor &T) {
+  misc::Timer t("[feature] phase 4 dump_tensor");
+
+  fs::path out_dir = misc::git_root() / "output" / "tensor";
+  fs::create_directories(out_dir);
+
+  std::size_t n_a = static_cast<std::size_t>(axes.n_a());
+  std::size_t n_d = static_cast<std::size_t>(axes.n_d());
+  std::array<std::size_t, 2> shape{n_a, n_d};
+
+  for (std::size_t f = 0; f < FEATURES.size(); ++f) {
+    const std::vector<float> &mat = T.mats[f];
+    assert(mat.size() == n_a * n_d);
+    misc::write_npy_f4(out_dir / (std::string(FEATURES[f].name) + ".npy"), mat,
+                       shape);
   }
 }
 

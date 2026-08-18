@@ -15,8 +15,8 @@
 
 namespace feature {
 
-struct Axes;     // fwd decl
-struct PitPool;  // fwd decl
+struct Axes;    // fwd decl
+struct PitPool; // fwd decl
 
 // ============================================================================
 // PIT 中间结构 (Phase 1 写, Phase 2 只读).
@@ -232,9 +232,9 @@ struct GridMarginDetail {
 // cn_stock_industry_component WHERE industry='sw2021' (CUTOFF=-1, MonthFirst):
 //   每月初一份 sw2021 一级行业归属快照. l1_id = sw2021_l1_name_to_id(... ); 不在表 → 0.
 struct IndustryComponentEv {
-  std::int32_t v;          // row D (32-bit 对齐 + 与 axes int 索引一致)
+  std::int32_t v; // row D (32-bit 对齐 + 与 axes int 索引一致)
   std::uint8_t l1_id;
-  std::uint8_t _pad[3]{};  // POD 对齐
+  std::uint8_t _pad[3]{}; // POD 对齐
 };
 
 // cn_stock_industry_change (CUTOFF=-1, Day): 月内 sw2021 L1 行业切换事件.
@@ -245,14 +245,16 @@ struct IndustryChangeEv {
   std::uint8_t _pad[3]{};
 };
 
-// cn_stock_dividend (CUTOFF=-1): 分红事件.
+// cn_stock_dividend (CUTOFF=-1, v ← publish_date): 分红事件.
 //   report_date / ex_date 为 YYYYMMDD int32 (POD; 0 = 缺失).
-//   dy_raw 走 ex_date trailing 12M 窗口; dividend_st 用 cash_after_tax × share_raw[ev.v]
-//   推 3y 累计现金分红 (按 report_date.Y 窗口).
+//   dy_raw 走 v (预案公告日) trailing 12M 窗口, 用 cash_before_tax (税前, 行业口径)
+//   × share_raw[ev.v]; dividend_st 用 cash_after_tax × share_raw[ev.v] 推 3y 累计
+//   现金分红 (按 report_date.Y 窗口).
 struct DividendEv {
   std::int32_t v;
   std::int32_t report_date;
   std::int32_t ex_date;
+  float cash_before_tax;
   float cash_after_tax;
 };
 
@@ -260,7 +262,7 @@ struct DividendEv {
 //   aggregate 时一次性 map string → enum, replay/feature 不再碰 string.
 enum class ForecastType : std::uint8_t {
   Other = 0,
-  FirstLoss = 1,  // 首亏
+  FirstLoss = 1,    // 首亏
   ContinueLoss = 2, // 续亏
 };
 
@@ -281,6 +283,7 @@ struct FinancialTtmEv {
   std::int32_t report_date;
   float total_operating_revenue_ttm;
   float net_profit_to_parent_shareholders_ttm;
+  float net_profit_ttm; // 含少数股东损益; roa_raw 分子 (配含少数的 total_assets)
   float net_cffoa_ttm;
 };
 
@@ -349,7 +352,9 @@ struct MonthFile {
 // 直接消费. cache_layout 在三种模式下访问顺序必须一致 (由代码即文档保证).
 // ============================================================================
 struct CacheVisitor {
-  enum Kind : std::uint8_t { Size, Write, Map };
+  enum Kind : std::uint8_t { Size,
+                             Write,
+                             Map };
   Kind kind;
 
   // Size 模式: 累计 (含 8 字节 align padding).
@@ -369,7 +374,8 @@ struct CacheVisitor {
   void section(PoolArr<T> &arr) {
     if (kind == Size) {
       // section 起点 8 字节对齐 (T align ≤ 8; mmap 后直接 reinterpret_cast).
-      while (total_bytes % 8 != 0) ++total_bytes;
+      while (total_bytes % 8 != 0)
+        ++total_bytes;
       total_bytes += arr.size() * sizeof(T);
     } else if (kind == Write) {
       std::size_t bytes = arr.size() * sizeof(T);

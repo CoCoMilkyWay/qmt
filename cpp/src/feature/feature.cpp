@@ -266,6 +266,12 @@ void ts_share_raw(int a, const Axes &axes, const PitPool &pool,
 //
 // PIT 安全: 网格 / 事件 ev.v 已在 pit.cpp replay 时应用 raw cutoff, ev.v <= d 即
 //   "T 当日已可见". 所有 helper / ts_* 不再做时间偏移.
+//
+// 上市前事件丢弃 (ev.v < list_d): BigQuant 在上市日前就把招股书口径的财务行标为
+//   可见 (实测 ttm 10.9% / balance 14.5% 的事件 visible_date < list_date), 且这批
+//   值不可信 (例 300417 上市前 rev_ttm = -1247 万). 这里按 list_d 截断而非事后
+//   fill_before_list — 后者填 0 哨兵会让 revenue_st 的 "rev_raw < 阈值" 恒真.
+//   丢弃后上市前自然留 NaN = "无数据".
 // ----------------------------------------------------------------------------
 
 // per-A 走 ttm 事件流, 对每个 d 拿到 latest event 指针 (或 nullptr 没就绪).
@@ -275,13 +281,15 @@ inline void scan_latest_ttm(int a, const Axes &axes, const PitPool &pool,
                             const StockMeta &meta, Tensor &T, F dst,
                             Compute compute) {
   int n_d = axes.n_d();
+  int list_d = get_list_d(a, axes, meta);
   auto out = T.ts_row(dst, a);
   const auto &events = pool.financial_ttm[a];
   std::size_t ep = 0;
   int last_idx = -1;
   for (int d = 0; d < n_d; ++d) {
     while (ep < events.size() && events[ep].v <= d) {
-      last_idx = static_cast<int>(ep);
+      if (events[ep].v >= list_d)
+        last_idx = static_cast<int>(ep);
       ++ep;
     }
     out[d] = (last_idx >= 0) ? compute(d, events[last_idx]) : std::nanf("");
@@ -295,13 +303,15 @@ inline void scan_latest_balance(int a, const Axes &axes, const PitPool &pool,
                                 const StockMeta &meta, Tensor &T, F dst,
                                 Compute compute) {
   int n_d = axes.n_d();
+  int list_d = get_list_d(a, axes, meta);
   auto out = T.ts_row(dst, a);
   const auto &events = pool.financial_balance[a];
   std::map<std::int32_t, FinancialBalanceEv> latest_by_rd;
   std::size_t ep = 0;
   for (int d = 0; d < n_d; ++d) {
     while (ep < events.size() && events[ep].v <= d) {
-      latest_by_rd[events[ep].report_date] = events[ep];
+      if (events[ep].v >= list_d)
+        latest_by_rd[events[ep].report_date] = events[ep];
       ++ep;
     }
     if (latest_by_rd.empty()) {
@@ -313,15 +323,18 @@ inline void scan_latest_balance(int a, const Axes &axes, const PitPool &pool,
   fill_after_delist(out, a, axes, meta);
 }
 
-// pb_raw = mcap_raw / balance.total_owner_equity (含少数股东, BigQuant 实测口径).
+// pb_raw = mcap_raw / balance.total_equity_to_parent_shareholders (归母).
 //   ttm1 瞬时估值 (MRQ); 支持负 PB (负权益); mcap<=0 是未上市/无价格哨兵, 不参与估值.
+//   取归母而非含少数: 分子 mcap_raw 只是母公司股权市值, 分母含少数股东权益会两边
+//   口径错配 (同一 mcap_raw 在 pe_raw 里配的也是归母净利). test/compare.py 实测
+//   果仁亦用归母 (99.62% vs 含少数 50.16%).
 void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
   auto mcap = T.ts_row(F::mcap_raw, a);
   scan_latest_balance(a, axes, pool, meta, T, F::pb_raw,
                       [&](int d, const FinancialBalanceEv &e) -> float {
                         float m = mcap[d];
-                        float eq = e.total_owner_equity;
+                        float eq = e.total_equity_to_parent_shareholders;
                         return (is_finite(m) && m > 0.0f &&
                                 is_finite(eq) && eq != 0.0f)
                                    ? m / eq
@@ -332,7 +345,9 @@ void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
 // ps_raw = mcap_raw / ttm.total_operating_revenue_ttm
 //   分母用 total_operating_revenue_ttm (含利息/保费; BigQuant 实测口径) 而非
 //   operating_revenue_ttm; 600519 茅台等 2% 误差排查得.
-//   支持负 PS (负收入修正/异常但有排序含义); mcap<=0 不参与估值.
+//   分母 <= 0 → NaN: 营收为负物理不可能, 是 BigQuant 脏值 (实测 1.35% 事件为负,
+//   含 208 条已上市多年的, 例 600606 借壳期 rev_ttm = -312 亿), 不给排序含义.
+//   mcap<=0 是未上市/无价格哨兵, 不参与估值.
 void ts_ps_raw(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
   auto mcap = T.ts_row(F::mcap_raw, a);
@@ -341,17 +356,22 @@ void ts_ps_raw(int a, const Axes &axes, const PitPool &pool,
                     float m = mcap[d];
                     float r = e.total_operating_revenue_ttm;
                     return (is_finite(m) && m > 0.0f &&
-                            is_finite(r) && r != 0.0f)
+                            is_finite(r) && r > 0.0f)
                                ? m / r
                                : std::nanf("");
                   });
 }
 
-// dy_raw = Σ(dividend.cash_after_tax for ex_date ∈ (D-365d, D]) × share_raw[D] / mcap_raw[D]
-//   窗口走 ex_date 日历日 (BigQuant 实测口径: 累计每股分红 × 当前股本, 不是 ex_date
-//   当日股本; CATL / BYD 误差排查得).
-//   PIT: ex_date >= publish_date 一定 ⇒ ex_date <= T ⇒ publish_date <= T 自洽
-//   (极少数 publish == ex == T 的边缘情况忽略).
+// dy_raw = Σ(cash_before_tax × share_raw[ev.v] for ev.v ∈ (D-365d, D]) / mcap_raw[D]
+//   窗口锚在事件自身的可见日 ev.v (← publish_date, 预案公告日), 不是 ex_date:
+//     分红是公告即定价的信息事件, 除权日常滞后公告 2-4 个月, 用 ex_date 会让因子
+//     整体延迟一个季度. test/diag_dy.py 八组合实测: 换公告日锚 +10.6pp (70.9→81.6).
+//   每股金额用税前 cash_before_tax (行业通行的股息率口径, Wind/BigQuant 同), +2.5pp.
+//   分红总额 = 每股 × 公告当日股本 (share_raw[ev.v]) 而非当前股本: 事后送转/增发
+//     会把股本放大, 配当年的每股分红是两边错配 (公告日快照才等于真实派现总额), +6.6pp.
+//     dividend_st 的 3y 累计现金分红早已是这个口径.
+//   合计 70.9% → 88.2% (对 test/1.csv 的 股息率TTM).
+//   PIT: ev.v 已含 CUTOFF=-1, 天然不含 T 当日才公告的方案.
 //   无事件 → 0 (不是 NaN; 0 = "无近期分红", 横截面排最低位); mcap 缺/≤0 → NaN.
 void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
                const StockMeta &meta, Tensor &T) {
@@ -362,21 +382,17 @@ void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
   const auto &shares = pool.shares.total_shares;
   const auto &divs = pool.dividend[a];
 
-  struct Item {
-    std::chrono::sys_days ex;
-    float cash;
-  };
-  std::vector<Item> items;
-  items.reserve(divs.size());
-  for (const auto &e : divs) {
-    if (e.ex_date <= 0)
+  // 事件已按 v 升序 (EventStore::sort_chains) ⇒ 直接双指针, 无需另排.
+  //   amt[i] = 该次分红的派现总额 [元]; 股本快照缺失 / 非正每股 → 0 (不入窗).
+  std::vector<float> amt(divs.size(), 0.0f);
+  for (std::size_t i = 0; i < divs.size(); ++i) {
+    float c = divs[i].cash_before_tax;
+    if (!is_finite(c) || c <= 0.0f)
       continue;
-    if (!is_finite(e.cash_after_tax) || e.cash_after_tax <= 0.0f)
-      continue;
-    items.push_back({misc::parse_yyyymmdd_int(e.ex_date), e.cash_after_tax});
+    float sh = shares[base + static_cast<std::size_t>(divs[i].v)];
+    if (is_finite(sh))
+      amt[i] = c * sh;
   }
-  std::sort(items.begin(), items.end(),
-            [](const Item &x, const Item &y) { return x.ex < y.ex; });
 
   // 双指针滑窗 cash_sum: hi 是即将入窗事件下标, lo 是已弹出事件下标 (= 当前窗
   //   含 [lo, hi) 区间事件). 窗口为空 (lo == hi) 时显式归零, 防 += / -= 浮点
@@ -385,24 +401,22 @@ void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
   std::size_t lo = 0, hi = 0;
   float cash_sum = 0.0f;
   for (int d = 0; d < n_d; ++d) {
-    auto Td = axes.date_days[d];
-    auto Tlo = Td - std::chrono::days{365};
-    while (hi < items.size() && items[hi].ex <= Td) {
-      cash_sum += items[hi].cash;
+    auto Tlo = axes.date_days[d] - std::chrono::days{365};
+    while (hi < divs.size() && divs[hi].v <= d) {
+      cash_sum += amt[hi];
       ++hi;
     }
-    while (lo < hi && items[lo].ex <= Tlo) {
-      cash_sum -= items[lo].cash;
+    while (lo < hi && axes.date_days[divs[lo].v] <= Tlo) {
+      cash_sum -= amt[lo];
       ++lo;
     }
     if (lo >= hi)
       cash_sum = 0.0f;
     float m = mcap[d];
-    float ts = shares[base + static_cast<std::size_t>(d)];
-    if (!is_finite(m) || m <= 0.0f || !is_finite(ts)) {
+    if (!is_finite(m) || m <= 0.0f) {
       out[d] = std::nanf("");
     } else {
-      float dy = (cash_sum * ts) / m;
+      float dy = cash_sum / m;
       out[d] = (dy > 0.0f) ? dy : 0.0f;
     }
   }
@@ -496,11 +510,14 @@ void ts_industry_l1(int a, const Axes &axes, const PitPool &pool,
 // ============================================================================
 
 // rev_raw ← ttm.total_operating_revenue_ttm; 给 revenue_st 过滤用 (同 ps_raw 分母).
+//   <= 0 → NaN (同 ps_raw: 负营收是 BigQuant 脏值). 这里尤其要紧 — revenue_st 判
+//   "rev_raw < 3e8/1e8", 负值会让阈值恒真, 把脏数据直接变成误报的退市预警.
 void ts_rev_raw(int a, const Axes &axes, const PitPool &pool,
                 const StockMeta &meta, Tensor &T) {
   scan_latest_ttm(a, axes, pool, meta, T, F::rev_raw,
                   [](int /*d*/, const FinancialTtmEv &e) -> float {
-                    return e.total_operating_revenue_ttm;
+                    float r = e.total_operating_revenue_ttm;
+                    return (is_finite(r) && r > 0.0f) ? r : std::nanf("");
                   });
 }
 
@@ -598,14 +615,63 @@ void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool,
 }
 
 // roe_raw / roa_raw: 同时读 ttm + balance 两路事件流; 单独 helper 处理 dual scan.
-//   ROE = NP_parent_ttm / equity_to_parent × 100  (经典归母 ROE)
-//   ROA = NP_parent_ttm / total_assets × 100      (分子归母, 分母总资产)
+//   ROE = NP_parent_ttm / avg(equity_to_parent) × 100  (经典归母 ROE, 分子分母同归母)
+//   ROA = NP_ttm(含少数) / avg(total_assets) × 100
+//     ROA 分子取含少数: 总资产由全体股东 (含少数) 与债权人共同支撑, 配归母净利是
+//     两边错配 (母公司只享部分子公司权益却摊全部资产). 果仁亦用含少数, 换过来后
+//     roa_raw 对 test/1.csv 的命中 (5% 容差) 18.2% → 94%.
+// 分母走 TTM 窗口平均而非期末值: 分子是 12 个月的流量, 分母必须是同窗口的平均
+//   存量才同口径 (教科书 ROE = NI / average equity). 期末值配 TTM 分子会在权益
+//   快速变动 (增发 / 回购 / 大额分红) 的股票上系统性失真.
+
+// report_date (yyyymmdd) 的上一个季末; 非标准季末 → 0 (调用方视为链断).
+inline std::int32_t prev_quarter_end(std::int32_t rd) {
+  std::int32_t y = rd / 10000, md = rd % 10000;
+  switch (md) {
+  case 1231:
+    return y * 10000 + 930;
+  case 930:
+    return y * 10000 + 630;
+  case 630:
+    return y * 10000 + 331;
+  case 331:
+    return (y - 1) * 10000 + 1231;
+  default:
+    return 0;
+  }
+}
+
+// TTM 窗口 5 点平均: anchor (= ttm 事件的 report_date) + 前 4 个季末.
+//   任一点缺失 / 非有限 → NaN (窗口不完整不给近似值; 次新股上市头 ~15 个月
+//   自然落在这里). map 存的是各 report_date 当前可见的最新版本 ⇒ PIT 自洽.
+inline float ttm_window_avg(
+    std::int32_t anchor,
+    const std::map<std::int32_t, FinancialBalanceEv> &by_rd,
+    float FinancialBalanceEv::*field) {
+  double sum = 0.0;
+  std::int32_t rd = anchor;
+  for (int i = 0; i < 5; ++i) {
+    if (rd == 0)
+      return std::nanf("");
+    auto it = by_rd.find(rd);
+    if (it == by_rd.end())
+      return std::nanf("");
+    float v = it->second.*field;
+    if (!is_finite(v))
+      return std::nanf("");
+    sum += static_cast<double>(v);
+    rd = prev_quarter_end(rd);
+  }
+  return static_cast<float>(sum / 5.0);
+}
+
 template <class Compute>
 inline void scan_latest_ttm_and_balance(int a, const Axes &axes,
                                         const PitPool &pool,
                                         const StockMeta &meta, Tensor &T, F dst,
                                         Compute compute) {
   int n_d = axes.n_d();
+  int list_d = get_list_d(a, axes, meta);
   auto out = T.ts_row(dst, a);
   const auto &ttms = pool.financial_ttm[a];
   const auto &bals = pool.financial_balance[a];
@@ -614,18 +680,20 @@ inline void scan_latest_ttm_and_balance(int a, const Axes &axes,
   int last_ttm = -1;
   for (int d = 0; d < n_d; ++d) {
     while (tp < ttms.size() && ttms[tp].v <= d) {
-      last_ttm = static_cast<int>(tp);
+      if (ttms[tp].v >= list_d)
+        last_ttm = static_cast<int>(tp);
       ++tp;
     }
     while (bp < bals.size() && bals[bp].v <= d) {
-      latest_by_rd[bals[bp].report_date] = bals[bp];
+      if (bals[bp].v >= list_d)
+        latest_by_rd[bals[bp].report_date] = bals[bp];
       ++bp;
     }
     if (last_ttm < 0 || latest_by_rd.empty()) {
       out[d] = std::nanf("");
       continue;
     }
-    out[d] = compute(d, ttms[last_ttm], latest_by_rd.rbegin()->second);
+    out[d] = compute(d, ttms[last_ttm], latest_by_rd);
   }
   fill_after_delist(out, a, axes, meta);
 }
@@ -635,9 +703,11 @@ void ts_roe_raw(int a, const Axes &axes, const PitPool &pool,
   scan_latest_ttm_and_balance(
       a, axes, pool, meta, T, F::roe_raw,
       [](int /*d*/, const FinancialTtmEv &t,
-         const FinancialBalanceEv &b) -> float {
+         const std::map<std::int32_t, FinancialBalanceEv> &by_rd) -> float {
         float n = t.net_profit_to_parent_shareholders_ttm;
-        float eq = b.total_equity_to_parent_shareholders;
+        float eq = ttm_window_avg(
+            t.report_date, by_rd,
+            &FinancialBalanceEv::total_equity_to_parent_shareholders);
         return (is_finite(n) && is_finite(eq) && eq > 0.0f)
                    ? (n / eq) * 100.0f
                    : std::nanf("");
@@ -649,9 +719,10 @@ void ts_roa_raw(int a, const Axes &axes, const PitPool &pool,
   scan_latest_ttm_and_balance(
       a, axes, pool, meta, T, F::roa_raw,
       [](int /*d*/, const FinancialTtmEv &t,
-         const FinancialBalanceEv &b) -> float {
-        float n = t.net_profit_to_parent_shareholders_ttm;
-        float as = b.total_assets;
+         const std::map<std::int32_t, FinancialBalanceEv> &by_rd) -> float {
+        float n = t.net_profit_ttm;
+        float as = ttm_window_avg(t.report_date, by_rd,
+                                  &FinancialBalanceEv::total_assets);
         return (is_finite(n) && is_finite(as) && as > 0.0f)
                    ? (n / as) * 100.0f
                    : std::nanf("");
@@ -1039,34 +1110,34 @@ void ts_pool_b(int a, const Axes &axes, const PitPool &, const StockMeta &meta,
 // ============================================================================
 
 void cs_close(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::close_raw, F::close, /*invert=*/true, T, b.a);
+  factor_pipeline(d, F::close_raw, F::close, /*invert=*/true, T, b);
 }
 void cs_mcap(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::mcap_raw, F::mcap, true, T, b.a);
+  factor_pipeline(d, F::mcap_raw, F::mcap, true, T, b);
 }
 void cs_fmcap(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::fmcap_raw, F::fmcap, true, T, b.a);
+  factor_pipeline(d, F::fmcap_raw, F::fmcap, true, T, b);
 }
 void cs_pe_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::pe_raw, F::pe_ttm12, true, T, b.a);
+  neutral_pipeline(d, F::pe_raw, F::pe_ttm12, true, T, b);
 }
 void cs_pb_ttm1(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::pb_raw, F::pb_ttm1, true, T, b.a);
+  neutral_pipeline(d, F::pb_raw, F::pb_ttm1, true, T, b);
 }
 void cs_ps_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::ps_raw, F::ps_ttm12, true, T, b.a);
+  neutral_pipeline(d, F::ps_raw, F::ps_ttm12, true, T, b);
 }
 void cs_pcf_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::pcf_raw, F::pcf_ttm12, true, T, b.a);
+  neutral_pipeline(d, F::pcf_raw, F::pcf_ttm12, true, T, b);
 }
 void cs_roe_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::roe_raw, F::roe_ttm12, /*invert=*/false, T, b.a);
+  neutral_pipeline(d, F::roe_raw, F::roe_ttm12, /*invert=*/false, T, b);
 }
 void cs_roa_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::roa_raw, F::roa_ttm12, false, T, b.a);
+  neutral_pipeline(d, F::roa_raw, F::roa_ttm12, false, T, b);
 }
 void cs_dy_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, F::dy_raw, F::dy_ttm12, false, T, b.a);
+  neutral_pipeline(d, F::dy_raw, F::dy_ttm12, false, T, b);
 }
 
 // pool: pool_b ∧ rank(mcap_raw asc within pool_b) ≤ POOL_UNIVERSE_SIZE

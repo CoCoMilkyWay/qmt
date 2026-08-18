@@ -183,6 +183,13 @@ inline constexpr bool DESCRIBE_ENABLE = true;
 inline constexpr bool DESCRIBE_BY_YEAR = false;
 
 // ============================================================================
+// H2. Tensor dump (逐 (a, d) 张量导出, 供 test/ 的 Python 参考实现逐点对账)
+//   TENSOR_DUMP_ENABLE  总开关; 开启后写 output/tensor/<feature>.npy
+//                       全量 47 feature × n_a × n_d × 4B ≈ 3 GB, 对账完毕应关回
+// ============================================================================
+inline constexpr bool TENSOR_DUMP_ENABLE = false;
+
+// ============================================================================
 // I. Build 契约 (build 末尾必须全 finite 的 feature 白名单; fail fast)
 //   任何一格 NaN 都表示 compute fn 漏写或上游污染. raw / *_age /
 //   daily_return 等列预期可能 NaN, 不在此列表; factor 经截面均值补缺后必须全 finite.

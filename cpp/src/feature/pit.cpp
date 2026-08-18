@@ -549,6 +549,7 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
   parallel_parse_months(files, [&](const pq::TableView &v) {
     pq::Col vd = v.col("publish_date"), inst = v.col("instrument");
     pq::Col rd = v.col("report_date"), ed = v.col("ex_date");
+    pq::Col cash_b = v.col("cash_before_tax");
     pq::Col cash = v.col("cash_after_tax");
     EventRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
@@ -562,6 +563,7 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
       ev.v = row;
       ev.report_date = rd.yyyymmdd(i);
       ev.ex_date = ed.yyyymmdd(i);
+      ev.cash_before_tax = cash_b.f32(i);
       ev.cash_after_tax = cash.f32(i);
       std::lock_guard<std::mutex> lk(mu[a]);
       p.dividend.push_chain(a, ev);
@@ -591,6 +593,7 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     pq::Col shift = v.col("shift"), rd = v.col("report_date");
     pq::Col rev = v.col("total_operating_revenue_ttm");
     pq::Col np = v.col("net_profit_to_parent_shareholders_ttm");
+    pq::Col npa = v.col("net_profit_ttm");
     pq::Col cf = v.col("net_cffoa_ttm");
     EventRowMemo memo(axes, CUTOFF);
     for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
@@ -608,6 +611,7 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
       ev.report_date = rd.yyyymmdd(i);
       ev.total_operating_revenue_ttm = rev.f32(i);
       ev.net_profit_to_parent_shareholders_ttm = np.f32(i);
+      ev.net_profit_ttm = npa.f32(i);
       ev.net_cffoa_ttm = cf.f32(i);
       std::lock_guard<std::mutex> lk(mu[a]);
       p.financial_ttm.push_chain(a, ev);
