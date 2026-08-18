@@ -42,6 +42,8 @@ TABLES = {
     "indchg": ("cn_stock_industry_change", ["date", "instrument", "industry", "industry_level", "industry_name", "change_flag"]),
     "forecast": ("forecast", ["ts_code", "ann_date", "end_date", "type", "last_parent_net",
                               "net_profit_min", "net_profit_max"]),
+    "notes": ("cn_stock_financial_notes_shift", ["date", "instrument", "report_date", "shift",
+                                                 "nonrecurring_income_to_owner_ttm"]),
     "tdays": ("trading_days", None),
     "valuation": ("cn_stock_valuation", ["date", "instrument", "total_market_cap", "pe_ttm", "pb", "ps_ttm",
                                          "pcf_op_ttm", "dividend_yield_ratio"]),
@@ -420,8 +422,9 @@ def _industry_got(csv, version, level=1):
 
 
 def f_industry(csv, tdays):
-    # 果仁 2022 起用申万2021 (100% 对上); 之前 = sw2014 结构但显示新版名 → 用 sw2014 L2→果仁名 学习映射
-    CUTOVER = 20220101
+    # 果仁 2021.8 起用申万2021 (发布日 2021-07-30, 实测 100% 对上); 之前 = sw2014 结构但显示新版名
+    # → 用 sw2014 L2→果仁名 学习映射
+    CUTOVER = 20210801
     got21 = _industry_got(csv, "sw2021")
     l1_14 = _industry_got(csv, "sw2014", 1)
     l2_14 = _industry_got(csv, "sw2014", 2)
@@ -482,39 +485,54 @@ def f_loss2y(csv, tdays):
 
 
 def f_g9_fin(csv, tdays):
-    # 国九条财务 = "预期"口径: 年度预告首亏/续亏 ∧ rev_ttm<阈 (主板3亿/创科1亿, 现行规则全历史回填);
-    # 窗口 = 预告公告后 → 正式年报披露/4.30 止
+    # 国九条财务 = "预期"口径: 年度预告窗口内 (公告后→正式年报披露/4.30 止)
+    #   (预告净利下限<0 ∨ 扣非TTM<0) ∧ rev<阈 (主板3亿/创科1亿, 现行规则全历史回填)
     fc = load("forecast")
-    fc = fc[(fc["end_date"] % 10000 // 100 == 12) & fc["type"].isin(["首亏", "续亏"])]
+    fc = fc[fc["end_date"] % 10000 // 100 == 12].copy()
+    fc["pred_neg"] = np.where(fc["net_profit_min"].notna(), fc["net_profit_min"] < 0,
+                              fc["type"].isin(["首亏", "续亏"]))
     inc = load("income")
     ann = inc[inc["fs_quarter_index"] == 4]
     fin_first = ann.groupby(["instrument", "report_date"])["date"].min()
-    rev = _ttm_latest(csv, "total_operating_revenue_ttm").values
     csv_i = csv.reset_index(drop=True)
-    thr_arr = np.where(csv_i["inst"].str.startswith(("30", "68")), 1e8, 3e8)
-    ours = np.zeros(len(csv))
-    by_inst = {k: g for k, g in fc.groupby("ts_code")}
-    tarr = csv_i["T"].values
-    iarr = csv_i["inst"].values
-    for i in range(len(csv_i)):
-        g = by_inst.get(iarr[i])
-        if g is None:
-            continue
-        T = tarr[i]
-        for ann_d, end_d in zip(g["ann_date"].values, g["end_date"].values):
-            if not (ann_d < T):
+
+    def window_flag(sub):
+        out = np.zeros(len(csv_i), bool)
+        by = {k: g for k, g in sub.groupby("ts_code")}
+        tarr, iarr = csv_i["T"].values, csv_i["inst"].values
+        for i in range(len(csv_i)):
+            g = by.get(iarr[i])
+            if g is None:
                 continue
-            ddl = (end_d // 10000 + 1) * 10000 + 430
-            if T >= ddl:
-                continue
-            fin_v = fin_first.get((iarr[i], end_d), None)
-            if fin_v is not None and T > fin_v:
-                continue
-            if np.isfinite(rev[i]) and rev[i] < thr_arr[i]:
-                ours[i] = 1.0
+            for ad, ed in zip(g["ann_date"].values, g["end_date"].values):
+                if not (ad < tarr[i]) or tarr[i] >= (ed // 10000 + 1) * 10000 + 430:
+                    continue
+                fv = fin_first.get((iarr[i], ed), None)
+                if fv is not None and tarr[i] > fv:
+                    continue
+                out[i] = True
                 break
+        return out
+
+    pred = window_flag(fc[fc["pred_neg"]])
+    anyfc = window_flag(fc)
+    np_ttm = _ttm_latest(csv_i, "net_profit_to_parent_shareholders_ttm").values
+    notes = load("notes")
+    nr = notes[notes["shift"] == 0][["date", "instrument", "nonrecurring_income_to_owner_ttm"]]
+    nrv = asof_event(csv_i, nr, ["nonrecurring_income_to_owner_ttm"])["nonrecurring_income_to_owner_ttm"].values
+    kf_neg = np.isfinite(np_ttm - nrv) & (np_ttm - nrv < 0)
+
+    rev_ttm = _ttm_latest(csv_i, "total_operating_revenue_ttm").values
+    ann2 = ann.sort_values(["instrument", "date"], kind="stable").copy()
+    ann2["rdm"] = ann2.groupby("instrument")["report_date"].cummax()
+    ev = ann2[ann2["report_date"] == ann2["rdm"]]
+    va = asof_event(csv_i, ev[["date", "instrument", "total_operating_revenue"]], ["total_operating_revenue"])
+    rev = np.where(np.isfinite(rev_ttm), rev_ttm, va["total_operating_revenue"].values)
+    thr = np.where(csv_i["inst"].str.startswith(("30", "68")), 1e8, 3e8)
+    ours = ((pred | (anyfc & kf_neg)) & (rev < thr)).astype(float)
     return binary_report("g9_fin", csv, pd.Series(ours, index=csv.index), csv["国九条财务退市预警"],
-                         note="预告首亏/续亏 ∧ rev_ttm<3亿(主板)/1亿(创科), 年报披露即撤")
+                         note="预告窗口 ∧ (预告净利下限<0 ∨ 扣非TTM<0) ∧ rev<3亿(主板)/1亿(创科); "
+                              "残差=果仁或用预告扣非原文(缺数据)")
 
 
 def _roll20_all(csv, tdays, flag_grid):
@@ -550,12 +568,14 @@ def f_trade_warn(csv, tdays):
 
 
 def f_pool(csv, tdays, min_list_days=0):
-    """截面攻坚: 全市场 mcap 升序 + 默认 filter → 每日 bottom-N vs 果仁当日新调入 (非卡单).
-       卡单持仓从两边剔除 (不受 filter/rank 约束)."""
+    """截面攻坚: 全市场 mcap 升序 + 默认 filter + 剔风险警示 → 每日 bottom-N vs 果仁当日新调入 (非卡单).
+       卡单持仓从两边剔除 (不受 filter/rank 约束).
+       已否定的假设: 流通市值/复合排名/市值下限/上市天数/两融标的/科创板/审计意见/近20日封板停牌;
+       残差 = 果仁 universe 存在未知硬排除 (74% 被跳过的干净股全年未被持有), 待与人确认策略筛选条件."""
     bar = load("bar1d")
     sh = load("shares")[["date", "instrument", "total_shares"]]
     lim = load("limit")
-    st = load("status")[["date", "instrument", "suspended"]]
+    st = load("status")[["date", "instrument", "suspended", "is_risk_warning"]]
     bar = bar[~bar["instrument"].str.endswith(".BJ")]
     bi = load_basic_info()
     list_d = bi["list_date"].to_dict()
@@ -589,7 +609,7 @@ def f_pool(csv, tdays, min_list_days=0):
         b = bar_g[P].set_index("instrument")["close"]
         s = sh_g[P].set_index("instrument")["total_shares"] if P in sh_g else pd.Series(dtype=float)
         u = lim_g[P].set_index("instrument") if P in lim_g else None
-        stt = st_g[T].set_index("instrument")["suspended"] if T in st_g else pd.Series(dtype=float)
+        stt = st_g[T].set_index("instrument") if T in st_g else None
         df = pd.DataFrame({"close": b}).join(s.rename("shares"))
         df["mcap"] = df["close"] * df["shares"]
         df = df[df["mcap"].notna() & (df["mcap"] > 0)]
@@ -597,8 +617,10 @@ def f_pool(csv, tdays, min_list_days=0):
             df = df.join(u)
             df = df[~((df["close"] >= df["upper_limit"] - 1e-4) & (df["upper_limit"] > 0))]
             df = df[~((df["close"] <= df["lower_limit"] + 1e-4) & (df["lower_limit"] > 0))]
-        df = df.join(stt.rename("susp"))
-        df = df[df["susp"].fillna(0) == 0]
+        if stt is not None:
+            df = df.join(stt[["suspended", "is_risk_warning"]])
+            df = df[df["suspended"].fillna(0) == 0]
+            df = df[df["is_risk_warning"].fillna(0) != 1]
         df = df.drop(index=[i for i in stuck if i in df.index], errors="ignore")
         if min_list_days > 0:
             la = np.array([days_since(i, T, list_d) for i in df.index])
