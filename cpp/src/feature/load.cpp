@@ -74,7 +74,7 @@ void mix_string(std::uint64_t &h, std::string_view s) {
 }
 
 // axes 语义 hash — 直接对 D 轴 / A 轴内容 hash (零文件依赖):
-//   _meta / trading_days parquet 每轮 update 重写 (mtime 变) 但轴内容通常不变,
+//   _meta / all_trading_days parquet 每轮 update 重写 (mtime 变) 但轴内容通常不变,
 //   语义 hash 保证 cache 不被无谓打穿; 轴真变 (新交易日 / 新股) 时全部失效 (正确).
 std::uint64_t compute_axes_key(const Axes &axes) {
   std::uint64_t h = FNV_OFFSET;

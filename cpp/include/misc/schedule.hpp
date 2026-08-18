@@ -11,7 +11,7 @@
 // 数据集唯一落地形态 = data/YYYY-MM/<name>.parquet (0 行月也落 0 行文件).
 //
 // avail_hour (每表一个变量, 唯一的业务输入): day X 的数据在 X 日 avail_hour
-// 点后视为完整入库. 0 = 排程提前入库随时可拉 (trading_days); 9/10 = 真盘前;
+// 点后视为完整入库. 0 = 排程提前入库随时可拉 (all_trading_days); 9/10 = 真盘前;
 // 20 = 盘后批 (17~20 统一记 20); 24 = 全天涓流, 次日才完整 (tushare 公告).
 // horizon = 当前时刻已完整的最晚数据日 (now_hour >= avail_hour ? today : 昨天).
 //

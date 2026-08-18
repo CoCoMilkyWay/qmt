@@ -12,8 +12,9 @@
 
 // ============================================================================
 // axis.cpp 是「Phase 0 axes 单点」: 从 parquet 读出 D 轴 / A 轴 + 静态 meta.
-//   D 轴源: data/YYYY-MM/trading_days.parquet 全月扫描 (小表, 每月 KB 级),
-//           过滤 market_code == "CN" 的 date 升序去重.
+//   D 轴源: data/YYYY-MM/all_trading_days.parquet 全月扫描 (小表, 每月 KB 级),
+//           过滤 market_code == "CN" 的 date 升序去重, 截到 today
+//           (全年提前排程含未来日; last_d ≜ 实盘当日).
 //   A 轴源: data/_meta/cn_stock_basic_info.parquet (BigQuant Static, 全市场含退市)
 //           取 instrument 升序去重.
 //   meta:   同上 basic_info, 取 name / list_date / delist_date / list_sector / exchange.
@@ -45,11 +46,13 @@ std::string ymd_str(std::int32_t v) {
 Axes load_axes() {
   Axes a;
 
-  // ---- D 轴: 扫全部 trading_days 月 parquet, filter market_code='CN' ----
-  auto td_files = misc::pq::list_month_files("trading_days");
+  // ---- D 轴: 扫全部 all_trading_days 月 parquet, filter market_code='CN',
+  //      截到 today (排程提前 ⇒ 离线 archive 可能含未来日; last_d ≜ 实盘当日) ----
+  auto td_files = misc::pq::list_month_files("all_trading_days");
   assert(!td_files.empty() &&
-         "data/YYYY-MM/trading_days.parquet missing — 先跑 bigquant::update");
+         "data/YYYY-MM/all_trading_days.parquet missing — 先跑 bigquant::update");
 
+  const std::string today = misc::today_yyyymmdd();
   std::set<std::string> dates_set;
   for (auto &[ym, path] : td_files) {
     misc::pq::TableView v(misc::pq::read_table(path));
@@ -59,11 +62,12 @@ Axes load_axes() {
     for (std::int64_t i = 0, n = v.rows(); i < n; ++i) {
       if (mc.str(i) != "CN") continue;
       std::string d = ymd_str(date.yyyymmdd(i));
-      if (d.empty()) continue;
+      if (d.empty() || d > today) continue;
       dates_set.insert(std::move(d));
     }
   }
-  assert(!dates_set.empty());
+  assert(!dates_set.empty() &&
+         "all_trading_days 无 market_code='CN' 行 — 检查表内 market_code 取值");
 
   a.dates.assign(dates_set.begin(), dates_set.end());
   a.date_days.reserve(a.dates.size());

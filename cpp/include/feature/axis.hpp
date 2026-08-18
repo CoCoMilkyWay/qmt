@@ -11,7 +11,8 @@ namespace feature {
 
 // ============================================================================
 // D 轴 + A 轴 + 反向索引. 由 load_axes() 一次性构造, 此后只读.
-//   dates: data/YYYY-MM/trading_days.parquet 中 market_code='CN' 的 date 升序去重
+//   dates: data/YYYY-MM/all_trading_days.parquet 中 market_code='CN' 的 date
+//          升序去重, 截到 today (全年提前排程含未来日; last_d ≜ 实盘当日)
 //   codes: data/_meta/cn_stock_basic_info.parquet 中 instrument 升序去重 — 已过滤
 //          delist_date < PIPELINE_START_DATE 的标的 (axis 内永远 NaN, 纯冗员).
 //          含 window 内已退市标的 (它们在 delist 之前的 row 是 finite, delist 之后

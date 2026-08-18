@@ -70,7 +70,7 @@ qmt/
 │                                    #
 │                                    # 27 张表 (同构月度分片):
 │                                    #   BigQuant 24 (DAI Arrow Flight → arrow::Table 直落):
-│                                    #     trading_days (axis 源 D 轴, market_code='CN'), holidays,
+│                                    #     all_trading_days (axis 源 D 轴, market_code='CN', 全年提前排程), holidays,
 │                                    #     cn_stock_instruments,
 │                                    #     cn_stock_industry_component (★ 月初一份), cn_stock_industry_change,
 │                                    #     cn_stock_industry_real_bar1d, cn_stock_industry_valuation,
@@ -119,7 +119,7 @@ qmt/
 
 # 因子张量 T[D, A, F]
 
-- `D` = 交易日 (BigQuant `trading_days` WHERE `market_code='CN'`)
+- `D` = 交易日 (BigQuant `all_trading_days` WHERE `market_code='CN'`, 截到 today; 全年提前排程 ⇒ 盘中当日行已可拉. 多市场 `trading_days` 已弃用: CN 行当日盘后 ~19:00 才入库, 盘中 D 轴缺当日, 且他市场早到行会把开放月水位推过 CN 缺行日)
 - `A` = instrument (BigQuant `cn_stock_basic_info.instrument` 全量, 含已退市)
 - `F` = 下表 feature
 - dtype: 统一 **float** (32 比特 float; bool 用 0.0/1.0)
@@ -144,7 +144,7 @@ BigQuant FetchKind (`<vd>` = `TableSpec::visible_date` — Static 为空, Partit
 | Static    | Day        | `SELECT * FROM <name>`                                                   | `{}`             | `cn_stock_basic_info` (无 date 维)                                                                                                           |
 | Partition | Day        | `SELECT * FROM <name>`                                                   | `{"date":[s,e]}` | 日频网格 (行情 / 状态 / 财务 PIT / ...)                                                                                                      |
 | Partition | MonthFirst | `WHERE <vd> = (SELECT MIN(<vd>) FROM <name> WHERE <vd> BETWEEN s AND e)` | `{"date":[s,e]}` | `cn_stock_industry_component` 月初一份全行业成分, 月内变动靠 `cn_stock_industry_change` (Day) 增量 cover                                     |
-| Where     | Day        | `SELECT * FROM <name> WHERE <vd> >= s AND <vd> <= e`                     | `{}`             | 事件型 (`publish_date` / `end_date` 等非分区列)                                                                                              |
+| Where     | Day        | `SELECT * FROM <name> WHERE <vd> >= s AND <vd> <= e`                     | `{}`             | 事件型 (`publish_date` / `end_date` 等非分区列); `all_trading_days` (是否 date 分区未验证, WHERE 最稳且配额无差价)                           |
 | Snapshot  | Day        | `WHERE <vd> = (SELECT MAX(<vd>) FROM <name> WHERE <vd> BETWEEN s AND e)` | `{"date":[s,e]}` | `cn_stock_static_data` 真盘前 09:00 全市场快照, 取窗口内 MAX(date) 一日, 落 `data/_meta/<name>.parquet` 单文件; PIT overlay 给 row=last_d 用 |
 
 **落地** (`data/YYYY-MM/<name>.parquet` 月度分片, 全 parquet)
@@ -152,7 +152,7 @@ BigQuant FetchKind (`<vd>` = `TableSpec::visible_date` — Static 为空, Partit
 - 单文件 `_meta`: `data/_meta/{cn_stock_static_data, cn_stock_basic_info}.parquet`
   - `cn_stock_static_data` (**主 meta**, Snapshot, 真盘前 09:00): DAI 取窗口内 `MAX(date)` 一日的全市场快照, 一次响应整刷. 用于 hybrid PIT overlay 给实盘当日 (= `axes.last_d`) 的 `status` 字段填充真盘前值 (见 §cutoff). 刷新判定 `meta_fresh`: 文件内快照日 ≥ horizon(avail_hour=9) → skip ⇒ 每天 09:00 后首个触发整刷一次.
   - `cn_stock_basic_info` (补充 meta, Static, 无 date 列): DAI 一次响应整刷; 仅用于 `static_data` 没有的字段 (`list_date` / `delist_date` / `list_sector` / `industry` / ...). 实际盘后更新, 按 -1 滞后理解, 业务上字段几乎不变. 无水位可言 ⇒ 写盘日 == today → skip (日级整刷).
-  - `trading_days` / `holidays` (axis 源): 普通月度表, `axis.cpp` 直接扫全部月 parquet 读出 D 轴 (小表, 每月 KB 级).
+  - `all_trading_days` / `holidays` (axis 源): 普通月度表, `axis.cpp` 直接扫全部月 parquet 读出 D 轴 (小表, 每月 KB 级).
 - **完整性设计** (BigQuant / Tushare 共用 `misc::plan_months` 单点调度; 判定全部落在"单文件存在性 + mtime + 文件内 max(vd) 水位", 无额外状态文件. 背景: DAI 配额按**返回 cell 数**计费, 与查询次数/扫描窗口无关 ⇒ 省流量 = 让重复查询返回 0 新行):
   - **关月冻结** (月末 < today − `lookback_days`): 文件存在且写盘日 ≥ 月末 + lookback → 跳过; 否则整月重拉覆盖一次后永久冻结. 这是**唯一的完整性兜底** — 月内增量漏掉的服务端回填/修订在此全部吃回.
   - **开放月水位增量** (月末仍在 lookback 窗口内, 含当月): 每表一个 `avail_hour` (spec 内声明: day X 数据于 X 日该小时后完整; 盘后批统一 20 / 真盘前 9~10 / 排程提前 0 / 全天涓流 24) ⇒ horizon = 当前已完整的最晚数据日. 水位 W = 月文件内 max(visible_date); 只拉 `vd ∈ [W+1, min(月末, horizon)]` **append** 到月文件, 已到水位连查询都不发. 稳态下每表每天只为新增一天数据付费一次; 月内完整性降一级 (漏回填), 关月兜回.
@@ -182,7 +182,7 @@ hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际�
 - **月初快照** (D, A): `cn_stock_industry_component` 月初落一份, build 时取 `max{ visible_date ≤ T }` 的快照广播到 (D, A); 月内细变动叠加 `cn_stock_industry_change` 事件流 → `industry_l1` inter feature.
 - **overlay** (row=last_d 单行填充): `cn_stock_static_data` (`_meta` 单文件) → `status.{suspended, st_status}` 2 字段. 仅写 row=last_d, 历史日子完全不动. 详见 §cutoff 表里的 hybrid 模式. 快照新鲜度不变量 (快照日 == D 轴 last_d 的日期, 即"用 last_d 当日真盘前快照填 last_d 行") 仅在 `config::PIPELINE_UPDATE = true` 时断言 — 盘前/凌晨跑时当日快照未生成、last_d 也还是上一交易日, 自洽通过; 离线跑用旧快照, 见 §抓取开关.
 - **asset 静态**: `cn_stock_basic_info` 全量 snapshot 广播到 (D, A); `list_date / delist_date` 决定 (D, A) 行有效, 不走 `visible_date`.
-- **axis**: `trading_days` WHERE `market_code='CN'` 生成 D 轴; `cn_stock_basic_info.instrument` 全量生成 A 轴.
+- **axis**: `all_trading_days` WHERE `market_code='CN'` (截到 today) 生成 D 轴; `cn_stock_basic_info.instrument` 全量生成 A 轴.
 
 **一致性** (build 完成 → 张量 PIT-clean, 下游无未来数据风险)
 - **跨次修正** (replay 安全): 服务端 PIT 表以新 `visible_date` 行发布修订, 历史行不改写 → 修订落进所属月的 parquet, replay 任意 T 按上述 cutoff 自动选当时可见版本. 关月冻结后不再变动; 开放月水位增量天然吃到新 `visible_date` 行的修订, 对旧日期的回填月内看不见, 关月整月重拉时吃回.
@@ -196,7 +196,7 @@ hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际�
 
 | 类       | name                                      | 通道                | 入库时间 (api.md)    | visible_date   | 模式       | 偏移 |
 | -------- | ----------------------------------------- | ------------------- | -------------------- | -------------- | ---------- | ---- |
-| axis     | `trading_days` / `holidays`               | BigQuant            | 定期 (新年度排程)    | `date`         | axis       | —    |
+| axis     | `all_trading_days` / `holidays`           | BigQuant            | 定期 (新年度排程)    | `date`         | axis       | —    |
 | overlay  | `cn_stock_static_data`                    | BigQuant Snapshot   | **真盘前** 09:00     | `date` (MAX)   | 真盘前     | 0    |
 | asset    | `cn_stock_basic_info`                     | BigQuant Static     | 每轮 update 覆盖刷新 | —              | static     | -1   |
 | 网格     | `cn_stock_instruments`                    | BigQuant            | 盘后 20:00           | `date`         | normal     | −1   |
@@ -323,7 +323,7 @@ hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际�
 Phase 0 axes  (主线程; axis.cpp + tensor.cpp)
   # 形态: 标量级, 串行. 后续所有 phase 共用的索引基线 — 只跑一次, 无并行收益可言.
   axes ← load_axes()
-    D ← scan data/YYYY-MM/trading_days.parquet 全月, 取 market_code='CN' 的 date 升序去重
+    D ← scan data/YYYY-MM/all_trading_days.parquet 全月, 取 market_code='CN' 的 date 升序去重, 截到 today
     A ← read data/_meta/cn_stock_basic_info.parquet, 取全量 instrument (含已退市) 升序
     + 反向索引 date_idx / code_idx, sys_days 缓存 date_days
     floor_date(d) = max{i : dates[i] ≤ d}    # 周末/节假日 visible_date 自动落到上一交易日

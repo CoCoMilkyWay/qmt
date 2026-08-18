@@ -11,9 +11,14 @@ namespace bigquant {
 // 落盘 = 服务端响应原样 (行结构 / 去重语义信任服务端 PIT, 与 archive 同源同构).
 // ============================================================================
 const std::vector<TableSpec> SPECS = {
-    // axis 源 (trading_days/holidays): 普通月度表, axis.cpp 直接扫月 parquet 读 D 轴.
-    //   排程提前入库 (新年度排程) → avail_hour=0, 当日行随时可拉 (D 轴 last_d 依赖).
-    {"trading_days", "date", FetchKind::Partition, FetchFreq::Day, 0},
+    // axis 源 (all_trading_days/holidays): 普通月度表, axis.cpp 直接扫月 parquet 读 D 轴.
+    //   all_trading_days = 中国A股全年日历 (根据节假日预计算, 排程提前入库) →
+    //   avail_hour=0, 当日行随时可拉 (D 轴 last_d 依赖). Where kind: 是否 date 分区
+    //   未验证, 纯 SQL WHERE 任何表成立 (配额按返回 cell 计, 无差价).
+    //   ⚠ 多市场 trading_days 已弃用: 其 CN 行当日盘后 ~19:00 才入库 (api.md
+    //   "至截止最新日期"), 盘中 D 轴缺当日 ⇒ overlay 新鲜度断言必炸; 且 UK/IT 等
+    //   早到行把开放月水位推过 CN 缺行日 ⇒ 当月 CN 行永久缺失, 只能关月兜回.
+    {"all_trading_days", "date", FetchKind::Where, FetchFreq::Day, 0},
     {"holidays", "date", FetchKind::Partition, FetchFreq::Day, 0},
     {"cn_stock_instruments", "date", FetchKind::Partition, FetchFreq::Day, 20},
     // industry_component: 月初快照 (低频), 月内变动靠 industry_change 增量 cover.

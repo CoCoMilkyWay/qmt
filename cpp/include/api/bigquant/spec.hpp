@@ -43,7 +43,7 @@ struct TableSpec {
   FetchKind kind;
   FetchFreq freq;
   int avail_hour; // day X 数据于 X 日该小时后完整 (misc::plan_months 水位增量用):
-                  //   0 = 排程提前入库, 随时可拉 (trading_days / holidays)
+                  //   0 = 排程提前入库, 随时可拉 (all_trading_days / holidays)
                   //   9/10 = 真盘前 (static_data / margin)
                   //   20 = 盘后批 (api.md 17:00~20:00 统一记 20)
 };
