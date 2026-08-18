@@ -168,7 +168,7 @@ TRADING_DAYS = 252    # 年化因子 (Sharpe / 年化收益)
 SKIP_MONTHS = frozenset({1,4,12})
 
 # 分档母集: "pool" = 排名母集 (与 factor pct_rank 口径一致) | "tradable" = 策略选股母集
-POOL_FEATURE = "pool"
+POOL_FEATURE = "tradable"
 
 # 搜索权重的 factor 特征 (张量 F 枚举 CS factor 段, 名单见 meta.json factor_names;
 # 顺序即权重维度顺序). 挖到的权重可直接填回 config::STRATEGY_FACTOR_WEIGHTS.

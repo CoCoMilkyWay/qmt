@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -194,7 +195,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
 
   // 每日输出
   std::vector<std::int32_t> dates_out(n_d_bt);
-  std::vector<float> strat_nav(n_d_bt), pool_nav(n_d_bt);
+  std::vector<float> strat_nav(n_d_bt), pool_nav(n_d_bt), tradable_nav(n_d_bt);
   std::vector<std::int32_t> pos_count(n_d_bt);
   std::vector<float> pos_pct(n_d_bt), turnover(n_d_bt);
   std::vector<float> susp_pct(n_d_bt), exec_pct(n_d_bt);
@@ -213,10 +214,13 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   std::vector<std::int32_t> watch_off(static_cast<std::size_t>(n_d_bt) + 1, 0);
   std::vector<std::int32_t> watch_codes;
   std::vector<float> watch_scores;
+  std::vector<float> watch_rank_chg; // 5d rank MA − 当日 rank; + = 排名上升
   std::vector<std::string> watch_names;
   watch_codes.reserve(static_cast<std::size_t>(n_d_bt) * static_cast<std::size_t>(watch_n));
   watch_scores.reserve(static_cast<std::size_t>(n_d_bt) * static_cast<std::size_t>(watch_n));
+  watch_rank_chg.reserve(static_cast<std::size_t>(n_d_bt) * static_cast<std::size_t>(watch_n));
   watch_names.reserve(static_cast<std::size_t>(n_d_bt) * static_cast<std::size_t>(watch_n));
+  std::deque<std::vector<int>> rank_win; // 近 5 日 1-based 因子排名, 0=未入选
 
   // 成交 (open-close 配对)
   struct OpenRec {
@@ -229,6 +233,11 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   std::vector<float> tr_open_px, tr_close_px;
   std::vector<std::string> tr_open_names, tr_close_names; // 开/平仓当日历史简称
 
+  // 正式调仓成交 (因子 pop/补槽 / 退市强平; 不含再平衡加仓)
+  std::vector<std::int32_t> fill_d, fill_a, fill_side; // side: +1 买, -1 卖
+  std::vector<float> fill_px;
+  std::vector<std::string> fill_names;
+
   // 关 trade 公用辅助 (强平 / 正常卖出 共用)
   auto close_trade = [&](int a, int d, const OpenRec &rec, float close_px) {
     tr_inst.push_back(static_cast<std::int32_t>(a));
@@ -240,8 +249,17 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     tr_close_names.emplace_back(name_of(name_timeline, meta, a, d));
   };
 
-  // pool benchmark NAV
+  auto push_fill = [&](int a, int d, int side, float px) {
+    fill_d.push_back(static_cast<std::int32_t>(d));
+    fill_a.push_back(static_cast<std::int32_t>(a));
+    fill_side.push_back(static_cast<std::int32_t>(side));
+    fill_px.push_back(px);
+    fill_names.emplace_back(name_of(name_timeline, meta, a, d));
+  };
+
+  // pool / tradable benchmark NAV
   double pool_nav_d = ::config::BACKTEST_CAPITAL_BASE;
+  double tradable_nav_d = ::config::BACKTEST_CAPITAL_BASE;
 
   int hold_n = ::config::BACKTEST_HOLD_N;
 
@@ -249,7 +267,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   for (int i = 0; i < n_d_bt; ++i) {
     int d = bt_d_lo + i;
     dates_out[i] = d;
-    double turn_amt = 0.0; // 当日买卖额 (元); 满额 1 成分股 = pv/HOLD_N
+    double turn_amt = 0.0; // 当日买卖额 (元); 满额换 1 成分股 卖+买 = 2*pv/HOLD_N
 
     // (1) 更新 last_close 缓存 (T 的 close_raw 已 ffill, finite 保留)
     for (int a = 0; a < n_a; ++a) {
@@ -295,6 +313,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
       turn_amt += it->second * static_cast<double>(c);
       cash += proceeds;
       close_trade(a, d, rec_it->second, c);
+      push_fill(a, d, -1, c);
       open_recs.erase(rec_it);
 
       it = holdings.erase(it);
@@ -400,6 +419,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
       auto it = open_recs.find(a);
       assert(it != open_recs.end() && "sell without open record");
       close_trade(a, d, it->second, c);
+      push_fill(a, d, -1, c);
       open_recs.erase(it);
     }
 
@@ -438,6 +458,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
         turn_amt += cost_money;
         holdings[a] = sh; // intended_buy ∉ holdings (见 (4))
         open_recs[a] = OpenRec{d, c};
+        push_fill(a, d, +1, c);
         ++n_buy_ok;
       }
 
@@ -492,44 +513,39 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     double pv_end = cash + mv_end;
     strat_nav[i] = static_cast<float>(pv_end);
 
-    // pool benchmark: "等权持有 pool 的影子策略" — 假装真有钱在跑.
-    //   时点: D-1 日 close 按 pool[a, d-1] 等权再平衡 → 持有到 D 日 close
-    //         获得 daily_return[a, d] = close[d]/close[d-1] - 1.
-    //         pool 动态调入调出 → 每日按新 pool 等权重平衡 (等权下数学等价于均值,
-    //         无需显式建仓/卖出簿记).
-    //   universe: pool 已排 susp + 已退市 (pool_b); 此处额外排 risk_warn (ST/*ST).
-    //         不排 profit_st / revenue_st / dividend_st / trading_st / new_list —
-    //         这些是策略自定义风控信号, 不应假设 benchmark 也具备.
-    //   PIT: 用 pool[d-1] 和 risk_warn[d-1] — D-1 收盘才能据此决策.
-    //   NaN 处理: daily_return[d] NaN (退市/缺价) ⇒ 该持仓静默退出当日均值池.
-    //   i=0: NAV = capital_base (尚未建仓); i>=1: 累乘.
+    // pool / tradable 等权影子指数.
+    //   时点: D-1 close 按 mask[a, d-1] 等权 → 持有到 D close, 得 daily_return[a, d].
+    //   pool     = 小市值宇宙 (含 ST/次新等策略买不了的)
+    //   tradable = 策略可买 (pool ∧ ¬STRATEGY_ENABLED_FILTERS), 与分层同口径.
+    //   PIT: mask[d-1]; daily_return[d] NaN ⇒ 该持仓退出当日均值.
+    //   i=0: NAV = capital_base; i>=1: 累乘.
     if (i > 0) {
-      double dr_sum = 0.0;
-      int dr_n = 0;
-      int d_prev = d - 1;
-      for (int a = 0; a < n_a; ++a) {
-        if (!read_bool(T, F::pool, a, d_prev))
-          continue;
-        float rw = T.at(F::risk_warn, a, d_prev);
-        assert(is_finite(rw) && "risk_warn NaN — should be 0/1/2");
-        if (rw > 0.5f)
-          continue; // ST (1) / *ST (2) 排除
-        float r = T.at(F::daily_return, a, d);
-        if (!is_finite(r))
-          continue;
-        dr_sum += static_cast<double>(r);
-        ++dr_n;
-      }
-      double dr = dr_n > 0 ? dr_sum / static_cast<double>(dr_n) : 0.0;
-      pool_nav_d *= (1.0 + dr);
+      auto ew = [&](F mask) {
+        double dr_sum = 0.0;
+        int dr_n = 0;
+        int d_prev = d - 1;
+        for (int a = 0; a < n_a; ++a) {
+          if (!read_bool(T, mask, a, d_prev))
+            continue;
+          float r = T.at(F::daily_return, a, d);
+          if (!is_finite(r))
+            continue;
+          dr_sum += static_cast<double>(r);
+          ++dr_n;
+        }
+        return dr_n > 0 ? dr_sum / static_cast<double>(dr_n) : 0.0;
+      };
+      pool_nav_d *= (1.0 + ew(F::pool));
+      tradable_nav_d *= (1.0 + ew(F::tradable));
     }
     pool_nav[i] = static_cast<float>(pool_nav_d);
+    tradable_nav[i] = static_cast<float>(tradable_nav_d);
 
     // 持仓数 / 仓位 / 换手 / 停牌占比 / 可执行率
     pos_count[i] = static_cast<std::int32_t>(holdings.size());
     pos_pct[i] = static_cast<float>(mv_end / pv_end);
-    // 成交额 / 当日决策时点组合市值; 满额换 1 个成分股 = 1/HOLD_N
-    turnover[i] = static_cast<float>(turn_amt / pv);
+    // 双边换手: 买卖额 / 2 / 当日决策时点组合市值; 满额换 1 个成分股 = 1/HOLD_N
+    turnover[i] = static_cast<float>(turn_amt / (2.0 * pv));
     int n_susp_h = 0;
     for (auto &kv : holdings) {
       if (read_bool(T, F::susp, kv.first, d))
@@ -562,10 +578,31 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     hold_off[i + 1] = static_cast<std::int32_t>(hold_codes.size());
 
     int n_watch = std::min(watch_n, static_cast<int>(cands.size()));
+    std::vector<int> rank_today(static_cast<std::size_t>(n_a), 0);
+    for (int k = 0; k < static_cast<int>(cands.size()); ++k)
+      rank_today[static_cast<std::size_t>(cands[static_cast<std::size_t>(k)].second)] =
+          k + 1;
+    rank_win.push_back(rank_today);
+    if (rank_win.size() > 5)
+      rank_win.pop_front();
     for (int k = 0; k < n_watch; ++k) {
       int a = cands[static_cast<std::size_t>(k)].second;
       watch_codes.push_back(static_cast<std::int32_t>(a));
       watch_scores.push_back(cands[static_cast<std::size_t>(k)].first);
+      int r = rank_today[static_cast<std::size_t>(a)];
+      double sum = 0.0;
+      int cnt = 0;
+      for (const auto &rd : rank_win) {
+        int rv = rd[static_cast<std::size_t>(a)];
+        if (rv > 0) {
+          sum += rv;
+          ++cnt;
+        }
+      }
+      float chg = (cnt > 0 && r > 0)
+                      ? static_cast<float>(sum / static_cast<double>(cnt) - r)
+                      : 0.0f;
+      watch_rank_chg.push_back(chg);
       watch_names.emplace_back(name_of(name_timeline, meta, a, d));
     }
     watch_off[i + 1] = static_cast<std::int32_t>(watch_codes.size());
@@ -578,6 +615,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   wi(out / "dates.npy", dates_out);
   wf(out / "strategy_nav.npy", strat_nav);
   wf(out / "pool_nav.npy", pool_nav);
+  wf(out / "tradable_nav.npy", tradable_nav);
   wi(out / "position_count.npy", pos_count);
   wf(out / "position_pct.npy", pos_pct);
   wf(out / "turnover.npy", turnover);
@@ -591,12 +629,18 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   wi(out / "watch_offsets.npy", watch_off);
   wi(out / "watch_codes.npy", watch_codes);
   wf(out / "watch_scores.npy", watch_scores);
+  wf(out / "watch_rank_chg.npy", watch_rank_chg);
 
   wi(out / "trades_inst.npy", tr_inst);
   wi(out / "trades_open_d.npy", tr_open_d);
   wi(out / "trades_close_d.npy", tr_close_d);
   wf(out / "trades_open_px.npy", tr_open_px);
   wf(out / "trades_close_px.npy", tr_close_px);
+
+  wi(out / "fills_d.npy", fill_d);
+  wi(out / "fills_a.npy", fill_a);
+  wi(out / "fills_side.npy", fill_side);
+  wf(out / "fills_px.npy", fill_px);
 
   // labels.json: 标的名字符串数组, 与对应 npy 同长 (按 trades / hold_codes / watch_codes 顺序).
   //   yyjson 落盘, 与 BigQuant / Tushare store 共享 PRETTY_TWO_SPACES 风格.
@@ -617,6 +661,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     add_str_arr("trades_close_names", tr_close_names);
     add_str_arr("holdings_names", hold_names);
     add_str_arr("watch_names", watch_names);
+    add_str_arr("fills_names", fill_names);
 
     misc::atomic_write_json(out / "labels.json", doc);
     yyjson_mut_doc_free(doc);

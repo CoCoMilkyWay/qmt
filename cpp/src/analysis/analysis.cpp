@@ -41,7 +41,8 @@ inline bool mask_bool(float v) {
 
 inline int find_d(const feature::Axes &axes, std::string_view yyyymmdd,
                   bool floor) {
-  if (floor) return axes.floor_date(yyyymmdd);
+  if (floor)
+    return axes.floor_date(yyyymmdd);
   auto it = std::lower_bound(axes.dates.begin(), axes.dates.end(), yyyymmdd);
   return (it == axes.dates.end())
              ? -1
@@ -54,9 +55,11 @@ float pearson_masked(const float *x, const float *y, int n,
   double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
   int cnt = 0;
   for (int i = 0; i < n; ++i) {
-    if (!mask_bool(pool_mask[i])) continue;
+    if (!mask_bool(pool_mask[i]))
+      continue;
     float xi = x[i], yi = y[i];
-    if (!is_finite(xi) || !is_finite(yi)) continue;
+    if (!is_finite(xi) || !is_finite(yi))
+      continue;
     double xd = xi, yd = yi;
     sx += xd;
     sy += yd;
@@ -65,42 +68,49 @@ float pearson_masked(const float *x, const float *y, int n,
     sxy += xd * yd;
     ++cnt;
   }
-  if (cnt < 5) return std::nanf("");
+  if (cnt < 5)
+    return std::nanf("");
   double mx = sx / cnt, my = sy / cnt;
   double cov = sxy / cnt - mx * my;
   double vx = sxx / cnt - mx * mx;
   double vy = syy / cnt - my * my;
-  if (vx <= 0.0 || vy <= 0.0) return std::nanf("");
+  if (vx <= 0.0 || vy <= 0.0)
+    return std::nanf("");
   return static_cast<float>(cov / std::sqrt(vx * vy));
 }
 
-// 当日 top-K (within pool, finite score) 集合 (升序 a 索引数组).
+// 当日 top-K (within tradable, finite score) 集合 (升序 a 索引数组).
 //   K = BACKTEST_HOLD_N; 不足 K 时返回所有可用. score 用于排序.
-void compute_top_k(const float *score, const float *pool_mask, int n,
+void compute_top_k(const float *score, const float *univ_mask, int n,
                    int K, std::vector<int> &out) {
   out.clear();
   std::vector<std::pair<float, int>> tmp;
   tmp.reserve(static_cast<std::size_t>(K) * 2);
   for (int a = 0; a < n; ++a) {
-    if (!mask_bool(pool_mask[a])) continue;
+    if (!mask_bool(univ_mask[a]))
+      continue;
     float s = score[a];
-    if (!is_finite(s)) continue;
+    if (!is_finite(s))
+      continue;
     tmp.emplace_back(s, a);
   }
-  if (tmp.empty()) return;
+  if (tmp.empty())
+    return;
   int k = std::min(K, static_cast<int>(tmp.size()));
   std::nth_element(tmp.begin(), tmp.begin() + k, tmp.end(),
                    [](const auto &x, const auto &y) {
                      return x.first > y.first;
                    });
   out.reserve(static_cast<std::size_t>(k));
-  for (int i = 0; i < k; ++i) out.push_back(tmp[i].second);
+  for (int i = 0; i < k; ++i)
+    out.push_back(tmp[i].second);
   std::sort(out.begin(), out.end());
 }
 
 // Jaccard turnover: 1 - |A ∩ B| / max(|A|, |B|).
 float jaccard_turnover(const std::vector<int> &a, const std::vector<int> &b) {
-  if (a.empty() || b.empty()) return std::nanf("");
+  if (a.empty() || b.empty())
+    return std::nanf("");
   int inter = 0;
   std::size_t i = 0, j = 0;
   while (i < a.size() && j < b.size()) {
@@ -147,7 +157,8 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
 
   // ---- 输出缓冲 ------------------------------------------------------------
   std::vector<std::int32_t> dates_out(n_d_bt);
-  for (int i = 0; i < n_d_bt; ++i) dates_out[i] = bt_d_lo + i;
+  for (int i = 0; i < n_d_bt; ++i)
+    dates_out[i] = bt_d_lo + i;
 
   // factor_ic[f * n_d_bt + i], factor_turnover 同
   std::vector<float> factor_ic(static_cast<std::size_t>(n_factor) *
@@ -173,7 +184,8 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
 
   // ---- per-D 工作单元 ------------------------------------------------------
   unsigned n_threads = misc::Affinity::core_count();
-  if (n_threads == 0) n_threads = 1;
+  if (n_threads == 0)
+    n_threads = 1;
   corr_per_thread.assign(n_threads,
                          std::vector<PairAcc>(static_cast<std::size_t>(
                              n_factor * n_factor)));
@@ -181,6 +193,7 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
 
   auto worker = [&](unsigned tid) {
     std::vector<float> buf_pool(static_cast<std::size_t>(n_a));
+    std::vector<float> buf_tradable(static_cast<std::size_t>(n_a));
     std::vector<float> buf_dr_next(static_cast<std::size_t>(n_a));
     std::vector<float> buf_score(static_cast<std::size_t>(n_a));
     std::vector<float> buf_dr_today(static_cast<std::size_t>(n_a));
@@ -197,11 +210,12 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
 
     for (;;) {
       int i = next.fetch_add(1, std::memory_order_relaxed);
-      if (i >= n_d_bt) break;
+      if (i >= n_d_bt)
+        break;
       int d = bt_d_lo + i;
       int d_next = d + 1;
 
-      T.gather_cs_row(F::pool, d, std::span<float>(buf_pool));
+      T.gather_cs_row(F::tradable, d, std::span<float>(buf_tradable));
       T.gather_cs_row(F::factor_score, d,
                       std::span<float>(buf_score));
       T.gather_cs_row(F::daily_return, d,
@@ -214,23 +228,29 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
       }
       for (int f = 0; f < n_factor; ++f) {
         T.gather_cs_row(factors[static_cast<std::size_t>(f)], d,
-                        std::span<float>(buf_factors[
-                            static_cast<std::size_t>(f)]));
+                        std::span<float>(buf_factors[static_cast<std::size_t>(f)]));
       }
 
-      // pool_ret: 等权 pool[d] 内 daily_return[d] (与 backtest pool_nav 同口径)
-      double dr_sum = 0.0;
-      int dr_n = 0;
-      for (int a = 0; a < n_a; ++a) {
-        if (!mask_bool(buf_pool[a])) continue;
-        float r = buf_dr_today[a];
-        if (!is_finite(r)) continue; // daily_return 预期可 NaN
-        dr_sum += r;
-        ++dr_n;
+      // pool_ret ≡ backtest pool_nav 日收益: tradable[d-1] 等权 × daily_return[d]
+      if (i == 0) {
+        pool_ret[i] = 0.0f;
+      } else {
+        T.gather_cs_row(F::tradable, d - 1, std::span<float>(buf_pool));
+        double dr_sum = 0.0;
+        int dr_n = 0;
+        for (int a = 0; a < n_a; ++a) {
+          if (!mask_bool(buf_pool[a]))
+            continue;
+          float r = buf_dr_today[a];
+          if (!is_finite(r))
+            continue; // daily_return 预期可 NaN
+          dr_sum += r;
+          ++dr_n;
+        }
+        pool_ret[i] = (dr_n > 0)
+                          ? static_cast<float>(dr_sum / dr_n)
+                          : 0.0f;
       }
-      pool_ret[i] = (dr_n > 0)
-                        ? static_cast<float>(dr_sum / dr_n)
-                        : std::nanf("");
 
       // per-factor IC vs t+1 收益 (forward predictive)
       for (int f = 0; f < n_factor; ++f) {
@@ -238,28 +258,28 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
                       static_cast<std::size_t>(n_d_bt) +
                   static_cast<std::size_t>(i)] =
             pearson_masked(buf_factors[static_cast<std::size_t>(f)].data(),
-                           buf_dr_next.data(), n_a, buf_pool.data());
+                           buf_dr_next.data(), n_a, buf_tradable.data());
       }
       // 聚合 factor_score IC
       score_ic[i] =
           pearson_masked(buf_score.data(), buf_dr_next.data(), n_a,
-                         buf_pool.data());
+                         buf_tradable.data());
 
       // per-factor top-K turnover (vs i-1)
       for (int f = 0; f < n_factor; ++f) {
         compute_top_k(buf_factors[static_cast<std::size_t>(f)].data(),
-                      buf_pool.data(), n_a, K,
+                      buf_tradable.data(), n_a, K,
                       top_today_per_factor[static_cast<std::size_t>(f)]);
       }
       // score top-K
-      compute_top_k(buf_score.data(), buf_pool.data(), n_a, K, top_today);
+      compute_top_k(buf_score.data(), buf_tradable.data(), n_a, K, top_today);
 
       // turnover 需要前一日 top-K — worker 间无序: 这里只能是 same-thread 累计.
       //   解决: 让 worker 一次顺序处理多个 i (chunk)? 简化方案:
       //     turnover 在末段单线程补算, worker 仅写当日 top-K 列表到全局.
       //   为避免锁, 用 i_to_top buffer (容量随分配可能很大), 这里改用单线程后处理.
 
-      // 因子相关性: 累加 (factor_i, factor_j) 在 pool 内的 (sum, sumsq, sumxy, n)
+      // 因子相关性: 累加 (factor_i, factor_j) 在 tradable 内的 (sum, sumsq, sumxy, n)
       for (int fi = 0; fi < n_factor; ++fi) {
         const float *xi = buf_factors[static_cast<std::size_t>(fi)].data();
         for (int fj = fi; fj < n_factor; ++fj) {
@@ -269,9 +289,11 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
                              static_cast<std::size_t>(n_factor) +
                          static_cast<std::size_t>(fj)];
           for (int a = 0; a < n_a; ++a) {
-            if (!mask_bool(buf_pool[a])) continue;
+            if (!mask_bool(buf_tradable[a]))
+              continue;
             float vi = xi[a], vj = xj[a];
-            if (!is_finite(vi) || !is_finite(vj)) continue;
+            if (!is_finite(vi) || !is_finite(vj))
+              continue;
             double di = vi, dj = vj;
             acc.sx += di;
             acc.sy += dj;
@@ -283,13 +305,16 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
         }
       }
 
-      // quantile_ret: 按 factor_score 在 pool 内 rank 分桶, 算桶内 daily_return[d+1] 等权均值
+      // quantile_ret: 按 factor_score 在 tradable 内 rank 分桶,
+      //   桶内 daily_return[d+1] 等权均值 (与策略可买宇宙同口径).
       std::vector<std::pair<float, int>> ranked;
       ranked.reserve(static_cast<std::size_t>(n_a));
       for (int a = 0; a < n_a; ++a) {
-        if (!mask_bool(buf_pool[a])) continue;
+        if (!mask_bool(buf_tradable[a]))
+          continue;
         float s = buf_score[a];
-        if (!is_finite(s)) continue;
+        if (!is_finite(s))
+          continue;
         ranked.emplace_back(s, a);
       }
       if (!ranked.empty()) {
@@ -306,7 +331,8 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
           for (int k = lo; k < hi; ++k) {
             int a = ranked[static_cast<std::size_t>(k)].second;
             float r = buf_dr_next[a];
-            if (!is_finite(r)) continue;
+            if (!is_finite(r))
+              continue;
             sum += r;
             ++n;
           }
@@ -323,7 +349,8 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
   threads.reserve(n_threads);
   for (unsigned tid = 0; tid < n_threads; ++tid)
     threads.emplace_back(worker, tid);
-  for (auto &th : threads) th.join();
+  for (auto &th : threads)
+    th.join();
 
   // ---- factor_corr 合并 ----------------------------------------------------
   std::vector<float> factor_corr(static_cast<std::size_t>(n_factor) *
@@ -364,7 +391,7 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
   }
 
   // ---- top-K turnover 串行后处理 (依赖 i-1, 多线程不便) -------------------
-  std::vector<float> buf_pool(static_cast<std::size_t>(n_a));
+  std::vector<float> buf_tradable(static_cast<std::size_t>(n_a));
   std::vector<float> buf_score(static_cast<std::size_t>(n_a));
   std::vector<std::vector<float>> buf_factors_seq(
       static_cast<std::size_t>(n_factor),
@@ -376,17 +403,16 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
       static_cast<std::size_t>(n_factor));
   for (int i = 0; i < n_d_bt; ++i) {
     int d = bt_d_lo + i;
-    T.gather_cs_row(F::pool, d, std::span<float>(buf_pool));
+    T.gather_cs_row(F::tradable, d, std::span<float>(buf_tradable));
     T.gather_cs_row(F::factor_score, d, std::span<float>(buf_score));
     for (int f = 0; f < n_factor; ++f) {
       T.gather_cs_row(factors[static_cast<std::size_t>(f)], d,
-                      std::span<float>(buf_factors_seq[
-                          static_cast<std::size_t>(f)]));
+                      std::span<float>(buf_factors_seq[static_cast<std::size_t>(f)]));
     }
-    compute_top_k(buf_score.data(), buf_pool.data(), n_a, K, today_score_top);
+    compute_top_k(buf_score.data(), buf_tradable.data(), n_a, K, today_score_top);
     for (int f = 0; f < n_factor; ++f) {
       compute_top_k(buf_factors_seq[static_cast<std::size_t>(f)].data(),
-                    buf_pool.data(), n_a, K,
+                    buf_tradable.data(), n_a, K,
                     today_factor_top[static_cast<std::size_t>(f)]);
     }
     if (i > 0) {
