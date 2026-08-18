@@ -55,6 +55,7 @@ enum class F : int {
   pcf_raw,
   roe_raw,
   roa_raw,
+  cffoa_raw, // 经营现金流量净额增长: net_cffoa_ttm / shift4(4季度前同口径) - 1
 
   // raw meta 派生 — per-A 动态 (D - list_date / D - delist_date)
   list_age,
@@ -90,6 +91,7 @@ enum class F : int {
   roe_ttm12,
   roa_ttm12,
   dy_ttm12,
+  cffoa_ttm12,
 
   // pool (CS) — universe 母集
   pool,     // pool_b ∧ rank(mcap_raw asc) ≤ POOL_UNIVERSE_SIZE

@@ -41,7 +41,7 @@ namespace {
 
 constexpr std::uint64_t POOL_MAGIC = 0x315441444c4f4f50ULL; // 'POOLDAT1'
 // POOL_VERSION: PitPool 字段 / Ev struct / cache_layout 顺序变更时手动 +1.
-constexpr std::uint32_t POOL_VERSION = 4;
+constexpr std::uint32_t POOL_VERSION = 5;
 
 constexpr std::uint64_t FNV_OFFSET = 1469598103934665603ULL;
 constexpr std::uint64_t FNV_PRIME = 1099511628211ULL;

@@ -595,8 +595,25 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
     pq::Col np = v.col("net_profit_to_parent_shareholders_ttm");
     pq::Col npa = v.col("net_profit_ttm");
     pq::Col cf = v.col("net_cffoa_ttm");
+    std::int64_t nr = v.rows();
+
+    // 先扫一遍 shift==4 (4 季度=12 个月前, 同口径 TTM), 按 (date, a) 建索引;
+    //   shift==0 主记录同 (date, instrument) 下若存在对应 shift=4 行, 直接配对读取.
+    std::unordered_map<std::int64_t, float> shift4_cf;
+    shift4_cf.reserve(static_cast<std::size_t>(nr) / 32 + 1);
+    for (std::int64_t i = 0; i < nr; ++i) {
+      if (shift.i32(i, -1) != 4)
+        continue;
+      int a = lookup_a(axes, inst.str(i));
+      if (a < 0)
+        continue;
+      std::int64_t key =
+          static_cast<std::int64_t>(date.yyyymmdd(i)) * (axes.n_a() + 1) + a;
+      shift4_cf[key] = cf.f32(i);
+    }
+
     EventRowMemo memo(axes, CUTOFF);
-    for (std::int64_t i = 0, nr = v.rows(); i < nr; ++i) {
+    for (std::int64_t i = 0; i < nr; ++i) {
       // 仅入 shift==0 (该 visible_date 最新报告期 TTM).
       if (shift.i32(i, -1) != 0)
         continue;
@@ -613,6 +630,10 @@ void build(const Axes &axes, const std::vector<MonthFile> &files, PitPool &p) {
       ev.net_profit_to_parent_shareholders_ttm = np.f32(i);
       ev.net_profit_ttm = npa.f32(i);
       ev.net_cffoa_ttm = cf.f32(i);
+      std::int64_t key =
+          static_cast<std::int64_t>(date.yyyymmdd(i)) * (axes.n_a() + 1) + a;
+      auto it = shift4_cf.find(key);
+      ev.net_cffoa_ttm_shift4 = (it != shift4_cf.end()) ? it->second : std::nanf("");
       std::lock_guard<std::mutex> lk(mu[a]);
       p.financial_ttm.push_chain(a, ev);
     }

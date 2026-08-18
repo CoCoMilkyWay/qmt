@@ -118,7 +118,7 @@ inline constexpr std::array<std::string_view, 25> POOL_INDUSTRY_L1_WHITELIST = {
 }};
 
 inline constexpr bool POOL_INCLUDE_MARGIN = true; // true = 池内含两融 (与 py margin_tradings=["两融标的","非两融标的"] 等价)
-inline constexpr int POOL_UNIVERSE_SIZE = 500;
+inline constexpr int POOL_UNIVERSE_SIZE = 400;
 
 // ============================================================================
 // E. 策略 (cs_tradable filter 子集 + cs_factor_score 加权)
@@ -139,10 +139,16 @@ struct FactorWeight {
   feature::F f;
   float w;
 };
-inline constexpr std::array<FactorWeight, 3> STRATEGY_FACTOR_WEIGHTS = {{
+inline constexpr std::array<FactorWeight, 4> STRATEGY_FACTOR_WEIGHTS = {{
+    // {feature::F::mcap, 0.7f},
+    // {feature::F::fmcap, 0.7f},
+    // {feature::F::pcf_ttm12, 0.1f},
+    // {feature::F::ps_ttm12, 0.1f},
+
     {feature::F::mcap, 0.7f},
     {feature::F::fmcap, 0.7f},
     {feature::F::close, 0.1f},
+    {feature::F::cffoa_ttm12, 0.1f},
 }};
 
 // ============================================================================
@@ -193,7 +199,7 @@ inline constexpr bool TENSOR_DUMP_ENABLE = true;
 //   任何一格 NaN 都表示 compute fn 漏写或上游污染. raw / *_age /
 //   daily_return 等列预期可能 NaN, 不在此列表; factor 经截面均值补缺后必须全 finite.
 // ============================================================================
-inline constexpr std::array<feature::F, 26> BUILD_NO_NAN_FEATURES = {{
+inline constexpr std::array<feature::F, 27> BUILD_NO_NAN_FEATURES = {{
     // TS bool (ts_* 内 std::fill(0.0f) 后选中置 1.0f, 或 grid_copy_bool)
     feature::F::susp,
     feature::F::is_margin,
@@ -222,6 +228,7 @@ inline constexpr std::array<feature::F, 26> BUILD_NO_NAN_FEATURES = {{
     feature::F::roe_ttm12,
     feature::F::roa_ttm12,
     feature::F::dy_ttm12,
+    feature::F::cffoa_ttm12,
     feature::F::factor_score,
 }};
 

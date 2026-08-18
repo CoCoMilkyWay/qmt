@@ -13,7 +13,6 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -729,6 +728,23 @@ void ts_roa_raw(int a, const Axes &axes, const PitPool &pool,
       });
 }
 
+// cffoa_raw = net_cffoa_ttm / net_cffoa_ttm_shift4 - 1
+//   经营现金流量净额增长: 过去 12 个月 (TTM) 经营现金流量净额 相对
+//   4 季度 (=12 个月) 前同口径 TTM 的增长率. shift=4 值在 pit.cpp build 时
+//   按 (date, instrument) 与 shift=0 主记录配对写入; 分母==0 或任一侧
+//   非有限 → NaN (分子分母皆可负, 不剔, 交给截面 winsor_mad 兜底).
+void ts_cffoa_growth_raw(int a, const Axes &axes, const PitPool &pool,
+                         const StockMeta &meta, Tensor &T) {
+  scan_latest_ttm(a, axes, pool, meta, T, F::cffoa_raw,
+                  [](int /*d*/, const FinancialTtmEv &e) -> float {
+                    float c0 = e.net_cffoa_ttm;
+                    float c4 = e.net_cffoa_ttm_shift4;
+                    return (is_finite(c0) && is_finite(c4) && c4 != 0.0f)
+                               ? (c0 / c4 - 1.0f)
+                               : std::nanf("");
+                  });
+}
+
 // ============================================================================
 // TS: raw meta 派生 (per-A 动态: D - list_date / D - delist_date)
 // ============================================================================
@@ -1139,6 +1155,11 @@ void cs_roa_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
 void cs_dy_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
   neutral_pipeline(d, F::dy_raw, F::dy_ttm12, false, T, b);
 }
+// 经营现金流量净额增长因子: 不做行业/市值中性化 (增长率本身跨行业量级差异
+//   已由 winsor_mad + z 缩尾/标准化处理), 走简单 factor_pipeline (同 close/mcap).
+void cs_cffoa_growth_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
+  factor_pipeline(d, F::cffoa_raw, F::cffoa_ttm12, false, T, b);
+}
 
 // pool: pool_b ∧ rank(mcap_raw asc within pool_b) ≤ POOL_UNIVERSE_SIZE
 void cs_pool(int d, const Axes &, Tensor &T, CsBufs &b) {
@@ -1245,6 +1266,8 @@ const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES = {{
     {"pcf_raw", Kind::Inter, Axis::TimeSeries, &impl::ts_pcf_raw, nullptr},
     {"roe_raw", Kind::Inter, Axis::TimeSeries, &impl::ts_roe_raw, nullptr},
     {"roa_raw", Kind::Inter, Axis::TimeSeries, &impl::ts_roa_raw, nullptr},
+    {"cffoa_raw", Kind::Inter, Axis::TimeSeries,
+     &impl::ts_cffoa_growth_raw, nullptr},
     // raw meta 派生 — per-A 动态 (D - list_date / D - delist_date)
     {"list_age", Kind::Inter, Axis::TimeSeries, &impl::ts_list_age, nullptr},
     {"delist_age", Kind::Inter, Axis::TimeSeries, &impl::ts_delist_age, nullptr},
@@ -1275,6 +1298,8 @@ const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES = {{
     {"roe_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_roe_ttm12},
     {"roa_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_roa_ttm12},
     {"dy_ttm12", Kind::Factor, Axis::CrossSection, nullptr, &impl::cs_dy_ttm12},
+    {"cffoa_ttm12", Kind::Factor, Axis::CrossSection, nullptr,
+     &impl::cs_cffoa_growth_ttm12},
     // pool (CS) — universe 母集
     {"pool", Kind::Inter, Axis::CrossSection, nullptr, &impl::cs_pool},
     {"tradable", Kind::Inter, Axis::CrossSection, nullptr, &impl::cs_tradable},

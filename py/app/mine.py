@@ -165,7 +165,7 @@ TRADING_DAYS = 252    # 年化因子 (Sharpe / 年化收益)
 
 # 不持仓月份 (1..12). 命中月份的交易日, fitness kernel 跳过 (不进 year_group, 不累加 year_days),
 # NAV kernel 跳过 (持仓状态冻结, nav 不变, 无交易成本).
-SKIP_MONTHS = frozenset({1,4,12})
+SKIP_MONTHS = frozenset({})
 
 # 分档母集: "pool" = 排名母集 (与 factor pct_rank 口径一致) | "tradable" = 策略选股母集
 POOL_FEATURE = "tradable"
