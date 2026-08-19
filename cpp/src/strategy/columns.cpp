@@ -1,5 +1,6 @@
 #include "strategy/columns.hpp"
 
+#include "feature/cs.hpp"
 #include "feature/def/basic/delist_age.hpp"
 #include "feature/def/basic/industry_l1.hpp"
 #include "feature/def/basic/is_margin.hpp"
@@ -107,18 +108,28 @@ void ts_pool_b(int s, const StrategySpec &spec,
   }
 }
 
-// pool: pool_b ∧ rank(rank_key within pool_b) ≤ universe_size.
-//   rank_key 值须 finite 且 > 0 才参与 (mcap 等估值 raw 的 ≤0 是哨兵/脏值).
-//   buf_a=pool_b, buf_b=rank_key, buf_c=输出.
+// pool: (pool_b ∧ ¬OR(filters)) 里 rank(rank_key) ≤ universe_size; ≤0 = 不截断.
+//   filters 前置于截断 ⇒ universe_size 计的是过滤后的有效标的数.
+//   rank_key 须 finite 且 > 0 (≤0 是哨兵/脏值), 不截断时该条仍生效.
+//   buf_a=pool_b→clean mask, buf_b=filter scratch→rank_key, buf_c=输出.
 void cs_pool(int s, const StrategySpec &spec, int d, Tensor &T,
              std::span<float> buf_a, std::span<float> buf_b,
              std::span<float> buf_c) {
   T.strat_gather_cs_row(slot(s, SF::pool_b), d, buf_a);
+  std::size_t na = buf_a.size();
+  // 先过滤: filters 在 mcap 截断之前应用, buf_b 暂作 filter gather scratch
+  for (const feature::FeatureSpec *src : spec.filters) {
+    T.gather_cs_row(*src, d, buf_b);
+    for (std::size_t a = 0; a < na; ++a) {
+      if (buf_b[a] > 0.5f)
+        buf_a[a] = 0.0f;
+    }
+  }
   T.gather_cs_row(*spec.pool.rank_key, d, buf_b);
 
   std::vector<std::pair<float, int>> cands; // (key, a)
-  cands.reserve(buf_a.size());
-  for (std::size_t a = 0; a < buf_a.size(); ++a) {
+  cands.reserve(na);
+  for (std::size_t a = 0; a < na; ++a) {
     if (!(buf_a[a] > 0.5f))
       continue;
     float key = buf_b[a];
@@ -128,7 +139,11 @@ void cs_pool(int s, const StrategySpec &spec, int d, Tensor &T,
   }
 
   int n = static_cast<int>(cands.size());
-  int k = std::min(spec.pool.universe_size, n);
+  // rank_key 的因子若也在 weights 里 (小市值策略的 mcap), 截断与打分是同一信号
+  //   两次计入, 且截得越窄池内该因子分位越接近噪声 ⇒ 宜设 ≤0, 只经 score 表达.
+  int k = (spec.pool.universe_size > 0)
+              ? std::min(spec.pool.universe_size, n)
+              : n;
   // k == n 时 cands.begin()+k == cands.end(), std::nth_element 第二参传 end 是 UB;
   // 全部入选时无需分割, 跳过 nth_element.
   if (k > 0 && k < n) {
@@ -148,65 +163,61 @@ void cs_pool(int s, const StrategySpec &spec, int d, Tensor &T,
                          std::span<const float>(buf_c.data(), buf_c.size()));
 }
 
-// tradable: pool ∧ ¬OR(spec.filters).
-//   pool 是 cs (pct_rank / nth-smallest 母集), tradable 是策略实际 top-K 母集.
-//   buf_a=pool→输出, buf_b=filter gather.
-void cs_tradable(int s, const StrategySpec &spec, int d, Tensor &T,
-                 std::span<float> buf_a, std::span<float> buf_b) {
-  T.strat_gather_cs_row(slot(s, SF::pool), d, buf_a);
-  std::size_t na = buf_a.size();
-
-  for (const feature::FeatureSpec *src : spec.filters) {
-    T.gather_cs_row(*src, d, buf_b);
-    for (std::size_t a = 0; a < na; ++a) {
-      if (buf_b[a] > 0.5f)
-        buf_a[a] = 0.0f;
-    }
-  }
-
-  T.strat_scatter_cs_row(slot(s, SF::tradable), d,
-                         std::span<const float>(buf_a.data(), na));
-}
-
-// score: 配置因子 finite-加权平均 (全截面可算, 供 analysis IC). w 可正可负
-//   (符号定义该因子的方向), 分母用 Σ|w| (非 Σw) 归一, 避免正负抵消导致
-//   除零或整体符号被意外翻转.
-//   factor_pipeline 已保证每个 factor 全 finite; pool/tradable 由下游另行 mask.
-//   buf_a=acc→输出, buf_b=|权重|和, buf_c=factor gather.
+// score: 每因子先在 pool 内重做截面分位再加权, Σ w·pct_rank_pool(f) / Σ|w|.
+//   共享图的 factor 是全市场分位, 而策略池是偏斜子集 (小市值池全在 mcap 左尾):
+//   选池口径相关的因子在池内被压成窄带, 无关的仍铺满 [0,1] ⇒ 直接加权时前者的
+//   方差贡献远低于名义权重, weights 比例失真. 池内重排后各因子同样铺满, 权重
+//   才如实生效. pct_rank/z 保序 ⇒ 这等价于该因子本就在池内算 (仅 winsor_mad
+//   夹平的 ties 无法再分辨), 故共享图不必改.
+//   w 可正可负 (符号定义方向), 分母 Σ|w| 归一避免正负抵消致除零/翻符号.
+//   pool 外恒 0 (池外无池内分位可言; 下游一律 pool-masked). 填 0 而非 NaN
+//   是为守 Phase 4 的 assert_finite_strat.
+//   buf_a=acc→输出, buf_b=pool mask (全程只读), buf_c=factor gather→池内分位.
 void cs_score(int s, const StrategySpec &spec, int d, Tensor &T,
               std::span<float> buf_a, std::span<float> buf_b,
               std::span<float> buf_c) {
   std::size_t na = buf_a.size();
+  T.strat_gather_cs_row(slot(s, SF::pool), d, buf_b);
   std::fill(buf_a.begin(), buf_a.end(), 0.0f);
-  std::fill(buf_b.begin(), buf_b.end(), 0.0f);
+
+  // Kind::Factor 均 must_be_finite ⇒ 分母恒为完整 Σ|w|, 不必 per-a 累计权重,
+  //   省下的 buffer 给 pool mask.
+  float wsum = 0.0f;
+  for (const FactorWeight &fw : spec.weights)
+    wsum += std::fabs(fw.w);
+  assert(wsum > 0.0f && "score: 空 weights / 权重全 0");
 
   for (const FactorWeight &fw : spec.weights) {
     T.gather_cs_row(*fw.f, d, buf_c);
-    float abs_w = std::fabs(fw.w);
+    // 池外置 NaN ⇒ pct_rank 只对池内格排秩 (ties 取平均秩), 得池内分位 ∈ [0,1]
     for (std::size_t a = 0; a < na; ++a) {
+      if (!(buf_b[a] > 0.5f))
+        buf_c[a] = std::nanf("");
+    }
+    feature::pct_rank(buf_c);
+    for (std::size_t a = 0; a < na; ++a) {
+      if (!(buf_b[a] > 0.5f))
+        continue;
       float v = buf_c[a];
-      if (is_finite(v)) {
-        buf_a[a] += fw.w * v;
-        buf_b[a] += abs_w;
-      }
+      assert(is_finite(v) && "score: 池内 factor 非 finite (factor 契约应保证)");
+      buf_a[a] += fw.w * v;
     }
   }
 
-  for (std::size_t a = 0; a < na; ++a) {
-    assert(buf_b[a] > 0.0f && "score: no finite configured factor");
-    buf_a[a] = buf_a[a] / buf_b[a];
-  }
+  for (std::size_t a = 0; a < na; ++a)
+    buf_a[a] = (buf_b[a] > 0.5f) ? (buf_a[a] / wsum) : 0.0f;
+
   T.strat_scatter_cs_row(slot(s, SF::score), d,
                          std::span<const float>(buf_a.data(), na));
 }
 
-// rank: score 在 tradable ∧ finite(score) 内的 1-based 降序排名, 0 = 不在母集.
+// rank: score 在 pool ∧ finite(score) 内的 1-based 降序排名, 0 = 不在母集.
 //   并列 score 按 a 升序破序 ⇒ 排名确定 (回测 / 实盘 / dump 对账读同一列).
-//   buf_a=tradable, buf_b=score, buf_c=输出.
+//   buf_a=pool, buf_b=score, buf_c=输出.
 void cs_rank(int s, const StrategySpec &, int d, Tensor &T,
              std::span<float> buf_a, std::span<float> buf_b,
              std::span<float> buf_c) {
-  T.strat_gather_cs_row(slot(s, SF::tradable), d, buf_a);
+  T.strat_gather_cs_row(slot(s, SF::pool), d, buf_a);
   T.strat_gather_cs_row(slot(s, SF::score), d, buf_b);
 
   std::vector<std::pair<float, int>> ranked; // (score, a)
@@ -289,7 +300,6 @@ void compute_cs_columns(const Axes &axes, Tensor &T) {
       for (int s = 0; s < N_STRATEGIES; ++s) {
         const StrategySpec &spec = *STRATEGIES[static_cast<std::size_t>(s)];
         cs_pool(s, spec, d, T, a, b, c);
-        cs_tradable(s, spec, d, T, a, b);
         cs_score(s, spec, d, T, a, b, c);
         cs_rank(s, spec, d, T, a, b, c);
       }

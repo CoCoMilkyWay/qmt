@@ -46,7 +46,7 @@ Tensor build(Axes &out_axes, StockMeta &out_meta) {
     compute_cs(out_axes, T);
   }
 
-  // ---- Phase 3s: per-D 策略 CS 列 (pool → tradable → score → rank) ----
+  // ---- Phase 3s: per-D 策略 CS 列 (pool → score → rank) ----
   {
     misc::Timer t("[strategy] phase 3s columns");
     strategy::compute_cs_columns(out_axes, T);

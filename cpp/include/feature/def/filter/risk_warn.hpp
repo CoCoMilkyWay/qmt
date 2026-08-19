@@ -32,7 +32,7 @@ inline constexpr FeatureSpec risk_warn_spec{
 //   注: 退市整理期靠 4 态识别 — 交易所摘 *ST 标签后狭义 st_status 翻 0, 仅靠
 //       原始 st_status 漏判会被 strategy 选中持有至退市 (实测 *ST大通 2023/06/19
 //       进退市整理期 → 漏排 → 持有 11 个交易日至退市). 派生规则见 pit.cpp.
-//   下游 tradable 把 risk_warn > 0.5 视为排除 (1.0/2.0/3.0 均触发 filter).
+//   下游 pool 把 risk_warn > 0.5 视为排除 (1.0/2.0/3.0 均触发 filter).
 inline void ts_risk_warn(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &, Tensor &T) {
   int n_d = axes.n_d();

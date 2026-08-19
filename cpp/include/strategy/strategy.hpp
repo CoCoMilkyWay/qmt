@@ -12,23 +12,23 @@ namespace strategy {
 // ============================================================================
 // 策略层 — 每策略一个 spec 文件 (strategy/def/<name>.hpp), registry.hpp 挂载.
 //
-// 每策略绑定固定 5 列特征 (SF), 构成策略自己的固定小管线, 叶子全指向共享图
+// 每策略绑定固定 4 列特征 (SF), 构成策略自己的固定小管线, 叶子全指向共享图
 // 节点 (FeatureSpec 指针), 存 Tensor.strat_mats (不占 Tensor.mats); 计算见
 // strategy/columns.cpp:
-//   pool_b   (TS, bool)  静态白名单母集 = exchange/板块/行业白名单 ∧ 已上市
-//                        ∧ ¬susp ∧ ¬退市 ∧ margin 开关
-//   pool     (CS, bool)  截面 universe = pool_b ∧ rank(rank_key) ≤ universe_size
-//   tradable (CS, bool)  pool ∧ ¬OR(filters)  (可买母集)
-//   score    (CS, float) Σ w·factor / Σ w·1{finite}  (全截面可算, 供 analysis IC)
-//   rank     (CS, float) score 在 tradable 内的 1-based 降序排名; 0 = 不在母集.
-//                        回测 top-N / exit / watch 与实盘选股读同一列 ⇒
-//                        "回测 = 实盘" 收敛到单一入口, 且可 dump 对账.
+//   pool_b (TS, bool)  静态白名单母集 = exchange/板块/行业白名单 ∧ 已上市
+//                      ∧ ¬susp ∧ ¬退市 ∧ margin 开关
+//   pool   (CS, bool)  可买母集 = (pool_b ∧ ¬OR(filters)) 里
+//                      rank(rank_key) ≤ universe_size; ≤0 = 不截断
+//   score  (CS, float) Σ w·pct_rank_pool(factor) / Σ|w|; 每因子先在 pool 内重做
+//                      截面分位再加权, pool 外恒 0 (见 columns.cpp::cs_score)
+//   rank   (CS, float) score 在 pool 内的 1-based 降序排名; 0 = 不在母集.
+//                      回测 top-N / exit / watch 与实盘选股读同一列 ⇒
+//                      "回测 = 实盘" 收敛到单一入口, 且可 dump 对账.
 // ============================================================================
 
 enum class SF : int {
   pool_b = 0,
   pool,
-  tradable,
   score,
   rank,
   COUNT,
@@ -39,7 +39,6 @@ inline constexpr int SF_COUNT = static_cast<int>(SF::COUNT);
 inline constexpr std::string_view SF_NAMES[SF_COUNT] = {
     "pool_b",
     "pool",
-    "tradable",
     "score",
     "rank",
 };
@@ -77,15 +76,17 @@ struct PoolSpec {
   MarginPolicy margin_policy;           // 两融标的池化策略 (Exclude/Include/Only)
   const feature::FeatureSpec *rank_key; // 截面 universe 排名 key (小市值池 = mcap_raw_spec)
   bool rank_asc;                        // true = 升序取前 N (小市值), false = 降序 (大市值)
-  int universe_size;                    // pool = pool_b ∧ rank(rank_key) ≤ universe_size
+  // pool = (pool_b ∧ ¬filters) 里 rank(rank_key) ≤ universe_size 的部分;
+  //   ≤ 0 = 不截断, 全部入池 (见 columns.cpp::cs_pool).
+  int universe_size;
 };
 
 struct StrategySpec {
   std::string_view name; // 唯一; = 输出目录名 output/strategy/<name>/
   PoolSpec pool;
-  // tradable = pool ∧ ¬OR(filters); 全部 Kind::Filter (registry consteval 校验)
+  // pool 排除 OR(filters); 全部 Kind::Filter (registry consteval 校验)
   std::span<const feature::FeatureSpec *const> filters;
-  // score = Σ w·factor / Σ w·1{finite}
+  // score = Σ w·pct_rank_pool(factor) / Σ|w|
   std::span<const FactorWeight> weights;
   // 回测窗口 / 持仓 / 退出 — per-strategy (交易成本 / capital_base 是券商账户
   // 属性, 留全局 config.hpp)

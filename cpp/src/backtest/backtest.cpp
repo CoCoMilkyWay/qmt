@@ -56,7 +56,7 @@ inline bool read_bool(const feature::Tensor &T, const FeatureSpec &f, int a, int
   return v > 0.5f;
 }
 
-// 策略块契约 bool (pool / tradable): 同上, F 换扁平 slot.
+// 策略块契约 bool (pool): 同上, F 换扁平 slot.
 inline bool strat_read_bool(const feature::Tensor &T, int slot, int a, int d) {
   float v = T.strat_at(slot, a, d);
   assert(is_finite(v) && "backtest::strat_read_bool: NaN — column should be 0/1");
@@ -97,7 +97,7 @@ inline std::string ymd_str(std::int32_t v) {
   return std::string(buf, 8);
 }
 
-// 一组"实体 × 指标"的绝对指标 (策略 / pool指数 / tradable指数 共用形状);
+// 一组"实体 × 指标"的绝对指标 (策略 / pool指数 共用形状);
 //   返回新建的子对象, 便于调用方 (策略行) 继续追加相对指标.
 yyjson_mut_val *add_nav_stats(yyjson_mut_doc *doc, yyjson_mut_val *parent,
                               const char *key, const report::NavStats &s) {
@@ -211,7 +211,6 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
 
   using strategy::SF;
   const int slot_pool = strategy::slot(s_idx, SF::pool);
-  const int slot_tradable = strategy::slot(s_idx, SF::tradable);
   const int slot_score = strategy::slot(s_idx, SF::score);
   const int slot_rank = strategy::slot(s_idx, SF::rank);
 
@@ -232,7 +231,7 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
 
   // 每日输出
   std::vector<std::int32_t> dates_out(n_d_bt);
-  std::vector<float> strat_nav(n_d_bt), pool_nav(n_d_bt), tradable_nav(n_d_bt);
+  std::vector<float> strat_nav(n_d_bt), pool_nav(n_d_bt);
   std::vector<std::int32_t> pos_count(n_d_bt);
   std::vector<float> pos_pct(n_d_bt), turnover(n_d_bt);
   std::vector<float> susp_pct(n_d_bt), exec_pct(n_d_bt);
@@ -335,9 +334,8 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
     return (open_px > 0.0f) ? (close_px / open_px - 1.0f) : std::nanf("");
   };
 
-  // pool / tradable benchmark NAV
+  // pool benchmark NAV
   double pool_nav_d = ::config::BACKTEST_CAPITAL_BASE;
-  double tradable_nav_d = ::config::BACKTEST_CAPITAL_BASE;
 
   int hold_n = spec.hold_n;
 
@@ -409,7 +407,7 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
     double pv = cash + mv_holdings;
     assert(pv > 0.0 && "portfolio value <= 0");
 
-    // (3) 候选 universe: 策略 rank 列直读 (rank ≥ 1 ⇔ tradable ∧ finite(score);
+    // (3) 候选 universe: 策略 rank 列直读 (rank ≥ 1 ⇔ pool ∧ finite(score);
     //   排名已在 columns.cpp 固化, 回测与实盘选股读同一列).
     //   cands[r-1] = (score, a): rank 是 1..K 连续整数, 两遍扫描按位回填.
     std::vector<std::pair<float, int>> cands;
@@ -602,10 +600,8 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
     double pv_end = cash + mv_end;
     strat_nav[i] = static_cast<float>(pv_end);
 
-    // pool / tradable 等权影子指数.
+    // pool 等权影子指数 (策略可买母集, filters 已前置到 pool).
     //   时点: D-1 close 按 mask[a, d-1] 等权 → 持有到 D close, 得 daily_return[a, d].
-    //   pool     = 策略 universe (含 ST/次新等策略买不了的)
-    //   tradable = 策略可买 (pool ∧ ¬spec.filters), 与分层同口径.
     //   PIT: mask[d-1]; daily_return[d] NaN ⇒ 该持仓退出当日均值.
     //   i=0: NAV = capital_base; i>=1: 累乘.
     if (i > 0) {
@@ -625,10 +621,8 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
         return dr_n > 0 ? dr_sum / static_cast<double>(dr_n) : 0.0;
       };
       pool_nav_d *= (1.0 + ew(slot_pool));
-      tradable_nav_d *= (1.0 + ew(slot_tradable));
     }
     pool_nav[i] = static_cast<float>(pool_nav_d);
-    tradable_nav[i] = static_cast<float>(tradable_nav_d);
 
     // 持仓数 / 仓位 / 换手 / 停牌占比 / 可执行率
     pos_count[i] = static_cast<std::int32_t>(holdings.size());
@@ -736,10 +730,8 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
   // ---- 派生序列 --------------------------------------------------------------
   std::vector<float> ret_s = report::daily_returns(strat_nav);
   std::vector<float> ret_p = report::daily_returns(pool_nav);
-  std::vector<float> ret_t = report::daily_returns(tradable_nav);
   std::vector<float> dd_s = report::drawdown_curve(strat_nav);
   std::vector<float> dd_p = report::drawdown_curve(pool_nav);
-  std::vector<float> dd_t = report::drawdown_curve(tradable_nav);
 
   // 回测窗口的日期字符串 (年月分组 / 周月赢率用)
   std::vector<std::string> bt_dates;
@@ -755,7 +747,7 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
   wi(out / "dates.npy", dates_out);
   wf(out / "strategy_nav.npy", strat_nav);
   wf(out / "strategy_dd.npy", dd_s);
-  // pool_nav/tradable_nav/pool_dd/tradable_dd 不再落盘 (纯展示用途已删,
+  // pool_nav/pool_dd 不再落盘 (纯展示用途已删,
   //   计算本身保留供下方 rel_stats / "超额" 行使用).
   wi(out / "position_count.npy", pos_count);
   wf(out / "position_pct.npy", pos_pct);
@@ -814,7 +806,7 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
   }
 
   // report.json — 指标与表格全部在此算完, py 侧零计算 (只格式化 + 组 figure).
-  //   indicators: 4 行 (策略 / pool指数 / tradable指数 / 超额) × 指标
+  //   indicators: 2 行 (策略 / 超额) × 指标
   //     超额 = 策略 − pool指数 的差值 (年化/波动率/夏普/最大回撤), 相对类指标
   //     (信息比率/Alpha/跟踪误差) 直接取策略 vs pool 的 rel_stats.
   //   trade_stats: 16 项交易统计 (CPU时长 / Tensor内存 是运行诊断, 在 meta.json)
@@ -824,7 +816,6 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
   {
     report::NavStats st_s = report::nav_stats(strat_nav);
     report::NavStats st_p = report::nav_stats(pool_nav);
-    report::NavStats st_t = report::nav_stats(tradable_nav);
     report::RelStats rel = report::rel_stats(ret_s, ret_p);
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
@@ -841,7 +832,7 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
       report::add_f4(doc, o, "Alpha", rel.alpha);
       report::add_f4(doc, o, "跟踪误差", rel.tracking_error);
     }
-    // pool指数/tradable指数 不再单独展示行 (仅供下方"超额"差值与 rel_stats 用).
+    // pool指数不再单独展示行 (仅供下方"超额"差值与 rel_stats 用).
     {
       yyjson_mut_val *o = report::add_obj(doc, ind, "超额");
       report::add_f4(doc, o, "年化", st_s.ann_return - st_p.ann_return);

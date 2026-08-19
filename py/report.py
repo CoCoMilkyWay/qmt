@@ -114,7 +114,7 @@ def _html_table(header: list, cols: list, *, compact: bool = False) -> str:
 
 
 # backtest/ 下逐日或逐笔的序列, 除 hover / 曲线 / 明细表外不参与任何计算
-#   pool/tradable 等权净值只在 cpp 内部供 rel_stats/"超额" 用, 不落盘不展示.
+#   pool 等权净值只在 cpp 内部供 rel_stats/"超额" 用, 不落盘不展示.
 _BT_NPY = (
     "strategy_nav",
     "strategy_dd", "position_pct",
@@ -642,7 +642,7 @@ IC_MA_W = META["config"]["ic_ma_window"]
 def view_ag_score_ic(strats) -> go.Figure:
     """各策略聚合 score 的累积 IC 叠加 — 策略间"选股信号有效性"直接对比.
 
-    单因子的累积 IC 是 per-strategy 视图 (每策略 tradable 母集不同, 同一因子的
+    单因子的累积 IC 是 per-strategy 视图 (每策略 pool 母集不同, 同一因子的
     IC 曲线本就不同, 叠在一起 n_factor × n_strategy 条会糊).
     """
     colors = px_colors(N_S)

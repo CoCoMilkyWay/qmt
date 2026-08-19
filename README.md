@@ -43,9 +43,9 @@ qmt/
 │   │   │       ├── factor/          # 排序因子 (Kind::Factor) + 全部中间变量 (Kind::Inter)
 │   │   │       └── filter/          # 状态机最终排除位 (Kind::Filter)
 │   │   ├── strategy/                # 策略层头文件 (每策略一份小管线, 叶子指向共享图节点)
-│   │   │   ├── strategy.hpp         # StrategySpec / PoolSpec / FactorWeight / SF (5 固定列) 定义
+│   │   │   ├── strategy.hpp         # StrategySpec / PoolSpec / FactorWeight / SF (4 固定列) 定义
 │   │   │   ├── registry.hpp         # STRATEGIES[] 挂载表 + consteval 校验
-│   │   │   ├── columns.hpp          # 5 列 (pool_b/pool/tradable/score/rank) 通用计算声明
+│   │   │   ├── columns.hpp          # 4 列 (pool_b/pool/score/rank) 通用计算声明
 │   │   │   └── def/                 # 每策略一个 spec 文件 (白名单/filter/因子权重/回测窗口)
 │   │   ├── backtest/                # 回测引擎 (per-D 状态机, per-strategy 跑一遍)
 │   │   └── analysis/                # 因子诊断 (IC / turnover / 分层收益, per-strategy 跑一遍)
@@ -68,7 +68,7 @@ qmt/
 │       │   ├── report.cpp           # print_dependency_table() 实现 (全量特征表 + active 标记, 各策略 filter/factor 概览两行, 不参与计算图构建)
 │       │   └── describe.cpp         # Phase 4.x: describe() 统计 + dump_tensor() 逐点导出
 │       ├── strategy/
-│       │   └── columns.cpp          # Phase 2s/3s: 循环 STRATEGIES[] 算 pool_b → pool → tradable → score → rank
+│       │   └── columns.cpp          # Phase 2s/3s: 循环 STRATEGIES[] 算 pool_b → pool → score → rank
 │       ├── backtest/
 │       │   └── backtest.cpp         # per-strategy 回测器实现 (输出见 backtest.hpp 顶注)
 │       └── analysis/
@@ -233,7 +233,7 @@ hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际�
 
 ## 特征系统 (无中心枚举, header-only, 编译期自动挂载)
 
-张量 `T[node, A, D]`: `D` = 交易日 (`all_trading_days` WHERE `market_code='CN'`, 截到 today; 多市场 `trading_days` 已弃用, CN 行当日盘后才入库会导致盘中缺行/水位错乱); `A` = instrument (`cn_stock_basic_info.instrument` 全量, 含已退市); `node` = 一个 `FeatureSpec` (无中心枚举, 身份 = 其 `&<name>_spec` 地址, `Tensor` 按 `ALL_NODES` 拓扑序分配 `mats[i]`, `unordered_map<const FeatureSpec*,int>` 做地址→下标查询); dtype 统一 float (bool 用 0.0/1.0); kind (与轴独立, 以 `FeatureSpec::axis` 为准) 分 `Filter` (1=排除该 D-A) / `Factor` (∈[0,1], NaN=不参与, 截面归一后的连续得分) / `Inter` (中间量, 时序或截面皆可). 每个策略额外拥有固定 5 列 (`pool_b/pool/tradable/score/rank`), 存在独立的 `Tensor.strat_mats` (不占共享节点存储位), 见 §策略层.
+张量 `T[node, A, D]`: `D` = 交易日 (`all_trading_days` WHERE `market_code='CN'`, 截到 today; 多市场 `trading_days` 已弃用, CN 行当日盘后才入库会导致盘中缺行/水位错乱); `A` = instrument (`cn_stock_basic_info.instrument` 全量, 含已退市); `node` = 一个 `FeatureSpec` (无中心枚举, 身份 = 其 `&<name>_spec` 地址, `Tensor` 按 `ALL_NODES` 拓扑序分配 `mats[i]`, `unordered_map<const FeatureSpec*,int>` 做地址→下标查询); dtype 统一 float (bool 用 0.0/1.0); kind (与轴独立, 以 `FeatureSpec::axis` 为准) 分 `Filter` (1=排除该 D-A) / `Factor` (∈[0,1], NaN=不参与, 截面归一后的连续得分) / `Inter` (中间量, 时序或截面皆可). 每个策略额外拥有固定 4 列 (`pool_b/pool/score/rank`), 存在独立的 `Tensor.strat_mats` (不占共享节点存储位), 见 §策略层.
 
 **单点真理落在每个节点自己的定义文件里, README 不维护副本.** 每个特征节点 (raw / 中间量 / filter / factor, 三者在计算图层面完全等价) 是 `cpp/include/feature/def/{basic,factor,filter}/<name>.hpp` 下的一个 header-only 文件, 文件名 = 节点名, 声明恰一个:
 
@@ -279,8 +279,8 @@ inline constexpr FeatureSpec <name>_spec{
 | 2 时序  | 列式 (per-A 全 D) | a ≈ 5500       | embarrassingly (A) | 共享图 TS_ORDER 节点: 单调时间序列计算 + 状态机               |
 | 2s 策略 | 列式 (per-A 全 D) | a ≈ 5500       | embarrassingly (A) | 逐策略算 `pool_b` (依赖共享 TS 节点)                          |
 | 3 截面  | 行式 (per-D 全 A) | d ≈ 2750       | embarrassingly (D) | 共享图 CS_ORDER 节点: 截面归一 (winsor/z/pct_rank/中性化)     |
-| 3s 策略 | 行式 (per-D 全 A) | d ≈ 2750       | embarrassingly (D) | 逐策略算 `pool → tradable → score → rank`                     |
-| 4 校验  | 逐节点/逐策略列   | ALL_NODES 规模 | 串行 (轻量)        | `must_be_finite` 契约 + 策略 5 列全 finite 断言               |
+| 3s 策略 | 行式 (per-D 全 A) | d ≈ 2750       | embarrassingly (D) | 逐策略算 `pool → score → rank`                                |
+| 4 校验  | 逐节点/逐策略列   | ALL_NODES 规模 | 串行 (轻量)        | `must_be_finite` 契约 + 策略 4 列全 finite 断言               |
 
 **设计原则** (业务密集化 + 性能选择, 改计算图不动外层; 同步点仅 phase 间硬屏障 [`build.cpp` 顺序 `join` + `misc::Timer` 报段时], phase 内无屏障):
 - **agnostic 外层 + 单点真理**: `pit.cpp` (itf 维, 每 itf 一组 `{build, cache_layout, post_ffill?}` + `ITFS[]` 表挂载) 与 `feature/def/**/*.hpp` (节点维, 每节点一个 `FeatureSpec`); 外层 flow (`load.cpp` / `ts.cpp` / `cs.cpp` / `build.cpp`) 仅通过函数指针/`FeatureSpec*` 表迭代调度, 不出现任何具体 itf 名 / 节点名.
@@ -288,8 +288,8 @@ inline constexpr FeatureSpec <name>_spec{
 - **PIT cutoff 在 Phase 1 build 一次性消化**: `build` 内 `row = floor_date(visible_date) - itf::CUTOFF` 直接定位行 D, 写完后 `pool[a, d]` 即 "T 当日合法可见数据". Phase 2/3 不再做任何时间偏移 — 杜绝下游漏算 cutoff 导致的未来数据泄漏.
 - **计算顺序 = 编译期拓扑序, 无运行时依赖锁**: `registry.hpp` 的 `TS_ORDER` / `CS_ORDER` 已是合法拓扑序 (见 §特征系统); 调度器 (`ts.cpp` / `cs.cpp`) 仅按该顺序串行调, 后段直接读 `T.ts_row(prior_spec, a)` 即可.
 - **网格无锁 + 事件 per-A 锁**: 网格 itf 因 `(a, v_idx)` slot 唯一 → 完全无锁写; 事件 itf 多对一 emplace, 锁粒度精到 `vector<mutex>(n_a)` (非全局, 非 per-itf), 接近无争用.
-- **独立 A×D layout (a-major / d-minor)**: Phase 2 的 `ts_row(spec, a)` 是连续 span (cache friendly, 主路径); Phase 3 的 `gather/scatter_cs_row(spec, d)` 是 stride-D copy (3 buffer 复用, 一次性付出); 策略块 `strat_mats` 布局相同, 各策略固定 5 列独立存储, 不占共享图节点位.
-- **策略与共享图解耦**: Phase 2/3 只算图上通用节点 (raw/中间量/filter/factor), 对策略配置一无所知; Phase 2s/3s 才引入 `strategy::STRATEGIES[]`, 把每策略的 `pool_b/pool/tradable/score/rank` 算成独立的 5 列, 新增策略不影响共享图.
+- **独立 A×D layout (a-major / d-minor)**: Phase 2 的 `ts_row(spec, a)` 是连续 span (cache friendly, 主路径); Phase 3 的 `gather/scatter_cs_row(spec, d)` 是 stride-D copy (3 buffer 复用, 一次性付出); 策略块 `strat_mats` 布局相同, 各策略固定 4 列独立存储, 不占共享图节点位.
+- **策略与共享图解耦**: Phase 2/3 只算图上通用节点 (raw/中间量/filter/factor), 对策略配置一无所知; Phase 2s/3s 才引入 `strategy::STRATEGIES[]`, 把每策略的 `pool_b/pool/score/rank` 算成独立的 4 列, 新增策略不影响共享图.
 
 ```text
 Phase 0 axes  (主线程; axis.cpp + tensor.cpp)
@@ -385,15 +385,17 @@ Phase 3 截面  (per-D 并行; cs.cpp 通用 flow + registry.hpp::CS_ORDER)
 
 Phase 3s 策略 CS 列  (per-D 并行; strategy/columns.cpp::compute_cs_columns)
   # 依赖共享 CS 节点 (rank_key / factor 全集) + Phase 2s 的 pool_b, 逐策略算:
-  #   pool     ← pool_b ∧ rank(rank_key) ≤ universe_size (per D, within pool_b)
-  #   tradable ← pool ∧ ¬OR(filters)
-  #   score    ← Σ w·factor / Σ w·1{finite}                (全截面可算, 供 analysis IC)
-  #   rank     ← score 在 tradable 内的 1-based 降序排名, 0 = 不在母集
+  #   pool  ← (pool_b ∧ ¬OR(filters)) 的 rank(rank_key) ≤ universe_size (per D)
+  #     filters 前置于截断 ⇒ universe_size 计的是过滤后的有效标的数; ≤0 = 不截断
+  #   score ← Σ w·pct_rank_pool(factor) / Σ|w|; 每因子先在 pool 内重做截面分位
+  #     再加权 (共享图 factor 是全市场分位, 在偏斜子池上值域被压窄会让 weights
+  #     比例失真), pool 外恒 0
+  #   rank  ← score 在 pool 内的 1-based 降序排名, 0 = 不在母集
   # 回测 top-N / exit / watch 与实盘选股读同一个 rank 列 ⇒ "回测 = 实盘" 收敛到单一入口.
 
   parallel for d in [0, n_d):
     for s in strategy::STRATEGIES:
-      compute pool/tradable/score/rank for (s, d)
+      compute pool/score/rank for (s, d)
 
 Phase 4 校验  (串行, 轻量)
   for spec in ALL_NODES where spec->must_be_finite:
@@ -417,12 +419,12 @@ inline constexpr std::array<const StrategySpec *, N> STRATEGIES = {{
 ```
 
 `StrategySpec` 字段:
-- `pool`: `PoolSpec` — exchange/list_sector/行业白名单 + `rank_key` (排名用的共享节点, 如 `mcap_raw_spec`) + `rank_asc` + `universe_size`.
+- `pool`: `PoolSpec` — exchange/list_sector/行业白名单 + `rank_key` (排名用的共享节点, 如 `mcap_raw_spec`) + `rank_asc` + `universe_size` (`≤0` = 不按 `rank_key` 截断).
 - `filters`: `std::span<const FeatureSpec *const>`, 全部必须 `Kind::Filter` (registry consteval 校验).
-- `weights`: `std::span<const FactorWeight>` (`{f, w}`), `f` 必须 `Kind::Factor` 且 `w ≠ 0` (符号定义该因子的方向, 正负均可; `score` 分母按 `Σ|w|` 归一).
+- `weights`: `std::span<const FactorWeight>` (`{f, w}`), `f` 必须 `Kind::Factor` 且 `w ≠ 0` (符号定义该因子的方向, 正负均可; `score` 分母按 `Σ|w|` 归一 ⇒ 只有权重的相对比例有意义, 不需凑 `Σw = 1`).
 - `bt_start_date` / `hold_n` / `exit_ratio`: per-策略回测参数 (成本 / `capital_base` 是券商账户属性, 留在 `config.hpp` 全策略共享).
 
-每策略固定绑定 5 列 (`strategy::SF`), 存 `Tensor.strat_mats` (不占共享图 `mats`), 计算见 §构建流水线 Phase 2s/3s: `pool_b` (静态白名单母集) → `pool` (截面 universe) → `tradable` (可买母集) → `score` (加权因子) → `rank` (tradable 内降序排名, 0=不在母集). 回测/实盘选股/分析全部只读这 5 列, 不重复实现选股逻辑.
+每策略固定绑定 4 列 (`strategy::SF`), 存 `Tensor.strat_mats` (不占共享图 `mats`), 计算见 §构建流水线 Phase 2s/3s: `pool_b` (静态白名单母集) → `pool` (先砍 filters 再按 rank_key 截断) → `score` (因子在 pool 内重排分位后加权) → `rank` (pool 内降序排名, 0=不在母集). 回测/实盘选股/分析全部只读这 4 列, 不重复实现选股逻辑.
 
 `main.cpp` 对 `strategy::STRATEGIES[]` 循环跑 `backtest::run` + `analysis::run`, 各自输出到独立的 `output/strategy/<name>/{backtest,analysis}/`; 共享的 `feature::ALL_NODES` 计算图与 `backtest::NameTimeline` 只算一次. 涨跌停交易约束 (下单层面, 不在张量内): 物理约束 (做不到) — 涨停日不买入 / 跌停日不卖出; 策略主动 (业务选择) — 涨停日不卖出 (赌 T+1 超额) / 跌停日不买入 (避 T+1 风险).
 

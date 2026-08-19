@@ -19,7 +19,7 @@ namespace feature {
 //   拓扑序) 决定, 构造时一次性建 index_ (地址 → 下标), 之后 O(1) 查; 无中心
 //   枚举, 新增节点不需要改这里.
 //
-// 策略块 strat_mats: 每策略固定 5 列 (pool_b/pool/tradable/score/rank) 的独立
+// 策略块 strat_mats: 每策略固定 4 列 (pool_b/pool/score/rank) 的独立
 //   存储, 布局与 mats 相同. slot = 策略下标 × SF_COUNT + 列 (映射由 strategy
 //   层定义, feature 层只见扁平 slot). n_strat_slots 由 build 传入
 //   (= strategy::N_STRAT_SLOTS).

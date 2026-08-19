@@ -27,7 +27,8 @@ int Axes::floor_date(std::string_view d) const {
   auto it = std::upper_bound(
       dates.begin(), dates.end(), d,
       [](std::string_view a, const std::string &b) { return a < b; });
-  if (it == dates.begin()) return -1;
+  if (it == dates.begin())
+    return -1;
   return static_cast<int>(std::distance(dates.begin(), it - 1));
 }
 
@@ -35,7 +36,8 @@ namespace {
 
 // yyyymmdd int32 → "YYYYMMDD"; 0 (缺失) → 空串.
 std::string ymd_str(std::int32_t v) {
-  if (v <= 0) return {};
+  if (v <= 0)
+    return {};
   char buf[9];
   std::snprintf(buf, sizeof(buf), "%08d", v);
   return std::string(buf, 8);
@@ -56,13 +58,16 @@ Axes load_axes() {
   std::set<std::string> dates_set;
   for (auto &[ym, path] : td_files) {
     misc::pq::TableView v(misc::pq::read_table(path));
-    if (v.rows() == 0) continue;
+    if (v.rows() == 0)
+      continue;
     misc::pq::Col date = v.col("date");
     misc::pq::Col mc = v.col("market_code");
     for (std::int64_t i = 0, n = v.rows(); i < n; ++i) {
-      if (mc.str(i) != "CN") continue;
+      if (mc.str(i) != "CN")
+        continue;
       std::string d = ymd_str(date.yyyymmdd(i));
-      if (d.empty() || d > today) continue;
+      if (d.empty() || d > today)
+        continue;
       dates_set.insert(std::move(d));
     }
   }
@@ -84,16 +89,18 @@ Axes load_axes() {
          "data/_meta/cn_stock_basic_info.parquet missing — 先跑 bigquant::update");
 
   // PIPELINE_START_DATE 之前已退市的标的不入 A 轴 — 它们在整个 build window 内
-  //   无数据可落, 永远 NaN, 是纯冗员. 下游 pool / tradable 已用 delist_age 兜过,
+  //   无数据可落, 永远 NaN, 是纯冗员. 下游 pool 已用 delist_age 兜过,
   //   这里只是 axis 级别清理, 让 describe / mcap_raw 等统计口径不掺全 NaN 行.
   misc::pq::Col ins = bi.col("instrument");
   misc::pq::Col dd = bi.col("delist_date");
   std::set<std::string> codes_set;
   for (std::int64_t i = 0, n = bi.rows(); i < n; ++i) {
     std::string_view s = ins.str(i);
-    if (s.empty()) continue;
+    if (s.empty())
+      continue;
     std::string d = ymd_str(dd.yyyymmdd(i));
-    if (!d.empty() && d < ::config::PIPELINE_START_DATE) continue;
+    if (!d.empty() && d < ::config::PIPELINE_START_DATE)
+      continue;
     codes_set.emplace(s);
   }
   assert(!codes_set.empty());
@@ -129,7 +136,8 @@ StockMeta load_stock_meta(const Axes &ax) {
 
   for (std::int64_t i = 0, n = bi.rows(); i < n; ++i) {
     auto it = ax.code_idx.find(std::string(ins.str(i)));
-    if (it == ax.code_idx.end()) continue;
+    if (it == ax.code_idx.end())
+      continue;
     int a = it->second;
     m.name[a] = std::string(name.str(i));
     m.list_date[a] = ymd_str(ld.yyyymmdd(i));

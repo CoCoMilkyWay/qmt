@@ -34,7 +34,7 @@ std::vector<std::string> last_names(const feature::Axes &,
 //   反过来重读自己刚写出的 npy.
 struct Result {
   double elapsed_seconds = 0.0;
-  double analysis_seconds = 0.0; // analysis::run 计时, main 循环里回填
+  double analysis_seconds = 0.0;        // analysis::run 计时, main 循环里回填
   int d_lo = 0;                         // 窗口左端 (axes D 全局索引)
   std::vector<float> strategy_nav;      // [n_d_bt]
   std::vector<std::int32_t> hold_off;   // [n_d_bt + 1] CSR offset
@@ -48,7 +48,7 @@ struct Result {
 //
 // 输入 (只读):
 //   - axes / meta / T (共享: close_raw, daily_return, susp, limit_up, limit_dn;
-//     策略块: pool, tradable, score, rank 已就绪) / name_timeline
+//     策略块: pool, score, rank 已就绪) / name_timeline
 //
 // 配置 (来自 config.hpp, 券商账户属性, 全策略共享):
 //   - BACKTEST_CAPITAL_BASE
@@ -62,9 +62,9 @@ struct Result {
 //   - dates.npy              [n_d_bt] int32  (axes.dates 全局索引)
 //   - strategy_nav.npy       [n_d_bt] float32 (策略净值, 起点 = BACKTEST_CAPITAL_BASE)
 //   - strategy_dd.npy        [n_d_bt] float32 (策略回撤曲线, ≤ 0)
-//   position_count.npy 以下: pool/tradable 基准净值仍在内部算 (供 rel_stats
+//   position_count.npy 以下: pool 基准净值仍在内部算 (供 rel_stats
 //   跟踪误差/IR/Beta/Alpha 与"超额"行用), 但不再落盘/展示 (无 pool_nav.npy /
-//   tradable_nav.npy / pool_dd.npy / tradable_dd.npy).
+//   pool_dd.npy).
 //   - position_count.npy     [n_d_bt] int32  (持仓股票数)
 //   - position_pct.npy       [n_d_bt] float32 (持仓市值 / 组合市值)
 //   - turnover.npy           [n_d_bt] float32 (双边: 当日买卖额 / 2 / 组合市值;
@@ -102,7 +102,7 @@ struct Result {
 //                                   holdings_names[], watch_names[],
 //                                   fills_names[]}
 //   - report.json            JSON 指标 + 表格 (py 侧零计算):
-//                              indicators{策略/超额} (pool/tradable 净值不单
+//                              indicators{策略/超额} (pool 净值不单
 //                                独展示行, 只作"超额"差值与 rel_stats 算子)
 //                              trade_stats{16 项}
 //                              annual{} / monthly{} 列式期次表

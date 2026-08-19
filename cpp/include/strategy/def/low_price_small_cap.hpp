@@ -78,10 +78,10 @@ inline constexpr const feature::FeatureSpec *low_price_small_cap_filters[] = {
 };
 
 inline constexpr FactorWeight low_price_small_cap_weights[] = {
-    {&feature::def::mcap_spec, -0.7f},
-    {&feature::def::fmcap_spec, -0.7f},
-    {&feature::def::close_spec, -0.1f},
-    {&feature::def::cffoa_ttm12_spec, -0.1f},
+    {&feature::def::mcap_spec, -7.0f},
+    {&feature::def::fmcap_spec, -7.0f},
+    {&feature::def::close_spec, -1.0f},
+    {&feature::def::cffoa_ttm12_spec, -1.0f},
 };
 
 inline constexpr StrategySpec low_price_small_cap{
@@ -100,7 +100,7 @@ inline constexpr StrategySpec low_price_small_cap{
             // rank_asc: true=升序取前 N (小市值) / false=降序 (大市值)
             .rank_asc = true,
             // universe_size: pool = pool_b ∧ rank(rank_key) ≤ universe_size
-            .universe_size = 400,
+            .universe_size = 2000,
         },
     .filters = low_price_small_cap_filters,
     .weights = low_price_small_cap_weights,

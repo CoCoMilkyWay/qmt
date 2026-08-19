@@ -95,7 +95,7 @@ Fitness 定义 (阶段 1): 周期内分层单调度的跨周期均值 Y ∈ [0, 
         + output/meta.json (D 轴日期 / A 轴 codes / factor 名单)
     - 张量已是 build-time PIT (row D 只含 T 当日可见信息), 挖掘端零时间偏移;
         T+1 收益 = daily_return[:, d+1] (决策用 row d, 持有 d→d+1)
-    - 分档母集 = STRATEGY 策略的 rank>0 (= tradable, 已含 pool_b/pool/filters)
+    - 分档母集 = STRATEGY 策略的 rank>0 (= pool, 已含 pool_b/filters)
     - 搜索阶段 (fitness Y 评估): 每日 score 升序等比切分 G 档, 每档等权日收益,
         不做涨跌停粘性、不扣换手费. 这是"因子原始分层能力"指标.
     - Top-N 复评阶段 (粘性+扣费, 对齐 cpp backtest 四条限制):
@@ -166,7 +166,7 @@ TRADING_DAYS = 252    # 年化因子 (Sharpe / 年化收益)
 # NAV kernel 跳过 (持仓状态冻结, nav 不变, 无交易成本).
 SKIP_MONTHS = frozenset({})
 
-# 分档母集: STRATEGY 策略的 rank>0 (= tradable ⊆ pool ⊆ pool_b, 已排 susp/退市/
+# 分档母集: STRATEGY 策略的 rank>0 (= pool ⊆ pool_b, 已排 susp/退市/
 #   filters). rank 是唯一按策略分目录落盘的策略列 (见
 #   cpp/src/feature/describe.cpp::dump_tensor, output/tensor/<策略名>/rank.npy);
 #   改 STRATEGY 即切到对应策略的母集 (meta.json strategies 列出全部可用名),
@@ -255,7 +255,7 @@ def load_data() -> dict:
     print(f"张量: {TENSOR_DIR} (n_a={n_a}, n_d={n_d}), "
           f"窗口 {dates_sel[0]}..{dates_sel[-1]} ({D} 日)")
 
-    # 母集 (STRATEGY 的 rank>0, = tradable) ∧ finite(T+1 收益) → 日主序 CSR
+    # 母集 (STRATEGY 的 rank>0, = pool) ∧ finite(T+1 收益) → 日主序 CSR
     fwd = np.ascontiguousarray(tensor("daily_return")[
                                :, d_lo + 1:d_hi + 1])  # (n_a, D)
     member = (np.asarray(strat_tensor("rank")[
