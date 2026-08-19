@@ -21,7 +21,10 @@ inline constexpr const FeatureSpec *pcf_raw_deps[] = {&mcap_raw_spec};
 
 inline constexpr FeatureSpec pcf_raw_spec{
     "pcf_raw", Kind::Inter, Axis::TimeSeries, pcf_raw_deps, &ts_pcf_raw,
-    nullptr};
+    nullptr, /*must_be_finite=*/false,
+    /*formula=*/"mcap_raw / ttm.net_cffoa_ttm (shift=0 latest visible)",
+    /*assumption=*/
+    "[ratio]; ttm12; 经营现金流可负 (烧钱企业 → 负 PCF), 不剔; 分母 == 0 → NaN"};
 
 inline void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool,
                        const StockMeta &meta, Tensor &T) {

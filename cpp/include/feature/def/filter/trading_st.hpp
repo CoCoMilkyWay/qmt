@@ -21,7 +21,9 @@ inline constexpr const FeatureSpec *trading_st_deps[] = {&low_p_spec,
 
 inline constexpr FeatureSpec trading_st_spec{
     "trading_st", Kind::Filter, Axis::TimeSeries, trading_st_deps,
-    &ts_trading_st, nullptr, /*must_be_finite=*/true};
+    &ts_trading_st, nullptr, /*must_be_finite=*/true,
+    /*formula=*/"rolling_20D(low_p ∨ low_mc).all()",
+    /*assumption=*/"—"};
 
 // trading_st: rolling 20D (low_p ∨ low_mc).all(). 单调连续计数即可.
 inline void ts_trading_st(int a, const Axes &axes, const PitPool &,

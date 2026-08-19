@@ -21,7 +21,14 @@ inline void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
                       const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec ni_raw_spec{
-    "ni_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_ni_raw, nullptr};
+    "ni_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_ni_raw, nullptr,
+    /*must_be_finite=*/false,
+    /*formula=*/
+    "mean(latest 2 annuals.net_profit_to_parent_shareholders) if N ≥ 2 else "
+    "latest 1 (fs_quarter_index == 4 过滤)",
+    /*assumption=*/
+    "[元]; 只取年报 (fs_quarter_index == 4), 同 report_date 多版本取 latest "
+    "visible; 给 dividend_st 阈值用, 2 条平均以稳阈值; 0 条 → NaN"};
 
 inline void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
                       const StockMeta &meta, Tensor &T) {

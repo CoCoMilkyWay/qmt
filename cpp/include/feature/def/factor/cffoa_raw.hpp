@@ -20,7 +20,13 @@ inline void ts_cffoa_raw(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec cffoa_raw_spec{
-    "cffoa_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_cffoa_raw, nullptr};
+    "cffoa_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_cffoa_raw, nullptr,
+    /*must_be_finite=*/false,
+    /*formula=*/"net_cffoa_ttm / net_cffoa_ttm_shift4 - 1",
+    /*assumption=*/
+    "[ratio]; 经营现金流量净额 12 个月 (TTM) 相对 4 季度前同口径 TTM 的增长率; "
+    "shift=4 值在 pit.cpp build 时按 (date, instrument) 与 shift=0 主记录配对写入; "
+    "分子分母皆可负不剔, 交给截面 winsor_mad 兜底; 分母==0 或任一侧非有限 → NaN"};
 
 inline void ts_cffoa_raw(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &meta, Tensor &T) {

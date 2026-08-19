@@ -31,6 +31,8 @@ struct FeatureSpec {
   bool must_be_finite = false;              // build 末尾契约校验: 该列必须全 finite (由节点
                                             // 自己声明, 例如 bool 状态机 / factor pipeline
                                             // 输出; raw/*_age/daily_return 等允许 NaN 不设).
+  const char *formula = "";                 // 必填: 计算公式 (registry_report.cpp 打印用; 不得为空)
+  const char *assumption = "";              // 必填: 单位/边界条件/关键假设 (同上; 无则写 "—")
 };
 
 namespace graph_detail {
@@ -119,6 +121,16 @@ filter_axis(const std::array<const FeatureSpec *, N> &all, Axis ax) {
     if (s->axis == ax)
       out[i++] = s;
   return out;
+}
+
+// 文档契约校验: 每个进入计算图的节点必须自己填写 formula / assumption
+//   (feature/registry.hpp 打印依赖表格用; 空字符串视为漏填, 直接编译失败).
+template <std::size_t N>
+consteval bool all_documented(const std::array<const FeatureSpec *, N> &all) {
+  for (const FeatureSpec *s : all)
+    if (s->formula[0] == '\0' || s->assumption[0] == '\0')
+      return false;
+  return true;
 }
 
 } // namespace feature

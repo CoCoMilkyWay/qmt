@@ -20,7 +20,11 @@ inline constexpr const FeatureSpec *pe_ttm12_deps[] = {
 
 inline constexpr FeatureSpec pe_ttm12_spec{
     "pe_ttm12", Kind::Factor, Axis::CrossSection, pe_ttm12_deps, nullptr,
-    &cs_pe_ttm12};
+    &cs_pe_ttm12, /*must_be_finite=*/true,
+    /*formula=*/
+    "pct_rank(z(neutralize(winsorize_quantile(1 / pe_raw)))) + 截面均值填充; "
+    "中性化 = 行业+log(mcap) OLS 残差",
+    /*assumption=*/"—"};
 
 inline void cs_pe_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
   neutral_pipeline(d, pe_raw_spec, pe_ttm12_spec, /*invert=*/true, T, b);

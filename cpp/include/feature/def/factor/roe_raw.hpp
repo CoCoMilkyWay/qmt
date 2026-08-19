@@ -22,7 +22,15 @@ inline void ts_roe_raw(int a, const Axes &axes, const PitPool &pool,
                        const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec roe_raw_spec{
-    "roe_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_roe_raw, nullptr};
+    "roe_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_roe_raw, nullptr,
+    /*must_be_finite=*/false,
+    /*formula=*/
+    "ttm.net_profit_to_parent_shareholders_ttm / "
+    "avg5(balance.total_equity_to_parent_shareholders) × 100",
+    /*assumption=*/
+    "[%]; ttm12; 分子分母同归母口径. avg5 = ttm.report_date 及其前 4 个季末 "
+    "5 点算术平均 (各点取最新可见版本): 12 个月流量须配同窗口平均存量, 期末 "
+    "单点在增发/回购/大额分红股上失真. 5 点任一缺失或分母 ≤ 0 → NaN"};
 
 inline void ts_roe_raw(int a, const Axes &axes, const PitPool &pool,
                        const StockMeta &meta, Tensor &T) {

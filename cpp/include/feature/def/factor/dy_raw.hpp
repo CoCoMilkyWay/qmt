@@ -7,7 +7,6 @@
 #include "feature/pit.hpp"
 #include "feature/tensor.hpp"
 
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <vector>
@@ -32,7 +31,15 @@ inline void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
 inline constexpr const FeatureSpec *dy_raw_deps[] = {&mcap_raw_spec};
 
 inline constexpr FeatureSpec dy_raw_spec{
-    "dy_raw", Kind::Inter, Axis::TimeSeries, dy_raw_deps, &ts_dy_raw, nullptr};
+    "dy_raw", Kind::Inter, Axis::TimeSeries, dy_raw_deps, &ts_dy_raw, nullptr,
+    /*must_be_finite=*/false,
+    /*formula=*/
+    "Σ(dividend.cash_before_tax × share_raw[ev.v] for ev.v ∈ (D − 365d, D]) "
+    "/ mcap_raw[D]",
+    /*assumption=*/
+    "[ratio]; ttm12; 窗口锚 ev.v (= publish_date 预案公告日) — 公告即定价, "
+    "除权日滞后 2-4 个月; 每股取税前, × 公告当日股本 (事后送转/增发会放大 "
+    "股本, 与当年每股分红错配). 无事件 → 0 (非 NaN); mcap 缺/0 → NaN"};
 
 inline void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
                       const StockMeta &meta, Tensor &T) {

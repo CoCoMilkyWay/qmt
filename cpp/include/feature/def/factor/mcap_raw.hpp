@@ -23,7 +23,11 @@ inline constexpr const FeatureSpec *mcap_raw_deps[] = {&close_raw_spec};
 
 inline constexpr FeatureSpec mcap_raw_spec{
     "mcap_raw", Kind::Inter, Axis::TimeSeries, mcap_raw_deps, &ts_mcap_raw,
-    nullptr};
+    nullptr, /*must_be_finite=*/false,
+    /*formula=*/"close_raw × share_raw",
+    /*assumption=*/
+    "[元, 真市值]; 真价 × 当日 total_shares; 不用 hfq close (除权日 close 与 "
+    "shares 同时变, 乘积非真市值)"};
 
 inline void ts_mcap_raw(int a, const Axes &axes, const PitPool &pool,
                         const StockMeta &meta, Tensor &T) {

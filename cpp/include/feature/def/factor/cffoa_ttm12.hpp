@@ -19,7 +19,12 @@ inline constexpr const FeatureSpec *cffoa_ttm12_deps[] = {
 
 inline constexpr FeatureSpec cffoa_ttm12_spec{
     "cffoa_ttm12", Kind::Factor, Axis::CrossSection, cffoa_ttm12_deps, nullptr,
-    &cs_cffoa_ttm12};
+    &cs_cffoa_ttm12, /*must_be_finite=*/true,
+    /*formula=*/"pct_rank(z(winsor_mad(cffoa_raw))) + 截面均值填充",
+    /*assumption=*/
+    "—; 经营现金流量净额增长因子, 不做行业/市值中性化 (增长率本身跨行业量级差异 "
+    "已由 winsor_mad + z 缩尾/标准化处理), 走简单 factor_pipeline (同 close/mcap); "
+    "无 invert"};
 
 inline void cs_cffoa_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
   factor_pipeline(d, cffoa_raw_spec, cffoa_ttm12_spec, /*invert=*/false, T, b);

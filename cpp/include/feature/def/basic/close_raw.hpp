@@ -17,7 +17,13 @@ inline void ts_close_raw(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec close_raw_spec{
-    "close_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_close_raw, nullptr};
+    "close_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_close_raw, nullptr,
+    /*must_be_finite=*/false,
+    /*formula=*/"cn_stock_real_bar1d.close (不复权真价)",
+    /*assumption=*/
+    "[元/股, 不复权真价]; PIT-immutable (不随除权改写), 与 limit_price / "
+    "total_shares 同口径 ⇒ 真市值/真涨跌停/真低价股都用它; adjust_factor "
+    "只在 daily_return 内部用, 不入 tensor"};
 
 inline void ts_close_raw(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &meta, Tensor &T) {

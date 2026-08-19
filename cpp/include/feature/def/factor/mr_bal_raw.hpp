@@ -14,7 +14,10 @@ inline void ts_mr_bal_raw(int a, const Axes &axes, const PitPool &pool,
                           const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec mr_bal_raw_spec{
-    "mr_bal_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_mr_bal_raw, nullptr};
+    "mr_bal_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_mr_bal_raw, nullptr,
+    /*must_be_finite=*/false,
+    /*formula=*/"cn_stock_margin_trading_detail.financing_balance",
+    /*assumption=*/"[元]; 融资余额; per-A grid post_ffill"};
 
 inline void ts_mr_bal_raw(int a, const Axes &axes, const PitPool &pool,
                           const StockMeta &meta, Tensor &T) {

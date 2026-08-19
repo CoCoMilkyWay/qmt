@@ -17,7 +17,13 @@ inline void ts_risk_warn(int a, const Axes &axes, const PitPool &pool,
 
 inline constexpr FeatureSpec risk_warn_spec{
     "risk_warn", Kind::Filter, Axis::TimeSeries, {}, &ts_risk_warn, nullptr,
-    /*must_be_finite=*/true};
+    /*must_be_finite=*/true,
+    /*formula=*/
+    "派生 4 态 (int8 → float; 0=正常, 1=ST, 2=*ST, 3=退市整理期): 历史日由 "
+    "cn_stock_status.st_status (1/2 → 1/2) ∧ is_risk_warning (st_status==0 ∧ "
+    "rw!=0 → 3) 派生; 实盘当日由 cn_stock_static_data.in_delist (=1 → 3) ∧ "
+    "st_status 派生",
+    /*assumption=*/"—"};
 
 // risk_warn: 直读 pool.status.st_status (CUTOFF=0, hybrid 伪装假装盘前, last_d 由 static_data 填充).
 //   pit.cpp itf_cn_stock_status::replay + apply_meta_overlays 已派生 4 态:

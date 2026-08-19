@@ -17,6 +17,7 @@
 #include "feature/build.hpp"
 #include "feature/describe.hpp"
 #include "feature/registry.hpp"
+#include "feature/report.hpp"
 #include "feature/tensor.hpp"
 #include "misc/date.hpp"
 #include "misc/fs.hpp"
@@ -198,6 +199,11 @@ int main() {
   feature::Axes axes;
   feature::StockMeta meta;
   feature::Tensor T = feature::build(axes, meta);
+
+  // ---- Phase 2.4: 特征依赖表 (公共 → 各策略专属, gate config::FEATURE_TABLE_ENABLE)
+  if (::config::FEATURE_TABLE_ENABLE) {
+    feature::print_dependency_table();
+  }
 
   // ---- Phase 2.5: per-feature × per-year describe (gate config::DESCRIBE_ENABLE)
   if (::config::DESCRIBE_ENABLE) {

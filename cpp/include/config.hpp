@@ -104,4 +104,10 @@ inline constexpr bool TENSOR_DUMP_ENABLE = true;
 //   build.cpp 遍历 feature::ALL_NODES, must_be_finite=true 的节点逐一校验.
 // ============================================================================
 
+// ============================================================================
+// J. 特征依赖表打印 (feature/report.cpp; 公共 → 各策略专属, 沿拓扑序;
+//   formula/assumption 取自各节点 FeatureSpec 定义, 无额外文案需要维护)
+// ============================================================================
+inline constexpr bool FEATURE_TABLE_ENABLE = true;
+
 } // namespace config

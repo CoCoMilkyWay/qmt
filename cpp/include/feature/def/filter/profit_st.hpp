@@ -19,7 +19,14 @@ inline void ts_profit_st(int a, const Axes &axes, const PitPool &pool,
 
 inline constexpr FeatureSpec profit_st_spec{
     "profit_st", Kind::Filter, Axis::TimeSeries, {}, &ts_profit_st, nullptr,
-    /*must_be_finite=*/true};
+    /*must_be_finite=*/true,
+    /*formula=*/
+    "状态机 (per A): forecast.end_date.M == 12 ∧ forecast.type ∈ {首亏, 续亏} "
+    "∧ forecast.last_parent_net < 0 时按 forecast.ann_date 触发, 至 "
+    "cn_stock_financial_income_general_pit.report_date == forecast.end_date "
+    "或 (end_date.Y+1, 4, monthend) 终止 (取较早)",
+    /*assumption=*/
+    "正式 PIT 年报出现即终止; 未披露的股票不出, 4 月底安全网兜底"};
 
 inline void ts_profit_st(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &, Tensor &T) {

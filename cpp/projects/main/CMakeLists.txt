@@ -131,6 +131,7 @@ set(SOURCES
     ../../src/feature/cs.cpp
     ../../src/feature/build.cpp
     ../../src/feature/describe.cpp
+    ../../src/feature/report.cpp
     ../../src/strategy/columns.cpp
     ../../src/backtest/backtest.cpp
     ../../src/analysis/analysis.cpp

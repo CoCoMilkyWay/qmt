@@ -19,7 +19,9 @@ inline constexpr const FeatureSpec *limit_dn_deps[] = {&close_raw_spec,
 
 inline constexpr FeatureSpec limit_dn_spec{
     "limit_dn", Kind::Inter, Axis::TimeSeries, limit_dn_deps, &ts_limit_dn,
-    nullptr, /*must_be_finite=*/true};
+    nullptr, /*must_be_finite=*/true,
+    /*formula=*/"close_raw ≤ dn_lim + 1e-4",
+    /*assumption=*/"[bool]; 策略跌停判定"};
 
 inline void ts_limit_dn(int a, const Axes &axes, const PitPool &,
                         const StockMeta &, Tensor &T) {

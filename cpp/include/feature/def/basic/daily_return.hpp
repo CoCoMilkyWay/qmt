@@ -26,7 +26,14 @@ inline void ts_daily_return(int a, const Axes &axes, const PitPool &pool,
 
 inline constexpr FeatureSpec daily_return_spec{
     "daily_return", Kind::Inter, Axis::TimeSeries, {}, &ts_daily_return,
-    nullptr};
+    nullptr, /*must_be_finite=*/false,
+    /*formula=*/
+    "(close[d]·adjust_factor[d]) / (close[d-1]·adjust_factor[d-1]) - 1 "
+    "(后复权链式; 内部从 PitPool 直读 close+adjust_factor, 不依赖 tensor close_raw)",
+    /*assumption=*/
+    "[ratio]; 后复权链式 = 含分红再投入的真持有收益 (除权日 close 真跳 + af "
+    "反向跳 ⇒ 乘积无负跳); 前复权不 causal, 不采用. d==0 或前一日 close/af "
+    "非 finite/0 → NaN"};
 
 inline void ts_daily_return(int a, const Axes &axes, const PitPool &pool,
                             const StockMeta &, Tensor &T) {

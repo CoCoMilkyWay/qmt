@@ -19,7 +19,16 @@ inline void ts_industry_l1(int a, const Axes &axes, const PitPool &pool,
                            const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec industry_l1_spec{
-    "industry_l1", Kind::Inter, Axis::TimeSeries, {}, &ts_industry_l1, nullptr};
+    "industry_l1", Kind::Inter, Axis::TimeSeries, {}, &ts_industry_l1, nullptr,
+    /*must_be_finite=*/false,
+    /*formula=*/
+    "base = 最近一份月初 cn_stock_industry_component WHERE industry='sw2021' "
+    "取 industry_level1_name → SW2021 一级行业 ID 广播; 月内累加 "
+    "cn_stock_industry_change WHERE industry='sw2021' AND industry_level=1 "
+    "AND change_flag=1 事件 (写入新行业 ID)",
+    /*assumption=*/
+    "[uint8 ID, 存为 float]; 0=未知 / 1..31 = SW2021 一级 (映射见 "
+    "feature/industry.hpp::SW2021_L1_NAMES); 上市前/无事件期保持 0"};
 
 inline void ts_industry_l1(int a, const Axes &axes, const PitPool &pool,
                            const StockMeta &, Tensor &T) {

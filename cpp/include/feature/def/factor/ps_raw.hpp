@@ -24,7 +24,13 @@ inline void ts_ps_raw(int a, const Axes &axes, const PitPool &pool,
 inline constexpr const FeatureSpec *ps_raw_deps[] = {&mcap_raw_spec};
 
 inline constexpr FeatureSpec ps_raw_spec{
-    "ps_raw", Kind::Inter, Axis::TimeSeries, ps_raw_deps, &ts_ps_raw, nullptr};
+    "ps_raw", Kind::Inter, Axis::TimeSeries, ps_raw_deps, &ts_ps_raw, nullptr,
+    /*must_be_finite=*/false,
+    /*formula=*/
+    "mcap_raw / ttm.total_operating_revenue_ttm (shift=0 latest visible)",
+    /*assumption=*/
+    "[ratio]; ttm12; 用 total_operating_revenue_ttm (含利息/保费, ≠ "
+    "operating_revenue_ttm); 分母 ≤ 0 → NaN (负营收是源数据脏值, 不给排序含义)"};
 
 inline void ts_ps_raw(int a, const Axes &axes, const PitPool &pool,
                       const StockMeta &meta, Tensor &T) {

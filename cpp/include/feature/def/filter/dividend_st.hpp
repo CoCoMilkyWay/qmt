@@ -25,7 +25,13 @@ inline constexpr const FeatureSpec *dividend_st_deps[] = {&share_raw_spec,
 
 inline constexpr FeatureSpec dividend_st_spec{
     "dividend_st", Kind::Filter, Axis::TimeSeries, dividend_st_deps,
-    &ts_dividend_st, nullptr, /*must_be_finite=*/true};
+    &ts_dividend_st, nullptr, /*must_be_finite=*/true,
+    /*formula=*/
+    "meta.list_sector == 1 ∧ ni_raw > 0 ∧ 3y_sum(dividend.cash_after_tax × "
+    "share_raw) < 0.30 × ni_raw ∧ 3y_sum < 5e7",
+    /*assumption=*/
+    "3y 窗口 = dividend.report_date.Y ∈ [Y-3, Y-1] (Y = "
+    "dividend.publish_date.Y); share_raw 取 publish_date 当日快照; 单位均 [元]"};
 
 // dividend_st: 阶梯 forward fill — 每 dividend event 重算 3y_sum,
 //   3y_sum = Σ over 历史 events with report_date.Y in [ann_y-3, ann_y-1]

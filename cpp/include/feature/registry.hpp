@@ -104,4 +104,8 @@ inline constexpr std::array<const FeatureSpec *, N_TS> TS_ORDER =
 inline constexpr std::array<const FeatureSpec *, N_CS> CS_ORDER =
     filter_axis<N_CS>(ALL_NODES, Axis::CrossSection);
 
+static_assert(all_documented(ALL_NODES),
+              "ALL_NODES: 存在节点未填写 FeatureSpec::formula / assumption "
+              "(定义处强制要求给出公式与假设说明, 供 registry_report 打印依赖表格)");
+
 } // namespace feature

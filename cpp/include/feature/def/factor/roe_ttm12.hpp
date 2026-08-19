@@ -20,7 +20,11 @@ inline constexpr const FeatureSpec *roe_ttm12_deps[] = {
 
 inline constexpr FeatureSpec roe_ttm12_spec{
     "roe_ttm12", Kind::Factor, Axis::CrossSection, roe_ttm12_deps, nullptr,
-    &cs_roe_ttm12};
+    &cs_roe_ttm12, /*must_be_finite=*/true,
+    /*formula=*/
+    "pct_rank(z(neutralize(winsorize_quantile(roe_raw)))) + 截面均值填充; "
+    "中性化 = 行业+log(mcap) OLS 残差",
+    /*assumption=*/"—"};
 
 inline void cs_roe_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
   neutral_pipeline(d, roe_raw_spec, roe_ttm12_spec, /*invert=*/false, T, b);

@@ -17,7 +17,9 @@ inline constexpr const FeatureSpec *new_list_deps[] = {&list_age_spec};
 
 inline constexpr FeatureSpec new_list_spec{
     "new_list", Kind::Filter, Axis::TimeSeries, new_list_deps, &ts_new_list,
-    nullptr, /*must_be_finite=*/true};
+    nullptr, /*must_be_finite=*/true,
+    /*formula=*/"0 ≤ list_age < 60",
+    /*assumption=*/"—"};
 
 inline void ts_new_list(int a, const Axes &axes, const PitPool &,
                         const StockMeta &, Tensor &T) {

@@ -20,7 +20,9 @@ inline constexpr const FeatureSpec *limit_up_deps[] = {&close_raw_spec,
 
 inline constexpr FeatureSpec limit_up_spec{
     "limit_up", Kind::Inter, Axis::TimeSeries, limit_up_deps, &ts_limit_up,
-    nullptr, /*must_be_finite=*/true};
+    nullptr, /*must_be_finite=*/true,
+    /*formula=*/"close_raw ≥ up_lim − 1e-4",
+    /*assumption=*/"[bool]; 策略涨停判定"};
 
 inline void ts_limit_up(int a, const Axes &axes, const PitPool &,
                         const StockMeta &, Tensor &T) {

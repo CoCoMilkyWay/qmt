@@ -14,7 +14,10 @@ inline void ts_share_raw(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec share_raw_spec{
-    "share_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_share_raw, nullptr};
+    "share_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_share_raw, nullptr,
+    /*must_be_finite=*/false,
+    /*formula=*/"cn_stock_shares.total_shares",
+    /*assumption=*/"[股]"};
 
 inline void ts_share_raw(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &meta, Tensor &T) {

@@ -22,7 +22,12 @@ inline void ts_roa_raw(int a, const Axes &axes, const PitPool &pool,
                        const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec roa_raw_spec{
-    "roa_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_roa_raw, nullptr};
+    "roa_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_roa_raw, nullptr,
+    /*must_be_finite=*/false,
+    /*formula=*/"ttm.net_profit_ttm / avg5(balance.total_assets) × 100",
+    /*assumption=*/
+    "[%]; ttm12; 分子取含少数 net_profit_ttm — 总资产由全体股东与债权人共同 "
+    "支撑, 配归母净利是两边错配; 分母同 avg5; 5 点任一缺失或分母 ≤ 0 → NaN"};
 
 inline void ts_roa_raw(int a, const Axes &axes, const PitPool &pool,
                        const StockMeta &meta, Tensor &T) {

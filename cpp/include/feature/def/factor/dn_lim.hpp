@@ -17,7 +17,12 @@ inline void ts_dn_lim(int a, const Axes &axes, const PitPool &pool,
                       const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec dn_lim_spec{
-    "dn_lim", Kind::Inter, Axis::TimeSeries, {}, &ts_dn_lim, nullptr};
+    "dn_lim", Kind::Inter, Axis::TimeSeries, {}, &ts_dn_lim, nullptr,
+    /*must_be_finite=*/false,
+    /*formula=*/"cn_stock_limit_price.lower_limit[d-1] (未复权, 内部主动 -1)",
+    /*assumption=*/
+    "[元/股]; close_raw[D] 是 D-1 收盘, 判\"D-1 是否封板\"须配 D-1 适用的 "
+    "涨跌停, 故内部再取 [d-1]. d==0 → NaN"};
 
 inline void ts_dn_lim(int a, const Axes &axes, const PitPool &pool,
                       const StockMeta &meta, Tensor &T) {

@@ -23,7 +23,15 @@ inline void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
 inline constexpr const FeatureSpec *pb_raw_deps[] = {&mcap_raw_spec};
 
 inline constexpr FeatureSpec pb_raw_spec{
-    "pb_raw", Kind::Inter, Axis::TimeSeries, pb_raw_deps, &ts_pb_raw, nullptr};
+    "pb_raw", Kind::Inter, Axis::TimeSeries, pb_raw_deps, &ts_pb_raw, nullptr,
+    /*must_be_finite=*/false,
+    /*formula=*/
+    "mcap_raw / balance.total_equity_to_parent_shareholders (取 latest "
+    "report_date 的 latest visible 行)",
+    /*assumption=*/
+    "[ratio]; ttm1 (瞬时估值 / MRQ); 分母取归母 — 分子 mcap_raw 只是母公司 "
+    "股权市值, 分母须同口径; 同 visible_date 多 report_date 取 max; 支持负 "
+    "PB; 分母 == 0 或 mcap_raw ≤ 0 → NaN"};
 
 inline void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
                       const StockMeta &meta, Tensor &T) {

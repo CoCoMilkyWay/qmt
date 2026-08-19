@@ -18,7 +18,9 @@ inline constexpr const FeatureSpec *low_mc_deps[] = {&mcap_raw_spec};
 
 inline constexpr FeatureSpec low_mc_spec{
     "low_mc", Kind::Inter, Axis::TimeSeries, low_mc_deps, &ts_low_mc, nullptr,
-    /*must_be_finite=*/true};
+    /*must_be_finite=*/true,
+    /*formula=*/"mcap_raw < (5e8 if meta.list_sector == 1 else 3e8)",
+    /*assumption=*/"[bool]; 主板判定 inline meta.list_sector[a] == 1"};
 
 inline void ts_low_mc(int a, const Axes &axes, const PitPool &,
                       const StockMeta &meta, Tensor &T) {
