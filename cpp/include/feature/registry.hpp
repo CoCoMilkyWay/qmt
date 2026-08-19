@@ -13,15 +13,7 @@
 //   不在此可达闭包内的节点文件即使存在也不进入计算 (不触发计算, 不占 Tensor 存储).
 // ============================================================================
 
-#include "feature/def/basic/close_raw.hpp"
-#include "feature/def/basic/daily_return.hpp"
-#include "feature/def/basic/delist_age.hpp"
-#include "feature/def/basic/industry_l1.hpp"
-#include "feature/def/basic/is_margin.hpp"
-#include "feature/def/basic/limit_dn.hpp"
-#include "feature/def/basic/limit_up.hpp"
-#include "feature/def/basic/list_age.hpp"
-#include "feature/def/basic/susp.hpp"
+#include "feature/framework_roots.hpp"
 #include "feature/graph.hpp"
 #include "strategy/registry.hpp"
 
@@ -33,19 +25,10 @@ namespace feature {
 
 namespace registry_detail {
 
-// 框架自身固定根 — 与策略配置无关, 任何策略下都需要 (backtest 结算 /
-//   strategy::columns pool_b 白名单计算).
-inline constexpr const FeatureSpec *FRAMEWORK_ROOTS[] = {
-    &def::close_raw_spec,
-    &def::delist_age_spec,
-    &def::limit_up_spec,
-    &def::limit_dn_spec,
-    &def::susp_spec,
-    &def::daily_return_spec,
-    &def::is_margin_spec,
-    &def::list_age_spec,
-    &def::industry_l1_spec,
-};
+// FRAMEWORK_ROOTS (框架自身固定根 — 与策略配置无关, 任何策略下都需要, 用于
+//   backtest 结算 / strategy::columns pool_b 白名单计算) 由
+//   feature/framework_roots.hpp 从 feature/def/basic/ 目录自动生成 (见该文件
+//   顶部注释), 此处直接使用, 不再手写.
 
 consteval std::size_t count_strategy_roots() {
   std::size_t n = 0;

@@ -35,8 +35,8 @@ qmt/
 │   │   │       └── pipeline.hpp     # update: plan_months → fetch_month → 月 parquet (与 bigquant 对仗); probe: 积分门槛探针
 │   │   ├── feature/                 # 特征子系统头文件 — 计算图 (无中心枚举, 见 §特征系统)
 │   │   │   ├── graph.hpp            # FeatureSpec (节点唯一身份) + consteval 可达性/拓扑排序/环检测
-│   │   │   ├── registry.hpp         # 计算图挂载点: FRAMEWORK_ROOTS + 全部策略引用 → consteval 推出 ALL_NODES/TS_ORDER/CS_ORDER
-│   │   │   ├── report.hpp           # print_dependency_table(): 运行期打印依赖表 (公共 → 各策略专属)
+│   │   │   ├── registry.hpp         # 计算图挂载点: FRAMEWORK_ROOTS (CMake 从 def/basic/ 自动生成) + 全部策略引用 → consteval 推出 ALL_NODES/TS_ORDER/CS_ORDER
+│   │   │   ├── report.hpp           # print_dependency_table(): 运行期打印全量特征依赖树 (含 active 标记) + 各策略 filter/factor 概览
 │   │   │   ├── tensor.hpp           # Tensor 容器 (按 ALL_NODES 顺序存储, unordered_map<FeatureSpec*,int> 查行号)
 │   │   │   └── def/                 # 每节点一个 header-only 文件 (文件名 = 节点名 = FeatureSpec 变量名前缀)
 │   │   │       ├── basic/           # 框架固定根依赖的市场微观结构数据 (成交价/涨跌停/停牌/退市龄/两融/行业)
@@ -65,7 +65,7 @@ qmt/
 │       │   ├── ts.cpp               # Phase 2 通用 flow: per-A 并行, 迭代 TS_ORDER 调 compute_ts; kernel 在 ts.hpp (state_machine_intervals 模板)
 │       │   ├── cs.cpp               # Phase 3 通用 flow: per-D 并行, 迭代 CS_ORDER 调 compute_cs; kernel (winsor_mad / z / pct_rank / factor_pipeline) 在 cs.hpp/cpp
 │       │   ├── build.cpp            # 编排入口: 串 Phase 0/1/2/2s/3/3s/4 + misc::Timer 报段时
-│       │   ├── report.cpp           # print_dependency_table() 实现 (运行期 DFS 分组, 不参与计算图构建)
+│       │   ├── report.cpp           # print_dependency_table() 实现 (全量特征表 + active 标记, 各策略 filter/factor 概览两行, 不参与计算图构建)
 │       │   └── describe.cpp         # Phase 4.x: describe() 统计 + dump_tensor() 逐点导出
 │       ├── strategy/
 │       │   └── columns.cpp          # Phase 2s/3s: 循环 STRATEGIES[] 算 pool_b → pool → tradable → score → rank
@@ -256,15 +256,15 @@ inline constexpr FeatureSpec <name>_spec{
 - `Tensor` 存取: `T.ts_row(<name>_spec, a)` / `T.gather_cs_row(<name>_spec, d, ...)`
 - 策略引用: `StrategySpec.filters` / `FactorWeight.f` / `PoolSpec.rank_key`
 
-**计算图完全自动推导, 无需手动注册**: `feature/registry.hpp` 从两类"根" (`FRAMEWORK_ROOTS` — 框架自身固定需要的少量 raw 节点, 与 `strategy::STRATEGIES[]` 引用到的全部节点) 出发, 用 `graph.hpp` 里的 `consteval` 函数沿 `deps` 做反向可达性 + 拓扑排序, 推出 `ALL_NODES` / `TS_ORDER` / `CS_ORDER`; 同时做环检测和"TS 节点不得依赖 CS 节点"的轴校验, 违规直接编译失败. 不在根可达闭包内的节点文件即使存在也不会进入计算 (不触发计算, 不占 `Tensor` 存储). CMake (`file(GLOB ...)`) 只负责把 `def/**/*.hpp` 收进构建系统给 IDE 看, 不参与依赖判定.
+**计算图完全自动推导, 无需手动注册**: `feature/registry.hpp` 从两类"根" (`FRAMEWORK_ROOTS` — 框架自身固定需要的少量 raw 节点, 与 `strategy::STRATEGIES[]` 引用到的全部节点) 出发, 用 `graph.hpp` 里的 `consteval` 函数沿 `deps` 做反向可达性 + 拓扑排序, 推出 `ALL_NODES` / `TS_ORDER` / `CS_ORDER`; 同时做环检测和"TS 节点不得依赖 CS 节点"的轴校验, 违规直接编译失败. 不在根可达闭包内的节点文件即使存在也不会进入计算 (不触发计算, 不占 `Tensor` 存储). CMake (`file(GLOB ... CONFIGURE_DEPENDS)`) 把 `def/**/*.hpp` 收进构建系统给 IDE 看, 同时也是 `FRAMEWORK_ROOTS` / 下面"全量特征清单"两份生成文件的输入源 (见下一段) —— 但真正决定"哪些节点参与计算"的仍然只是 `consteval` 沿 `deps` 的可达性推导本身, glob 只负责把"目录里有哪些文件"这个事实喂给它, 不做任何依赖/可达性判断.
 
-`basic/` 目录例外: 里面是框架结算 / 策略白名单计算 (`backtest.cpp` / `strategy/columns.cpp`) 直接依赖的市场微观结构原始数据 (成交价/涨跌停/停牌/退市龄/两融/行业), 与具体策略无关, 是 `registry.hpp::FRAMEWORK_ROOTS` 的来源, 因此例外地会被框架代码直接 `#include` 引用 — 这是编译期图构建必须留的极小固定入口, 不是手动特征清单. `axis` 字段: `TimeSeries` = per A 沿 D 计算 (无截面依赖, A 维可并行); `CrossSection` = per D 沿 A 计算 (有截面依赖, A 维不可并行); 其余字段 (`must_be_finite`/`formula`/`assumption`) 含义见上面代码块内注释.
+`basic/` 目录例外: 里面是框架结算 / 策略白名单计算 (`backtest.cpp` / `strategy/columns.cpp`) 直接依赖的市场微观结构原始数据 (成交价/涨跌停/停牌/退市龄/两融/行业), 与具体策略无关, 是 `FRAMEWORK_ROOTS` 的来源. `FRAMEWORK_ROOTS` 本身由 `cpp/projects/main/CMakeLists.txt` 在 configure 期 glob `feature/def/basic/*.hpp` 自动生成到 `<build>/generated/feature/framework_roots.hpp` (`registry.hpp` `#include "feature/framework_roots.hpp"` 拿到的就是这份生成文件, 不再手写数组) —— `basic/` 目录内容本身即等价于框架固定根这份清单, 新增/删除 `basic/*.hpp` 后重新 cmake configure 即自动同步, 不需要手动改 `registry.hpp`. `axis` 字段: `TimeSeries` = per A 沿 D 计算 (无截面依赖, A 维可并行); `CrossSection` = per D 沿 A 计算 (有截面依赖, A 维不可并行); 其余字段 (`must_be_finite`/`formula`/`assumption`) 含义见上面代码块内注释.
 
 估值/盈利因子按 `<base>_ttm<N>` 命名, period 由季节性决定:
 - **ttm12** (高季节性, 12 个月 ≡ 4 报告期): 取 `cn_stock_financial_ttm_shift.*_ttm` (shift=0) 或 mcap_raw / TTM 字段自算 (估值类, 支持负值).
 - **ttm1** (瞬时估值 / MRQ, 最新一期 snapshot): 取 `cn_stock_financial_balance_general_pit.*` (latest) 自算; 例 pb = mcap_raw / total_owner_equity.
 
-**依赖表格现场生成, 不在文档里维护副本**: `main.cpp` 在 `feature::build()` 之后调用 `feature::print_dependency_table()` (`config::FEATURE_TABLE_ENABLE` 门控), 运行期沿 `deps` 遍历打印定宽表格 (kind / feature / 轴 / deps / formula / assumption, 每行截断到固定宽度), 分组顺序 = 公共 (`FRAMEWORK_ROOTS` 可达闭包 ∪ 被全部策略共同引用的节点) → 各策略专属, 组内保持拓扑序. 想看当前全部特征的公式/假设, 直接跑一次 build 看 stdout, 或读对应 `def/**/<name>.hpp` 里的 `formula`/`assumption` 字段 (二者同源, 不可能不一致).
+**依赖表格现场生成, 不在文档里维护副本**: `main.cpp` 在 `feature::build()` 之后调用 `feature::print_dependency_table()` (`config::FEATURE_TABLE_ENABLE` 门控), 运行期打印定宽表格 (kind / feature / 轴 / active / deps / formula / assumption, 每行截断到固定宽度). 表格覆盖**全部**已定义特征 (含未被任何策略引用的), 组内按 Kind (inter → filter → factor) 分桶、桶内拓扑序; `active` 列标记该节点是否在 `feature::ALL_NODES` (真正参与计算的可达闭包) 内. "全部已定义特征"清单本身也是自动生成、无需手动维护: `cpp/projects/main/CMakeLists.txt` 在 configure 期 glob `feature/def/{basic,factor,filter}/*.hpp`, 按约定 (文件名 == 节点名 == `FeatureSpec` 变量名前缀) 拼出 `#include` + `&<name>_spec` 列表, 生成到 `<build>/generated/feature/def/all.hpp` (`report.cpp` `#include "feature/def/all.hpp"` 拿到的就是这份生成文件); 它只给这张表用, 不被 `registry.hpp` 引用, 不影响可达性裁剪, 未激活的节点依然不触发计算/不占 `Tensor` 存储; 新增/删除 def 文件后重新 cmake configure 即自动同步. 表格下方再按策略打印两行 (`<策略名> filter: ...` / `<策略名> factor: ...`) 列出该策略实际使用的节点名. 想看当前全部特征的公式/假设, 直接跑一次 build 看 stdout, 或读对应 `def/**/<name>.hpp` 里的 `formula`/`assumption` 字段 (二者同源, 不可能不一致).
 
 ## 构建流水线 (data → Tensor → 策略)
 
