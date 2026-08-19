@@ -61,11 +61,10 @@ struct Result {
 //   序列 / 明细走 npy, 指标 / 表格走 report.json, 标的名字符串走 labels.json.
 //   - dates.npy              [n_d_bt] int32  (axes.dates 全局索引)
 //   - strategy_nav.npy       [n_d_bt] float32 (策略净值, 起点 = BACKTEST_CAPITAL_BASE)
-//   - pool_nav.npy           [n_d_bt] float32 (pool 内等权 benchmark, 起点同)
-//   - tradable_nav.npy       [n_d_bt] float32 (tradable 内等权 benchmark, 起点同)
 //   - strategy_dd.npy        [n_d_bt] float32 (策略回撤曲线, ≤ 0)
-//   - pool_dd.npy            [n_d_bt] float32 (pool 指数回撤曲线)
-//   - tradable_dd.npy        [n_d_bt] float32 (tradable 指数回撤曲线)
+//   position_count.npy 以下: pool/tradable 基准净值仍在内部算 (供 rel_stats
+//   跟踪误差/IR/Beta/Alpha 与"超额"行用), 但不再落盘/展示 (无 pool_nav.npy /
+//   tradable_nav.npy / pool_dd.npy / tradable_dd.npy).
 //   - position_count.npy     [n_d_bt] int32  (持仓股票数)
 //   - position_pct.npy       [n_d_bt] float32 (持仓市值 / 组合市值)
 //   - turnover.npy           [n_d_bt] float32 (双边: 当日买卖额 / 2 / 组合市值;
@@ -103,7 +102,8 @@ struct Result {
 //                                   holdings_names[], watch_names[],
 //                                   fills_names[]}
 //   - report.json            JSON 指标 + 表格 (py 侧零计算):
-//                              indicators{策略/pool指数/tradable指数/超额}
+//                              indicators{策略/超额} (pool/tradable 净值不单
+//                                独展示行, 只作"超额"差值与 rel_stats 算子)
 //                              trade_stats{16 项}
 //                              annual{} / monthly{} 列式期次表
 //                              holdings{} 末日持仓表 (a 索引 → code/简称/行业由

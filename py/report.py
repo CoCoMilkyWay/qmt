@@ -114,9 +114,10 @@ def _html_table(header: list, cols: list, *, compact: bool = False) -> str:
 
 
 # backtest/ 下逐日或逐笔的序列, 除 hover / 曲线 / 明细表外不参与任何计算
+#   pool/tradable 等权净值只在 cpp 内部供 rel_stats/"超额" 用, 不落盘不展示.
 _BT_NPY = (
-    "strategy_nav", "pool_nav", "tradable_nav",
-    "strategy_dd", "pool_dd", "tradable_dd", "position_pct",
+    "strategy_nav",
+    "strategy_dd", "position_pct",
     "holdings_offsets", "holdings_codes", "holdings_weights",
     "watch_offsets", "watch_codes", "watch_scores", "watch_rank_chg",
     "watch_hold_w", "watch_hold_days", "watch_bought",
@@ -245,7 +246,7 @@ _TRADE_METRICS = [
     "指数跟踪误差", "创新高最长天数",
 ]
 
-_IND_ROWS = ["策略", "pool指数", "tradable指数", "超额"]
+_IND_ROWS = ["策略", "超额"]
 _IND_METRICS = ["天数", "年化", "波动率", "夏普", "最大回撤",
                 "信息比率", "Beta", "Alpha", "跟踪误差", "创新高最长天数"]
 
@@ -387,14 +388,6 @@ def view_curve(s) -> go.Figure:
         legendgroup="策略", line=dict(color=_STRAT_COLOR),
         hoverinfo="none",
     ), row=1, col=1)
-    for key, nm, color in (("pool_nav", "pool指数", "steelblue"),
-                           ("tradable_nav", "tradable指数", "seagreen")):
-        v = s[key]
-        fig.add_trace(go.Scatter(
-            x=x, y=v / v[0], mode="lines", name=nm,
-            legendgroup=nm, line=dict(color=color), hoverinfo="skip",
-        ), row=1, col=1)
-
     # 正式调仓日 marker (fills: 因子 pop/补槽 + 退市强平; 不含再平衡加仓)
     d0 = int(s["d_idx"][0])
     i_fill = sorted({int(v) - d0 for v in s["fills_d"]})
@@ -408,14 +401,11 @@ def view_curve(s) -> go.Figure:
             hoverinfo="skip",
         ), row=1, col=1)
 
-    for key, nm, color in (("strategy_dd", "策略", _STRAT_COLOR),
-                           ("pool_dd", "pool指数", "steelblue"),
-                           ("tradable_dd", "tradable指数", "seagreen")):
-        fig.add_trace(go.Scatter(
-            x=x, y=s[key], mode="lines", name=nm,
-            legendgroup=nm, showlegend=False,
-            line=dict(color=color), fill="tozeroy", hoverinfo="skip",
-        ), row=2, col=1)
+    fig.add_trace(go.Scatter(
+        x=x, y=s["strategy_dd"], mode="lines", name="策略",
+        legendgroup="策略", showlegend=False,
+        line=dict(color=_STRAT_COLOR), fill="tozeroy", hoverinfo="skip",
+    ), row=2, col=1)
 
     fig.add_trace(go.Scatter(
         x=x, y=s["position_pct"], mode="lines", name="策略",
@@ -599,7 +589,8 @@ def view_trades(s) -> str:
     for i, k in enumerate(order, start=1):
         a = int(s["trades_inst"][k])
         d_o, d_c = int(s["trades_open_d"][k]), int(s["trades_close_d"][k])
-        p_o, p_c = float(s["trades_open_px"][k]), float(s["trades_close_px"][k])
+        p_o, p_c = float(s["trades_open_px"][k]), float(
+            s["trades_close_px"][k])
         seq.append(str(i))
         stock.append(f'{s["trades_close_names"][k]} ({_code6(CODES[a])})')
         ind.append(str(INDUS_A[a]))

@@ -6,6 +6,7 @@
 #include "misc/fs.hpp"
 #include "misc/npy.hpp"
 #include "misc/timer.hpp"
+#include "strategy/registry.hpp" // STRATEGIES / N_STRATEGIES / SF / SF_NAMES / slot
 
 #include <algorithm>
 #include <array>
@@ -336,6 +337,22 @@ void dump_tensor(const Axes &axes, const Tensor &T) {
     const std::vector<float> &mat = T.mats[f];
     assert(mat.size() == n_a * n_d);
     misc::write_npy_f4(out_dir / (std::string(ALL_NODES[f]->name) + ".npy"), mat, shape);
+  }
+
+  // 策略列 strat_mats: 每策略固定 5 列 (pool_b/pool/tradable/score/rank), 落到
+  //   output/tensor/<策略名>/<列名>.npy 子目录, 供 py/app/mine.py 等按策略读取.
+  //   pool / tradable 属前端展示口径, 不导出; 只导出 pool_b / score / rank.
+  for (int s = 0; s < strategy::N_STRATEGIES; ++s) {
+    const fs::path sdir = out_dir / std::string(strategy::STRATEGIES[static_cast<std::size_t>(s)]->name);
+    fs::create_directories(sdir);
+    for (int c = 0; c < strategy::SF_COUNT; ++c) {
+      const auto col = static_cast<strategy::SF>(c);
+      if (col == strategy::SF::pool || col == strategy::SF::tradable) continue;
+      int slot = strategy::slot(s, col);
+      const std::vector<float> &mat = T.strat_mats[static_cast<std::size_t>(slot)];
+      assert(mat.size() == n_a * n_d);
+      misc::write_npy_f4(sdir / (std::string(strategy::SF_NAMES[c]) + ".npy"), mat, shape);
+    }
   }
 }
 

@@ -754,11 +754,9 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
 
   wi(out / "dates.npy", dates_out);
   wf(out / "strategy_nav.npy", strat_nav);
-  wf(out / "pool_nav.npy", pool_nav);
-  wf(out / "tradable_nav.npy", tradable_nav);
   wf(out / "strategy_dd.npy", dd_s);
-  wf(out / "pool_dd.npy", dd_p);
-  wf(out / "tradable_dd.npy", dd_t);
+  // pool_nav/tradable_nav/pool_dd/tradable_dd 不再落盘 (纯展示用途已删,
+  //   计算本身保留供下方 rel_stats / "超额" 行使用).
   wi(out / "position_count.npy", pos_count);
   wf(out / "position_pct.npy", pos_pct);
   wf(out / "turnover.npy", turnover);
@@ -843,8 +841,7 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
       report::add_f4(doc, o, "Alpha", rel.alpha);
       report::add_f4(doc, o, "跟踪误差", rel.tracking_error);
     }
-    add_nav_stats(doc, ind, "pool指数", st_p);
-    add_nav_stats(doc, ind, "tradable指数", st_t);
+    // pool指数/tradable指数 不再单独展示行 (仅供下方"超额"差值与 rel_stats 用).
     {
       yyjson_mut_val *o = report::add_obj(doc, ind, "超额");
       report::add_f4(doc, o, "年化", st_s.ann_return - st_p.ann_return);

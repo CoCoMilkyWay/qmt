@@ -9,6 +9,7 @@
 # 用法: python3 test/compare.py [factor ...]   (默认全部; --list 看清单; -j N 进程数)
 import argparse
 import json
+import multiprocessing as mp
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -36,7 +37,8 @@ TABLES = {
     ),
     "shares": (
         "cn_stock_shares",
-        ["date", "instrument", "total_shares", "a_float_shares", "total_float_shares"],
+        ["date", "instrument", "total_shares",
+            "a_float_shares", "total_float_shares"],
     ),
     "limit": (
         "cn_stock_limit_price",
@@ -171,7 +173,12 @@ def months() -> list[str]:
     return sorted(m for m in os.listdir(DATA) if len(m) == 7 and m[4] == "-")
 
 
+_TABLE_MEM = {}  # 进程内表缓存; main 里预热后, fork worker 经 COW 只读共享, 不再各自 re-read feather
+
+
 def load(key: str) -> pd.DataFrame:
+    if key in _TABLE_MEM:
+        return _TABLE_MEM[key]
     os.makedirs(CACHE, exist_ok=True)
     path = os.path.join(CACHE, key + ".feather")
     name, cols = TABLES[key]
@@ -179,6 +186,7 @@ def load(key: str) -> pd.DataFrame:
         df = pd.read_feather(path)
         # TABLES 加列后旧缓存会缺列, 静默用旧 schema 会让 worker 报假结果 → 重建
         if cols is None or set(cols).issubset(df.columns):
+            _TABLE_MEM[key] = df
             return df
     parts = []
 
@@ -209,6 +217,7 @@ def load(key: str) -> pd.DataFrame:
     tmp = path + ".tmp"
     df.to_feather(tmp)
     os.replace(tmp, path)
+    _TABLE_MEM[key] = df
     return df
 
 
@@ -247,8 +256,10 @@ def load_ctx():
     # P = T 的上一交易日, P2 = 上上交易日
     uts = np.sort(csv["T"].unique())
     idx = np.searchsorted(tdays, uts, side="left")
-    pmap = {int(t): (int(tdays[i - 1]) if i >= 1 else 0) for t, i in zip(uts, idx)}
-    p2map = {int(t): (int(tdays[i - 2]) if i >= 2 else 0) for t, i in zip(uts, idx)}
+    pmap = {int(t): (int(tdays[i - 1]) if i >= 1 else 0)
+            for t, i in zip(uts, idx)}
+    p2map = {int(t): (int(tdays[i - 2]) if i >= 2 else 0)
+             for t, i in zip(uts, idx)}
     csv["P"] = csv["T"].map(pmap).astype("int32")
     csv["P2"] = csv["T"].map(p2map).astype("int32")
     return csv, tdays
@@ -271,7 +282,7 @@ def numeric_report(name, csv, ours, theirs, atol, note=""):
     loose = both & ((d <= atol) | (rel <= 1e-2))
     lines = [
         f"n={len(m)} nodata={nodata.sum()} ({nodata.mean():.2%})",
-        f"strict(±{atol}或0.05%)={strict.sum()/max(both.sum(),1):.4%}  loose(1%)={loose.sum()/max(both.sum(),1):.4%}  "
+        f"strict(±{atol}或0.05%)={strict.sum()/max(both.sum(), 1):.4%}  loose(1%)={loose.sum()/max(both.sum(), 1):.4%}  "
         f"median_rel={rel[both].median():.2e}",
     ]
     bad = m[both & ~loose].copy()
@@ -286,7 +297,8 @@ def numeric_report(name, csv, ours, theirs, atol, note=""):
         if len(worst):
             lines.append(
                 "按年 loose 匹配率(<99.9%的年): "
-                + "  ".join(f"{y}:{r['mean']:.2%}" for y, r in worst.iterrows())
+                + "  ".join(f"{y}:{r['mean']:.2%}" for y,
+                            r in worst.iterrows())
             )
         top = bad.assign(rel=rel[bad.index]).nlargest(5, "rel")
         for _, r in top.iterrows():
@@ -294,7 +306,8 @@ def numeric_report(name, csv, ours, theirs, atol, note=""):
                 f"  例 {r['T']} {r['inst']} ours={r['ours']:.6g} theirs={r['theirs']:.6g}"
             )
         os.makedirs(OUT, exist_ok=True)
-        bad.head(5000).to_csv(os.path.join(OUT, f"{name}_mismatch.csv"), index=False)
+        bad.head(5000).to_csv(os.path.join(
+            OUT, f"{name}_mismatch.csv"), index=False)
     if note:
         lines.append(note)
     return {
@@ -330,7 +343,8 @@ def binary_report(name, csv, ours, theirs, note=""):
                 f"  例 {r['T']} {r['inst']} ours={r['ours']} theirs={r['theirs']}"
             )
         os.makedirs(OUT, exist_ok=True)
-        bad.head(5000).to_csv(os.path.join(OUT, f"{name}_mismatch.csv"), index=False)
+        bad.head(5000).to_csv(os.path.join(
+            OUT, f"{name}_mismatch.csv"), index=False)
     if note:
         lines.append(note)
     return {"factor": name, "rate": agree.mean(), "loose": agree.mean(), "lines": lines}
@@ -341,7 +355,8 @@ def grid_at(csv, table, col, on="P", ffill=False):
     t = load(table)
     if not ffill:
         m = csv[[on, "inst"]].merge(
-            t.rename(columns={"date": on, "instrument": "inst"})[[on, "inst", col]],
+            t.rename(columns={"date": on, "instrument": "inst"})[
+                [on, "inst", col]],
             on=[on, "inst"],
             how="left",
         )
@@ -349,7 +364,8 @@ def grid_at(csv, table, col, on="P", ffill=False):
     left = csv[[on, "inst"]].copy()
     left["k"] = left[on].astype("int64")
     left = left.sort_values("k", kind="stable").reset_index()
-    right = t.rename(columns={"instrument": "inst"})[["date", "inst", col]].copy()
+    right = t.rename(columns={"instrument": "inst"})[
+        ["date", "inst", col]].copy()
     right["k"] = right["date"].astype("int64")
     right = right.sort_values("k", kind="stable")
     out = pd.merge_asof(left, right[["k", "inst", col]], on="k", by="inst")
@@ -474,7 +490,8 @@ def _corr_report(name, csv, ours, theirs):
     nodata = m["ours"].isna() & m["theirs"].notna()
     both = m.dropna(subset=["ours", "theirs"])
     corr = both["ours"].corr(both["theirs"]) if len(both) > 2 else 0.0
-    rcorr = both["ours"].rank().corr(both["theirs"].rank()) if len(both) > 2 else 0.0
+    rcorr = both["ours"].rank().corr(
+        both["theirs"].rank()) if len(both) > 2 else 0.0
     so = both["ours"].std()
     st = both["theirs"].std()
     scale = so / st if st and st > 0 else float("nan")
@@ -507,7 +524,8 @@ def _full_frames(csv):
     indc = load("indcomp")
     uts = np.sort(csv["T"].unique())
     tdays = np.sort(load("tdays")["date"].unique())
-    pmap = {int(t): int(tdays[np.searchsorted(tdays, t, "left") - 1]) for t in uts}
+    pmap = {int(t): int(tdays[np.searchsorted(
+        tdays, t, "left") - 1]) for t in uts}
     bar = bar.rename(columns={"instrument": "inst"})
     sh = sh.rename(columns={"instrument": "inst"})
     mc_src = bar.merge(sh, on=["date", "inst"], how="inner")
@@ -519,7 +537,8 @@ def _full_frames(csv):
     indc = indc.drop_duplicates(["instrument", "date"], keep="last")
     ind_parts = []
     for inst, g in indc.groupby("instrument", sort=False):
-        g = g.set_index("date")["industry_level1_name"].reindex(uts, method="ffill")
+        g = g.set_index("date")["industry_level1_name"].reindex(
+            uts, method="ffill")
         g = g.rename_axis("T").reset_index()
         g["instrument"] = inst
         ind_parts.append(g[["instrument", "T", "industry_level1_name"]])
@@ -553,9 +572,11 @@ def _pit_panel(df, csv, col):
         g = g.set_index("date")["active"].reindex(uts, method="ffill")
         g = g.rename_axis("T").reset_index()
         g["instrument"] = inst
-        parts.append(g[["instrument", "T", "active"]].rename(columns={"active": col}))
+        parts.append(g[["instrument", "T", "active"]
+                       ].rename(columns={"active": col}))
     long = pd.concat(parts, ignore_index=True)
-    p = {int(T): sub.set_index("instrument")[col] for T, sub in long.groupby("T")}
+    p = {int(T): sub.set_index("instrument")[col]
+         for T, sub in long.groupby("T")}
     return p
 
 
@@ -697,7 +718,8 @@ def _dy_panels(csv):
         s = csum[i] - csum[i0]
         parts.append(pd.DataFrame({"instrument": inst, "T": uts, "dy": s}))
     long = pd.concat(parts, ignore_index=True)
-    p = {int(T): sub.set_index("instrument")["dy"] for T, sub in long.groupby("T")}
+    p = {int(T): sub.set_index("instrument")["dy"]
+         for T, sub in long.groupby("T")}
     _DY_CACHE[k] = p
     return p
 
@@ -981,7 +1003,8 @@ def f_dy(csv, tdays):
             g["publish_date"].astype(str), format="%Y%m%d", errors="coerce"
         ).values.astype("datetime64[D]")
         w = (ad <= td) & (ad > td - np.timedelta64(365, "D"))
-        res[i] = (g["cash_before_tax"].values[w] * g["total_shares"].values[w]).sum()
+        res[i] = (g["cash_before_tax"].values[w] *
+                  g["total_shares"].values[w]).sum()
     ours = pd.Series(res, index=csv.index) / mc
     note = "口径=Σ(税前每股×公告日股本, 预案公告∈(T-365,T])/当前总市值; 残差疑似果仁用实施公告日(缺此字段)"
     return numeric_report("dy", csv, ours, csv["股息率TTM"], atol=0.00011, note=note)
@@ -997,7 +1020,8 @@ def _industry_got(csv, version, level=1):
         & (chg["industry_level"] == level)
         & (chg["change_flag"] == 1)
     ]
-    chg = chg.rename(columns={"industry_name": col})[["date", "instrument", col]]
+    chg = chg.rename(columns={"industry_name": col})[
+        ["date", "instrument", col]]
     ev = pd.concat([comp, chg], ignore_index=True).sort_values(
         ["instrument", "date"], kind="stable"
     )
@@ -1028,7 +1052,8 @@ def f_industry(csv, tdays):
     worst = byy[byy < 0.999]
     if len(worst):
         lines.append(
-            "按年(<99.9%): " + "  ".join(f"{y}:{v:.2%}" for y, v in worst.items())
+            "按年(<99.9%): " +
+            "  ".join(f"{y}:{v:.2%}" for y, v in worst.items())
         )
     bad = csv[both & ~ok].assign(ours=got[both & ~ok])
     if len(bad):
@@ -1132,7 +1157,8 @@ def f_g9_fin(csv, tdays):
     ].values
     kf_neg = np.isfinite(np_ttm - nrv) & (np_ttm - nrv < 0)
 
-    rev_ttm = _ttm_latest(csv_i, "total_operating_revenue_ttm", positive=True).values
+    rev_ttm = _ttm_latest(
+        csv_i, "total_operating_revenue_ttm", positive=True).values
     ann2 = ann.sort_values(["instrument", "date"], kind="stable").copy()
     ann2["rdm"] = ann2.groupby("instrument")["report_date"].cummax()
     ev = ann2[ann2["report_date"] == ann2["rdm"]]
@@ -1141,7 +1167,8 @@ def f_g9_fin(csv, tdays):
         ev[["date", "instrument", "total_operating_revenue"]],
         ["total_operating_revenue"],
     )
-    rev = np.where(np.isfinite(rev_ttm), rev_ttm, va["total_operating_revenue"].values)
+    rev = np.where(np.isfinite(rev_ttm), rev_ttm,
+                   va["total_operating_revenue"].values)
     thr = np.where(csv_i["inst"].str.startswith(("30", "68")), 1e8, 3e8)
     ours = ((pred | (anyfc & kf_neg)) & (rev < thr)).astype(float)
     return binary_report(
@@ -1168,7 +1195,8 @@ def _pivot_csv_insts(csv, tdays, table, col):
     insts = csv["inst"].unique()
     t = t[t["instrument"].isin(set(insts))]
     return (
-        t.pivot_table(index="date", columns="instrument", values=col, aggfunc="last")
+        t.pivot_table(index="date", columns="instrument",
+                      values=col, aggfunc="last")
         .reindex(tdays)
         .ffill()
     )
@@ -1257,16 +1285,19 @@ def f_pool(csv, tdays, min_list_days=0):
         if u is not None:
             df = df.join(u)
             df = df[
-                ~((df["close"] >= df["upper_limit"] - 1e-4) & (df["upper_limit"] > 0))
+                ~((df["close"] >= df["upper_limit"] - 1e-4)
+                  & (df["upper_limit"] > 0))
             ]
             df = df[
-                ~((df["close"] <= df["lower_limit"] + 1e-4) & (df["lower_limit"] > 0))
+                ~((df["close"] <= df["lower_limit"] + 1e-4)
+                  & (df["lower_limit"] > 0))
             ]
         if stt is not None:
             df = df.join(stt[["suspended", "is_risk_warning"]])
             df = df[df["suspended"].fillna(0) == 0]
             df = df[df["is_risk_warning"].fillna(0) != 1]
-        df = df.drop(index=[i for i in stuck if i in df.index], errors="ignore")
+        df = df.drop(
+            index=[i for i in stuck if i in df.index], errors="ignore")
         if min_list_days > 0:
             la = np.array([days_since(i, T, list_d) for i in df.index])
             df = df[np.isfinite(la) & (la >= min_list_days)]
@@ -1311,7 +1342,8 @@ def f_pool(csv, tdays, min_list_days=0):
     )
     lines.append("按年重合率: " + "  ".join(f"{y}:{v:.2%}" for y, v in byy.items()))
     ddf = pd.DataFrame(
-        diffs, columns=["T", "which", "inst", "rank_in_ours", "list_age", "delist_age"]
+        diffs, columns=["T", "which", "inst",
+                        "rank_in_ours", "list_age", "delist_age"]
     )
     if len(ddf):
         os.makedirs(OUT, exist_ok=True)
@@ -1454,9 +1486,8 @@ def _cpp_load_axes():
 
 def _cpp_load_mat(name):
     p = os.path.join(TENSOR, name + ".npy")
-    assert os.path.exists(
-        p
-    ), f"缺 {p}; 需 config.hpp 里 TENSOR_DUMP_ENABLE=true 后重跑 python run.py"
+    if not os.path.exists(p):
+        return None  # 节点不在当前计算图 (无策略引用) → 无 dump; 调用方判 None 跳过
     return np.load(p, mmap_mode="r")  # (n_a, n_d) float32, a-major
 
 
@@ -1506,6 +1537,9 @@ def _cpp_run_one(feature, col, csv, d_of, a_of):
     div, kind, atol, rtol = _CPP_SPEC[feature]
     theirs = pd.to_numeric(csv[col], errors="coerce").values
     mat = _cpp_load_mat(feature)
+    if mat is None:
+        return {"factor": feature, "rate": float("nan"), "loose": float("nan"),
+                "lines": ["— (节点不在当前计算图, 无 dump)"]}
     src = (
         _cpp_load_mat(_CPP_FILLED_FROM[feature])
         if feature in _CPP_FILLED_FROM
@@ -1585,6 +1619,14 @@ FACTORS = {
 }
 
 
+def _prewarm(csv):
+    """main 一次性建好通用且向量化快的面板; fork worker 经 COW 继承, 不再各自重建.
+    慢的纯 python per-instrument 状态机 (_roe_roa_panels/_roe_roa_ours) 留给 worker
+    并行跑 (roe/roa/中性ROE/中性ROA 4 个 worker 并行, 不在此串行阻塞)."""
+    _csv_groups(csv)  # _GRP_CACHE (trivial)
+    _full_frames(csv)  # _FRAMES_CACHE (向量化, 所有中性因子共用, 共享避免 7× 重建)
+
+
 def run_one(name):
     """worker 进程入口: 跑 Python 参考, 再跑 C++ 张量, 返 list[report]."""
     csv, tdays = load_ctx()
@@ -1605,7 +1647,7 @@ def run_one(name):
             }
         )
 
-    if cpp is not None:
+    if cpp[0] is not None:  # cpp=(feat,col) 恒为元组; feat=None 表 Python-only, 无 C++ 张量
         feat, col = cpp
         try:
             d_of, a_of = _cpp_load_axes()
@@ -1639,20 +1681,29 @@ def main():
     need = set(TABLES) - {"valuation"}
     with ThreadPoolExecutor(8) as ex:
         list(ex.map(load, need))
+    # 派生面板在 main 一次性建好; ProcessPool 用 fork → worker 经 COW 只读继承,
+    # 不再各自重建 (否则 N worker × 全表内存 爆 swap, CPU 卡单核).
+    csv, _tdays = load_ctx()
+    _prewarm(csv)
     results = []
-    with ProcessPoolExecutor(args.j) as ex:
+    with ProcessPoolExecutor(args.j, mp_context=mp.get_context("fork")) as ex:
         for rs in ex.map(run_one, args.factors):
             results.extend(rs)
             for r in rs:
-                print(
-                    f"\n=== {r['factor']}  strict={r['rate']:.4%}  loose={r['loose']:.4%}"
-                )
+                rate = r["rate"]
+                rs_ = f"{rate:.4%}" if np.isfinite(rate) else "   —"
+                lo_ = f"{r['loose']:.4%}" if np.isfinite(
+                    r["loose"]) else "   —"
+                print(f"\n=== {r['factor']}  strict={rs_}  loose={lo_}")
                 for ln in r["lines"]:
                     print("  " + ln)
                 sys.stdout.flush()
     print("\n" + "=" * 60)
-    for r in sorted(results, key=lambda x: -x["rate"]):
-        print(f"{r['factor']:<24} strict={r['rate']:>9.4%}  loose={r['loose']:>9.4%}")
+    for r in sorted(results, key=lambda x: (-x["rate"] if np.isfinite(x["rate"]) else 1.0)):
+        rate = r["rate"]
+        rs_ = f"{rate:>9.4%}" if np.isfinite(rate) else "       —"
+        lo_ = f"{r['loose']:>9.4%}" if np.isfinite(r["loose"]) else "       —"
+        print(f"{r['factor']:<24} strict={rs_}  loose={lo_}")
 
 
 if __name__ == "__main__":

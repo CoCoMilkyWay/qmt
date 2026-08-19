@@ -95,7 +95,7 @@ Fitness 定义 (阶段 1): 周期内分层单调度的跨周期均值 Y ∈ [0, 
         + output/meta.json (D 轴日期 / A 轴 codes / factor 名单)
     - 张量已是 build-time PIT (row D 只含 T 当日可见信息), 挖掘端零时间偏移;
         T+1 收益 = daily_return[:, d+1] (决策用 row d, 持有 d→d+1)
-    - 分档母集 = POOL_FEATURE ("pool" 排名母集 / "tradable" 策略选股母集)
+    - 分档母集 = STRATEGY 策略的 rank>0 (= tradable, 已含 pool_b/pool/filters)
     - 搜索阶段 (fitness Y 评估): 每日 score 升序等比切分 G 档, 每档等权日收益,
         不做涨跌停粘性、不扣换手费. 这是"因子原始分层能力"指标.
     - Top-N 复评阶段 (粘性+扣费, 对齐 cpp backtest 四条限制):
@@ -166,8 +166,12 @@ TRADING_DAYS = 252    # 年化因子 (Sharpe / 年化收益)
 # NAV kernel 跳过 (持仓状态冻结, nav 不变, 无交易成本).
 SKIP_MONTHS = frozenset({})
 
-# 分档母集: "pool" = 排名母集 (与 factor pct_rank 口径一致) | "tradable" = 策略选股母集
-POOL_FEATURE = "tradable"
+# 分档母集: STRATEGY 策略的 rank>0 (= tradable ⊆ pool ⊆ pool_b, 已排 susp/退市/
+#   filters). rank 是唯一按策略分目录落盘的策略列 (见
+#   cpp/src/feature/describe.cpp::dump_tensor, output/tensor/<策略名>/rank.npy);
+#   改 STRATEGY 即切到对应策略的母集 (meta.json strategies 列出全部可用名),
+#   与 cpp 侧改策略数量/名字解耦, 不需同步改 cpp.
+STRATEGY = "低价小市值"  # 基线策略 (= 拆分前 small_cap, 行为不变)
 
 # 搜索权重的 factor 特征 (张量 F 枚举 CS factor 段, 名单见 meta.json factor_names;
 # 顺序即权重维度顺序). 挖到的权重可直接填回 strategy/def/<name>.hpp 的 weights.
@@ -184,7 +188,6 @@ SEARCH_FACTOR_NAMES = [
 
 assert len(SEARCH_FACTOR_NAMES) >= 1
 assert len(SEARCH_FACTOR_NAMES) == len(set(SEARCH_FACTOR_NAMES))
-assert POOL_FEATURE in ("pool", "tradable")
 assert 2 <= PORTFOLIO_N <= TOP_N
 assert math.comb(TOP_N, PORTFOLIO_N) <= 2e8, \
     f"C({TOP_N},{PORTFOLIO_N})={math.comb(TOP_N, PORTFOLIO_N):.2e} 组合穷举过大, 调小 TOP_N 或 PORTFOLIO_N"
@@ -202,7 +205,7 @@ assert FITNESS_PERIOD in MIN_PERIOD_DAYS, \
 def load_data() -> dict:
     """
     mmap 直读 output/tensor/*.npy (每 feature 一个 (n_a, n_d) float32, a-major)
-    + output/meta.json, 在 [START_DATE, END_DATE] 窗口内按 POOL_FEATURE 母集
+    + output/meta.json, 在 [START_DATE, END_DATE] 窗口内按 STRATEGY 的 rank>0 母集
     gather 出单 CSR 紧凑布局 (日主序):
         ranks  (N, F)  搜索因子截面 pct_rank (张量原值, 全 finite)
         rets   (N,)    T+1 收益 = daily_return[:, d+1]
@@ -219,6 +222,9 @@ def load_data() -> dict:
             f"搜索因子 {_n} 不在张量 factor 名单 {meta['factor_names']} 中"
     assert TENSOR_DIR.is_dir(), \
         f"{TENSOR_DIR} 不存在 — 置 cpp config::TENSOR_DUMP_ENABLE = true 后重新 build"
+    strat_names = [s["name"] for s in meta["strategies"]]
+    assert STRATEGY in strat_names, \
+        f"STRATEGY={STRATEGY!r} 不在 meta.json strategies {strat_names} 中"
 
     def tensor(name: str) -> np.ndarray:
         path = TENSOR_DIR / f"{name}.npy"
@@ -226,6 +232,14 @@ def load_data() -> dict:
         arr = np.load(path, mmap_mode="r")
         assert arr.shape == (n_a, n_d) and arr.dtype == np.float32, \
             f"{name}: shape={arr.shape} dtype={arr.dtype}, 期望 ({n_a}, {n_d}) float32"
+        return arr
+
+    def strat_tensor(name: str) -> np.ndarray:
+        path = TENSOR_DIR / STRATEGY / f"{name}.npy"
+        assert path.exists(), f"缺策略张量 {path}"
+        arr = np.load(path, mmap_mode="r")
+        assert arr.shape == (n_a, n_d) and arr.dtype == np.float32, \
+            f"{STRATEGY}/{name}: shape={arr.shape} dtype={arr.dtype}, 期望 ({n_a}, {n_d}) float32"
         return arr
 
     # 窗口 [d_lo, d_hi); 右端至多 n_d-1 (末日无 T+1 收益)
@@ -241,14 +255,14 @@ def load_data() -> dict:
     print(f"张量: {TENSOR_DIR} (n_a={n_a}, n_d={n_d}), "
           f"窗口 {dates_sel[0]}..{dates_sel[-1]} ({D} 日)")
 
-    # 母集 ∧ finite(T+1 收益) → 日主序 CSR
+    # 母集 (STRATEGY 的 rank>0, = tradable) ∧ finite(T+1 收益) → 日主序 CSR
     fwd = np.ascontiguousarray(tensor("daily_return")[
                                :, d_lo + 1:d_hi + 1])  # (n_a, D)
-    member = (np.asarray(tensor(POOL_FEATURE)[
+    member = (np.asarray(strat_tensor("rank")[
               :, d_lo:d_hi]) > 0.5) & np.isfinite(fwd)
     day_of_row, a_of_row = np.nonzero(member.T)  # 按 d 升序, 段内按 a 升序
     N = len(a_of_row)
-    assert N > 0, "母集为空 — 检查 POOL_FEATURE 与窗口"
+    assert N > 0, f"母集为空 — 检查 STRATEGY={STRATEGY!r} 与窗口"
     off = np.zeros(D + 1, dtype=np.int32)
     off[1:] = np.cumsum(np.bincount(day_of_row, minlength=D)).astype(np.int32)
     d_abs = d_lo + day_of_row
@@ -256,7 +270,8 @@ def load_data() -> dict:
     flat_rets = fwd[a_of_row, day_of_row]
     flat_insts = a_of_row.astype(np.int32)
 
-    # status: susp 最后写 (停牌语义覆盖涨跌停; POOL_FEATURE="pool" 时 pool_b 已排 susp)
+    # status: susp 最后写 (停牌语义覆盖涨跌停; rank>0 母集经 pool_b 已排 susp, 此处仍
+    #   显式覆盖以防万一)
     flat_status = np.full(N, 2, dtype=np.int8)
     flat_status[tensor("limit_dn")[a_of_row, d_abs] > 0.5] = 1
     flat_status[tensor("limit_up")[a_of_row, d_abs] > 0.5] = 3
@@ -316,7 +331,7 @@ def load_data() -> dict:
     }
     n_active = int(active_day.sum())
     skip_disp = sorted(SKIP_MONTHS) if SKIP_MONTHS else "无"
-    print(f"  母集={POOL_FEATURE}, 样本: {N}, 日均 {N / D:.1f}, "
+    print(f"  母集={STRATEGY}/rank>0, 样本: {N}, 日均 {N / D:.1f}, "
           f"年数: {len(unique_years)} ({unique_years[0]}..{unique_years[-1]}), "
           f"周期=\"{FITNESS_PERIOD}\" 桶数: {n_periods}")
     print(
