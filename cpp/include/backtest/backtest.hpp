@@ -37,6 +37,10 @@ struct Result {
   double analysis_seconds = 0.0;        // analysis::run 计时, main 循环里回填
   int d_lo = 0;                         // 窗口左端 (axes D 全局索引)
   std::vector<float> strategy_nav;      // [n_d_bt]
+  std::vector<float> pool_nav;          // [n_d_bt] 该策略自己的 pool 等权影子指数
+                                        //   (与 strategy_nav 同窗口); aggregate
+                                        //   层拿它当该策略专属的"基准" (见
+                                        //   report/aggregate.hpp).
   std::vector<std::int32_t> hold_off;   // [n_d_bt + 1] CSR offset
   std::vector<std::int32_t> hold_codes; // [total] a 索引
   std::vector<float> hold_weights;      // [total] 占组合市值

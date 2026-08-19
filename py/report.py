@@ -23,7 +23,7 @@
            | 分层累计[单] | 因子相关性[单]
 
 数据来源 (全部 cpp 写出):
-    output/meta.json                       轴 / per-a 简称与行业 / 策略配置 / benchmark
+    output/meta.json                       轴 / per-a 简称与行业 / 策略配置
     output/aggregate/{*.npy, report.json}  跨策略聚合
     output/strategy/<name>/backtest/{*.npy, labels.json, report.json}
     output/strategy/<name>/analysis/{*.npy, report.json}
@@ -54,8 +54,6 @@ STRATS = META["strategies"]
 N_S = len(STRATS)
 assert N_S > 0, "meta.json strategies 为空"
 S_NAMES = [s["name"] for s in STRATS]
-BENCH = META["benchmark"]  # 基准策略名; None = 未设 (聚合视图不出参照线/超额)
-assert BENCH is None or BENCH in S_NAMES, "meta.json benchmark 不在 strategies 内"
 
 DATES_ALL = np.array(META["dates"])
 CODES = np.array(META["codes"])
@@ -168,7 +166,6 @@ def _load_strat(i: int) -> dict:
 def _load_ag() -> dict:
     rep = json.loads((AG_DIR / "report.json").read_text(encoding="utf-8"))
     assert rep["strategies"] == S_NAMES, "aggregate 与 meta 的策略顺序不一致"
-    assert rep["benchmark"] == BENCH, "aggregate 与 meta 的 benchmark 不一致"
     nav = np.load(AG_DIR / "strategy_nav.npy")
     assert nav.shape[0] == N_S, "aggregate/strategy_nav 首维应为策略数"
     return {
@@ -252,13 +249,12 @@ _IND_METRICS = ["天数", "年化", "波动率", "夏普", "最大回撤",
 
 
 def view_ag_metrics(ag) -> str:
-    """跨策略指标: 行 = 各策略 + 等权组合, 相对列仅 benchmark 存在时出现."""
+    """跨策略指标: 行 = 各策略 + 等权组合; 相对列 = 各自相对自己 pool 的指标."""
     met = ag["rep"]["metrics"]
     labels = S_NAMES + [COMBO]
     rows = [met[k] for k in labels]
-    cols = _AG_METRICS + (_AG_REL if BENCH is not None else [])
-    corner = f"策略 (基准 {BENCH})" if BENCH is not None else "策略"
-    return _metric_table(labels, rows, cols, corner=corner)
+    cols = _AG_METRICS + _AG_REL
+    return _metric_table(labels, rows, cols, corner="策略 (基准=自身 pool)")
 
 
 def view_indicators(s) -> str:
@@ -342,7 +338,7 @@ def _end_label(x, y, name: str, color: str) -> go.Scatter:
 
 
 def view_ag_nav(ag) -> go.Figure:
-    """各策略净值叠加 + 等权组合; benchmark 用虚线加粗以示参照.
+    """各策略净值叠加 + 等权组合.
 
     净值已由 cpp 归一到公共窗口首日 = 1.0 ⇒ 起点天然对齐, 前端零处理.
     """
@@ -350,12 +346,10 @@ def view_ag_nav(ag) -> go.Figure:
     colors = px_colors(N_S)
     fig = go.Figure()
     for i, nm in enumerate(S_NAMES):
-        is_bench = nm == BENCH
         fig.add_trace(go.Scatter(
             x=x, y=ag["strategy_nav"][i], mode="lines",
             name=nm, legendgroup=nm, showlegend=False, hoverinfo="skip",
-            line=dict(color=colors[i], width=2.5 if is_bench else 1.5,
-                      dash="dash" if is_bench else "solid")))
+            line=dict(color=colors[i], width=1.5)))
         fig.add_trace(_end_label(x, ag["strategy_nav"][i], nm, colors[i]))
     fig.add_trace(go.Scatter(
         x=x, y=ag["combo_nav"], mode="lines",
@@ -652,8 +646,7 @@ def view_ag_score_ic(strats) -> go.Figure:
         fig.add_trace(go.Scatter(
             x=s["x"], y=y, mode="lines", name=s["name"],
             legendgroup=s["name"], showlegend=False, hoverinfo="skip",
-            line=dict(color=colors[i],
-                      width=2.5 if s["name"] == BENCH else 1.5)))
+            line=dict(color=colors[i], width=1.5)))
         fig.add_trace(_end_label(s["x"], y, s["name"], colors[i]))
     fig.update_yaxes(title_text="累积IC", fixedrange=True)
     fig.update_layout(
@@ -790,7 +783,6 @@ h2 { font-size: 15px; margin: 0 0 10px; color: #444; }
              white-space: nowrap; }
 .strat-btn.active { background: crimson; color: #fff; border-color: crimson; }
 .strat-btn:hover:not(.active) { background: #fbeaea; }
-.strat-btn .bench { font-size: 11px; opacity: .7; }
 .tag-section { margin-top: 32px; padding: 16px; background: #fff;
                border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08);
                box-sizing: border-box; }
@@ -1268,8 +1260,7 @@ def _run_info() -> str:
         f'数据末日 {_fmt_ymd(DATES_ALL[-1])} · '
         f'A 轴 {len(CODES)} 只 · D 轴 {len(DATES_ALL)} 日 · '
         f'因子 {N_FACTOR} 个 · 策略 {N_S} 个'
-        + (f' (基准 {BENCH})' if BENCH is not None else ' (无基准)')
-        + f' · Tensor {tm["tensor_bytes"] / 1024**3:.2f} GB'
+        f' · Tensor {tm["tensor_bytes"] / 1024**3:.2f} GB'
         f' · 聚合 {tm["aggregate_seconds"]:.2f} 秒'
     )
 
@@ -1279,9 +1270,8 @@ def _strat_bar() -> str:
            '<span class="lbl">策略 (只影响标 · 的视图)</span>']
     for i, nm in enumerate(S_NAMES):
         cls = "strat-btn active" if i == 0 else "strat-btn"
-        tag = ' <span class="bench">基准</span>' if nm == BENCH else ""
         out.append(f'<button class="{cls}" onclick="showStrat({i})">'
-                   f'{html.escape(nm)}{tag}</button>')
+                   f'{html.escape(nm)}</button>')
     out.append('</div>')
     return "".join(out)
 

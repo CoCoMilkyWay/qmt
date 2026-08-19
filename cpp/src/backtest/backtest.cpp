@@ -824,8 +824,8 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
 
     yyjson_mut_val *ind = report::add_obj(doc, root, "indicators");
     {
-      // 策略行额外带相对 pool 指数的 4 个指标 (per-strategy 语义不受
-      // strategy::BENCHMARK 影响, 见 registry.hpp BENCHMARK 顶注).
+      // 策略行额外带相对本策略 pool 指数的 4 个指标 (聚合层的跨策略指标表
+      // 复用同一份 pool_nav, 见 report/aggregate.hpp).
       yyjson_mut_val *o = add_nav_stats(doc, ind, "策略", st_s);
       report::add_f4(doc, o, "信息比率", rel.info_ratio);
       report::add_f4(doc, o, "Beta", rel.beta);
@@ -962,6 +962,7 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
   res.elapsed_seconds = dur.count();
   res.d_lo = bt_d_lo;
   res.strategy_nav = std::move(strat_nav);
+  res.pool_nav = std::move(pool_nav);
   res.hold_off = std::move(hold_off);
   res.hold_codes = std::move(hold_codes);
   res.hold_weights = std::move(hold_weights);

@@ -76,7 +76,6 @@ const char *margin_policy_name(strategy::MarginPolicy p) {
 //     strategies[]   {name, hold_n, exit_ratio, start_date, filters[],
 //                     weights{}, pool{...}, timing{backtest_seconds,
 //                     analysis_seconds}}  ← pool 摘要供策略配置对比表
-//     benchmark      strategy::BENCHMARK 的名字, 未设则 null
 //     config{ic_ma_window, n_quantiles, capital_base, buy_cost, sell_cost}
 //     timing{tensor_bytes, aggregate_seconds}
 //   yyjson + misc::atomic_write_json (与 bigquant / tushare store 对仗).
@@ -146,11 +145,6 @@ void write_meta(const feature::Axes &axes, const feature::Tensor &T,
         doc, tm, "analysis_seconds",
         results[static_cast<std::size_t>(i)].analysis_seconds);
   }
-
-  if (strategy::BENCHMARK != nullptr)
-    report::add_str(doc, root, "benchmark", strategy::BENCHMARK->name);
-  else
-    yyjson_mut_obj_add_null(doc, root, "benchmark");
 
   yyjson_mut_val *cfg = report::add_obj(doc, root, "config");
   yyjson_mut_obj_add_int(doc, cfg, "ic_ma_window",

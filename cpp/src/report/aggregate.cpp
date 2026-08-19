@@ -27,19 +27,25 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// 把某策略的净值截到公共窗口 [d_lo_ag, d_lo_ag + n) 并归一到窗口首日 = 1.0.
-//   归一不改变年化 / 波动 / 夏普 / 回撤 (全是比率型指标), 只让叠加图起点对齐.
-std::vector<float> slice_norm(const backtest::Result &r, int d_lo_ag, int n) {
-  int off = d_lo_ag - r.d_lo;
-  assert(off >= 0 && off + n <= static_cast<int>(r.strategy_nav.size()) &&
-         "aggregate: 公共窗口越出该策略回测窗口");
-  float base = r.strategy_nav[static_cast<std::size_t>(off)];
+// 把某条 [d_lo_series, ...) 起算的净值序列截到公共窗口 [d_lo_ag, d_lo_ag + n)
+//   并归一到窗口首日 = 1.0. 归一不改变年化 / 波动 / 夏普 / 回撤 (全是比率型
+//   指标), 只让叠加图起点对齐 / 让两条序列在同一窗口可比.
+std::vector<float> slice_norm_series(std::span<const float> nav, int d_lo_series,
+                                     int d_lo_ag, int n) {
+  int off = d_lo_ag - d_lo_series;
+  assert(off >= 0 && off + n <= static_cast<int>(nav.size()) &&
+         "aggregate: 公共窗口越出该序列窗口");
+  float base = nav[static_cast<std::size_t>(off)];
   assert(base > 0.0f && "aggregate: 窗口首日净值必须 > 0");
   std::vector<float> out(static_cast<std::size_t>(n));
   for (int i = 0; i < n; ++i)
     out[static_cast<std::size_t>(i)] =
-        r.strategy_nav[static_cast<std::size_t>(off + i)] / base;
+        nav[static_cast<std::size_t>(off + i)] / base;
   return out;
+}
+
+std::vector<float> slice_norm(const backtest::Result &r, int d_lo_ag, int n) {
+  return slice_norm_series(r.strategy_nav, r.d_lo, d_lo_ag, n);
 }
 
 // 某策略在全局 D 索引 d 当日的持仓段 [lo, hi) (索引到 r.hold_codes).
@@ -101,6 +107,16 @@ double aggregate(const feature::Axes &axes,
   for (const backtest::Result &r : results) {
     navs.push_back(slice_norm(r, d_lo, n_d));
     rets.push_back(daily_returns(navs.back()));
+  }
+
+  // ---- 各策略"自己的"基准: pool 等权影子指数, 同窗口切片 + 日收益 ----------
+  //   与 strategy_nav 用同一个 slice_norm (同 d_lo 起算, 首日归一) — 窗口/
+  //   对齐口径完全一致, 只是喂的序列换成 r.pool_nav.
+  std::vector<std::vector<float>> pool_rets;
+  pool_rets.reserve(static_cast<std::size_t>(n_s));
+  for (const backtest::Result &r : results) {
+    std::vector<float> pool_nav_norm = slice_norm_series(r.pool_nav, r.d_lo, d_lo, n_d);
+    pool_rets.push_back(daily_returns(pool_nav_norm));
   }
 
   // 扁平 [n_s, n_d] 落盘
@@ -198,38 +214,29 @@ double aggregate(const feature::Axes &axes,
       names.push_back(spec->name);
     add_sv_arr(doc, root, "strategies", names);
 
-    // 基准 = strategy::BENCHMARK 的日收益 (nullptr ⇒ 不出相对指标)
-    int bench_idx = -1;
-    for (int s = 0; s < n_s; ++s) {
-      if (strategy::STRATEGIES[static_cast<std::size_t>(s)] ==
-          strategy::BENCHMARK)
-        bench_idx = s;
-    }
-    if (bench_idx >= 0) {
-      add_str(doc, root, "benchmark",
-              strategy::STRATEGIES[static_cast<std::size_t>(bench_idx)]->name);
-    } else {
-      yyjson_mut_obj_add_null(doc, root, "benchmark");
-    }
-
+    // 每策略相对**自己的** pool 等权影子指数算信息比率/Beta/Alpha/跟踪误差 —
+    // 不再有单一基准策略, 见 report/aggregate.hpp 顶注.
     yyjson_mut_val *met = add_obj(doc, root, "metrics");
     for (int s = 0; s < n_s; ++s) {
       NavStats st = nav_stats(navs[static_cast<std::size_t>(s)]);
-      RelStats rel;
-      bool has_rel = bench_idx >= 0 && s != bench_idx;
-      if (has_rel)
-        rel = rel_stats(rets[static_cast<std::size_t>(s)],
-                        rets[static_cast<std::size_t>(bench_idx)]);
-      add_nav_stats(doc, met, names[static_cast<std::size_t>(s)], st,
-                    has_rel ? &rel : nullptr);
+      RelStats rel = rel_stats(rets[static_cast<std::size_t>(s)],
+                               pool_rets[static_cast<std::size_t>(s)]);
+      add_nav_stats(doc, met, names[static_cast<std::size_t>(s)], st, &rel);
     }
     {
+      // 等权组合的"自己的 pool" = 各策略 pool 日收益的等权平均, 与 combo_ret
+      // (各策略日收益等权平均) 构造方式对称.
+      std::vector<float> combo_pool_ret(static_cast<std::size_t>(n_d), 0.0f);
+      for (int i = 0; i < n_d; ++i) {
+        double sum = 0.0;
+        for (int s = 0; s < n_s; ++s)
+          sum += pool_rets[static_cast<std::size_t>(s)][static_cast<std::size_t>(i)];
+        combo_pool_ret[static_cast<std::size_t>(i)] =
+            static_cast<float>(sum / static_cast<double>(n_s));
+      }
       NavStats st = nav_stats(combo_nav);
-      RelStats rel;
-      bool has_rel = bench_idx >= 0;
-      if (has_rel)
-        rel = rel_stats(combo_ret, rets[static_cast<std::size_t>(bench_idx)]);
-      add_nav_stats(doc, met, "等权组合", st, has_rel ? &rel : nullptr);
+      RelStats rel = rel_stats(combo_ret, combo_pool_ret);
+      add_nav_stats(doc, met, "等权组合", st, &rel);
     }
 
     // ---- 今日多策略下单台 ------------------------------------------------
