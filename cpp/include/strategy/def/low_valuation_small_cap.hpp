@@ -97,15 +97,10 @@ inline constexpr StrategySpec low_valuation_small_cap{
             //.margin_policy = MarginPolicy::Only,
             // rank_key: 截面 universe 排名 key
             .rank_key = &feature::def::mcap_raw_spec,
-            //.rank_key = &feature::def::fmcap_raw_spec,
-            //.rank_key = &feature::def::close_raw_spec,
             // rank_asc: true=升序取前 N (小市值) / false=降序 (大市值)
             .rank_asc = true,
-            //.rank_asc = false,
             // universe_size: pool = pool_b ∧ rank(rank_key) ≤ universe_size
             .universe_size = 400,
-            //.universe_size = 200,
-            //.universe_size = 800,
         },
     .filters = low_valuation_small_cap_filters,
     .weights = low_valuation_small_cap_weights,

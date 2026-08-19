@@ -13,8 +13,10 @@ namespace {
 fs::path find_git_root() {
   fs::path p = fs::current_path();
   for (;;) {
-    if (fs::exists(p / ".git")) return p;
-    if (p == p.parent_path()) break;
+    if (fs::exists(p / ".git"))
+      return p;
+    if (p == p.parent_path())
+      break;
     p = p.parent_path();
   }
   assert(false && "git root not found (need .git)");
@@ -49,7 +51,9 @@ void atomic_write(const fs::path &path, const char *data, std::size_t len) {
 void atomic_write_json(const fs::path &path, yyjson_mut_doc *doc) {
   assert(doc);
   size_t len = 0;
-  char *json = yyjson_mut_write(doc, YYJSON_WRITE_PRETTY_TWO_SPACES, &len);
+  char *json = yyjson_mut_write(
+      doc, YYJSON_WRITE_PRETTY_TWO_SPACES | YYJSON_WRITE_ALLOW_INF_AND_NAN,
+      &len);
   assert(json);
   atomic_write(path, json, len);
   std::free(json);

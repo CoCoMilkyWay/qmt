@@ -20,7 +20,9 @@ void atomic_write(const std::filesystem::path &path, const char *data,
                   std::size_t len);
 
 // 序列化 yyjson_mut_doc 为 PRETTY_TWO_SPACES + atomic_write; doc 不释放 (caller 负责).
-// 唯一 JSON 落盘点: output/meta.json (数据集本体全走 misc/parquet).
+// 唯一 JSON 落盘点: output/ 下的报告元数据 (数据集本体全走 misc/parquet).
+// ALLOW_INF_AND_NAN: 报告指标里 NaN 是合法值 (样本不足 / 方差为 0), 写成裸 NaN
+//   字面量 — Python json.loads 原生接受, 直接得 float('nan'), 前端无需特判 null.
 void atomic_write_json(const std::filesystem::path &path, yyjson_mut_doc *doc);
 
 } // namespace misc

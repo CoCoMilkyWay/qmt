@@ -103,9 +103,10 @@ include_directories(SYSTEM ${ARROW_INCLUDE})
 # Source Files
 # ============================================================================
 # 完整闭环串到 main.cpp: bigquant::update → tushare::update → feature::build →
-# per-strategy {backtest::run → analysis::run} → write_meta. 输出
-# <git_root>/output/{meta.json, strategy/<name>/{backtest/*.npy + labels.json,
-# analysis/*.npy}}; py/report.py 直读生成报告.
+# per-strategy {backtest::run → analysis::run} → report::aggregate → write_meta.
+# 输出 <git_root>/output/{meta.json, strategy/<name>/{backtest/*.npy +
+# labels.json + report.json, analysis/*.npy + report.json},
+# aggregate/{*.npy, report.json}}; py/report.py 直读生成报告.
 set(SOURCES
     ../../src/main.cpp
     ../../src/misc/date.cpp
@@ -135,6 +136,10 @@ set(SOURCES
     ../../src/strategy/columns.cpp
     ../../src/backtest/backtest.cpp
     ../../src/analysis/analysis.cpp
+    ../../src/report/metrics.cpp
+    ../../src/report/json.cpp
+    ../../src/report/labels.cpp
+    ../../src/report/aggregate.cpp
     ../../include/package/yyjson/yyjson.c
 )
 
@@ -174,6 +179,10 @@ set(HEADERS
     ../../include/strategy/columns.hpp
     ../../include/backtest/backtest.hpp
     ../../include/analysis/analysis.hpp
+    ../../include/report/metrics.hpp
+    ../../include/report/json.hpp
+    ../../include/report/labels.hpp
+    ../../include/report/aggregate.hpp
 )
 
 # feature/def/{basic,factor,filter}/*.hpp 与 strategy/def/*.hpp 是 header-only

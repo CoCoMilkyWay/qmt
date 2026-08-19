@@ -4,6 +4,7 @@
 #include "feature/tensor.hpp"
 #include "strategy/strategy.hpp"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,25 @@ struct NameTimeline {
 
 NameTimeline load_name_timeline(const feature::Axes &);
 
+// per-a 末日简称 (axes.dates.back() 那天生效的那个), 落 meta.json 的 names[].
+//   与 codes[] 同序同长; 全策略共享 ⇒ 报告里任何"a 索引 → 人看的名字"都查这里.
+std::vector<std::string> last_names(const feature::Axes &,
+                                    const feature::StockMeta &,
+                                    const NameTimeline &);
+
+// per-strategy 回测结果 — 跨策略聚合层 (report/aggregate) 的输入.
+//   只带聚合真正要用的三样东西 (净值 / 持仓 CSR / 窗口左端), 让 aggregate 不必
+//   反过来重读自己刚写出的 npy.
+struct Result {
+  double elapsed_seconds = 0.0;
+  double analysis_seconds = 0.0; // analysis::run 计时, main 循环里回填
+  int d_lo = 0;                         // 窗口左端 (axes D 全局索引)
+  std::vector<float> strategy_nav;      // [n_d_bt]
+  std::vector<std::int32_t> hold_off;   // [n_d_bt + 1] CSR offset
+  std::vector<std::int32_t> hold_codes; // [total] a 索引
+  std::vector<float> hold_weights;      // [total] 占组合市值
+};
+
 // Per-D 走 D 的回测器 (单线程, 状态强 causal). Per-strategy: spec 提供窗口
 // (bt_start_date, 右端点固定 axes 最新日) / hold_n / exit_ratio; s_idx 是
 // strategy::STRATEGIES[] 下标 (定位 Tensor 策略块).
@@ -38,10 +58,14 @@ NameTimeline load_name_timeline(const feature::Axes &);
 // exit-N·ratio / watch-2N 与实盘选股读同一列, "回测 = 实盘" 收敛到单一入口.
 //
 // 输出 (写到 <git_root>/output/strategy/<name>/backtest/):
+//   序列 / 明细走 npy, 指标 / 表格走 report.json, 标的名字符串走 labels.json.
 //   - dates.npy              [n_d_bt] int32  (axes.dates 全局索引)
 //   - strategy_nav.npy       [n_d_bt] float32 (策略净值, 起点 = BACKTEST_CAPITAL_BASE)
 //   - pool_nav.npy           [n_d_bt] float32 (pool 内等权 benchmark, 起点同)
 //   - tradable_nav.npy       [n_d_bt] float32 (tradable 内等权 benchmark, 起点同)
+//   - strategy_dd.npy        [n_d_bt] float32 (策略回撤曲线, ≤ 0)
+//   - pool_dd.npy            [n_d_bt] float32 (pool 指数回撤曲线)
+//   - tradable_dd.npy        [n_d_bt] float32 (tradable 指数回撤曲线)
 //   - position_count.npy     [n_d_bt] int32  (持仓股票数)
 //   - position_pct.npy       [n_d_bt] float32 (持仓市值 / 组合市值)
 //   - turnover.npy           [n_d_bt] float32 (双边: 当日买卖额 / 2 / 组合市值;
@@ -57,6 +81,11 @@ NameTimeline load_name_timeline(const feature::Axes &);
 //   - watch_scores.npy       [total]    float32 (当日策略 score)
 //   - watch_rank_chg.npy     [total]    float32 (5 日 rank 均线 − 当日 rank;
 //                              + = 排名上升, 单位=名次)
+//   以下 3 列让前端 hover 成为纯格式化 (逐日 watch 明细面板所需的全部状态,
+//   不必在 JS 里从 holdings / fills 反推):
+//   - watch_hold_w.npy       [total]    float32 (该 a 当日持仓权重; NaN = 未持仓)
+//   - watch_hold_days.npy    [total]    int32   (已连续持有天数; 0 = 未持仓)
+//   - watch_bought.npy       [total]    int32   (1 = 当日正式买入)
 //   - trades_inst.npy        [n_trades] int32  (a 索引)
 //   - trades_open_d.npy      [n_trades] int32
 //   - trades_close_d.npy     [n_trades] int32
@@ -66,14 +95,22 @@ NameTimeline load_name_timeline(const feature::Axes &);
 //   - fills_a.npy            [n_fills]  int32
 //   - fills_side.npy         [n_fills]  int32  (+1 买 / -1 卖; 含 pop 补槽)
 //   - fills_px.npy           [n_fills]  float32
-//   - labels.json            JSON {trades_open_names[],
-//                                   trades_close_names[],
-//                                   holdings_names[],
-//                                   watch_names[],
+//   - fills_weight.npy       [n_fills]  float32 (买: 成交当日收盘权重;
+//                              卖: 卖出前一日权重)
+//   - fills_pnl.npy          [n_fills]  float32 (卖: 本笔 trade 收益率 %;
+//                              买: NaN)
+//   - labels.json            JSON {trades_open_names[], trades_close_names[],
+//                                   holdings_names[], watch_names[],
 //                                   fills_names[]}
+//   - report.json            JSON 指标 + 表格 (py 侧零计算):
+//                              indicators{策略/pool指数/tradable指数/超额}
+//                              trade_stats{16 项}
+//                              annual{} / monthly{} 列式期次表
+//                              holdings{} 末日持仓表 (a 索引 → code/简称/行业由
+//                                py 用 meta.json 的 codes/names/industries 查)
 //
-// 同时返回 elapsed_seconds (写入 meta.json).
-double run(const feature::Axes &axes, const feature::StockMeta &meta,
+// 返回 Result (elapsed_seconds 进 meta.json; 其余给 report/aggregate).
+Result run(const feature::Axes &axes, const feature::StockMeta &meta,
            const feature::Tensor &T, const NameTimeline &name_timeline,
            const strategy::StrategySpec &spec, int s_idx);
 

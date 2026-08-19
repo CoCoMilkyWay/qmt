@@ -28,6 +28,13 @@ namespace analysis {
 //                              桶内 daily_return[d+1] 等权均值)
 //   - pool_ret.npy           [n_d_bt] f4 (tradable[d-1] 等权 × daily_return[d],
 //                              与 backtest pool_nav 同口径)
+//   以下 4 列是上面几条的现成可绘形态 (NaN 视作 0 收益 / 0 IC 的累积口径):
+//   - quantile_nav.npy       [ANALYSIS_N_QUANTILES, n_d_bt] f4 (分层累计净值, 起点 1.0)
+//   - pool_nav_cum.npy       [n_d_bt] f4 (pool 累计净值, 起点 1.0)
+//   - factor_ic_cum.npy      [n_factor, n_d_bt] f4 (累积 IC 曲线)
+//   - score_ic_cum.npy       [n_d_bt] f4 (聚合 score 累积 IC 曲线)
+//   - report.json            JSON 因子汇总表 (列式: 因子/当期IC/IC均值/平均IC/
+//                              IR/换手率/本策略权重) + 分层 CAGR (Q1..QQ + pool)
 //
 // 窗口与 backtest 同源 (spec.bt_start_date, 右端点 axes 最新日), 但内部独立解析.
 double run(const feature::Axes &axes, const feature::Tensor &T,

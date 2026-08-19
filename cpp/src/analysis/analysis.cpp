@@ -9,6 +9,9 @@
 #include "misc/fs.hpp"
 #include "misc/npy.hpp"
 #include "misc/timer.hpp"
+#include "package/yyjson/yyjson.h"
+#include "report/json.hpp"
+#include "report/metrics.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -492,6 +495,131 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
                        std::span<const float>(quantile_ret.data(),
                                               quantile_ret.size()),
                        std::span<const std::size_t>(shape, 2));
+  }
+
+  // ---- 累积形态 (曾在 py 侧 cumprod / cumsum, 现下沉) ---------------------
+  //   分层累计净值 / pool 累计净值: NaN 当 0 收益 (空桶日不断线, 与 backtest
+  //   pool_nav 在 dr_n=0 时 dr=0 同口径).
+  //   累积 IC: NaN 当 0 IC.
+  std::vector<float> quantile_nav(quantile_ret.size(), 0.0f);
+  std::vector<float> q_cagr(static_cast<std::size_t>(Q) + 1, std::nanf(""));
+  for (int q = 0; q < Q; ++q) {
+    std::size_t off = static_cast<std::size_t>(q) *
+                      static_cast<std::size_t>(n_d_bt);
+    std::vector<float> nav = report::cum_nav(std::span<const float>(
+        quantile_ret.data() + off, static_cast<std::size_t>(n_d_bt)));
+    std::copy(nav.begin(), nav.end(), quantile_nav.begin() + static_cast<std::ptrdiff_t>(off));
+    q_cagr[static_cast<std::size_t>(q)] = report::cagr_from_nav(nav);
+  }
+  std::vector<float> pool_nav_cum = report::cum_nav(pool_ret);
+  q_cagr[static_cast<std::size_t>(Q)] = report::cagr_from_nav(pool_nav_cum);
+
+  std::vector<float> factor_ic_cum(factor_ic.size(), 0.0f);
+  for (int f = 0; f < n_factor; ++f) {
+    std::size_t off = static_cast<std::size_t>(f) *
+                      static_cast<std::size_t>(n_d_bt);
+    std::vector<float> c = report::nan_cumsum(std::span<const float>(
+        factor_ic.data() + off, static_cast<std::size_t>(n_d_bt)));
+    std::copy(c.begin(), c.end(), factor_ic_cum.begin() + static_cast<std::ptrdiff_t>(off));
+  }
+  std::vector<float> score_ic_cum = report::nan_cumsum(score_ic);
+
+  {
+    std::size_t shape2[2] = {static_cast<std::size_t>(Q),
+                             static_cast<std::size_t>(n_d_bt)};
+    misc::write_npy_f4(out / "quantile_nav.npy",
+                       std::span<const float>(quantile_nav.data(),
+                                              quantile_nav.size()),
+                       std::span<const std::size_t>(shape2, 2));
+    std::size_t shapef[2] = {static_cast<std::size_t>(n_factor),
+                             static_cast<std::size_t>(n_d_bt)};
+    misc::write_npy_f4(out / "factor_ic_cum.npy",
+                       std::span<const float>(factor_ic_cum.data(),
+                                              factor_ic_cum.size()),
+                       std::span<const std::size_t>(shapef, 2));
+    std::size_t shape1[1] = {static_cast<std::size_t>(n_d_bt)};
+    misc::write_npy_f4(out / "pool_nav_cum.npy",
+                       std::span<const float>(pool_nav_cum.data(),
+                                              pool_nav_cum.size()),
+                       std::span<const std::size_t>(shape1, 1));
+    misc::write_npy_f4(out / "score_ic_cum.npy",
+                       std::span<const float>(score_ic_cum.data(),
+                                              score_ic_cum.size()),
+                       std::span<const std::size_t>(shape1, 1));
+  }
+
+  // ---- report.json: 因子汇总表 (列式) + 分层 CAGR ------------------------
+  //   "当期IC" 口径: 末日 IC finite 则直取, 否则用末 20 日均值兜 (末日截面样本
+  //   不足会 NaN, 但因子并未失效 — 不该在表里显示成空).
+  {
+    std::vector<std::string> f_name;
+    std::vector<float> f_ic_now, f_ic_ma, f_ic_mean, f_ir, f_turn, f_weight;
+    for (int f = 0; f < n_factor; ++f) {
+      std::span<const float> ic(factor_ic.data() +
+                                    static_cast<std::size_t>(f) *
+                                        static_cast<std::size_t>(n_d_bt),
+                                static_cast<std::size_t>(n_d_bt));
+      std::span<const float> turn(factor_turnover.data() +
+                                      static_cast<std::size_t>(f) *
+                                          static_cast<std::size_t>(n_d_bt),
+                                  static_cast<std::size_t>(n_d_bt));
+      float now = ic.back();
+      if (!is_finite(now)) {
+        int tail = std::min(20, n_d_bt);
+        now = report::nan_mean(ic.last(static_cast<std::size_t>(tail)));
+      }
+      std::vector<float> ma =
+          report::rolling_mean(ic, ::config::ANALYSIS_IC_MA_WINDOW);
+      float mean = report::nan_mean(ic);
+      float sd = report::nan_std(ic);
+
+      f_name.emplace_back(factor_names[static_cast<std::size_t>(f)]);
+      f_ic_now.push_back(now);
+      f_ic_ma.push_back(ma.back());
+      f_ic_mean.push_back(mean);
+      f_ir.push_back((is_finite(sd) && sd > 0.0f)
+                         ? static_cast<float>(mean / sd *
+                                              std::sqrt(report::TRADING_DAYS))
+                         : std::nanf(""));
+      f_turn.push_back(report::nan_mean(turn));
+
+      // 本策略给该因子的权重; 未配置 → NaN (前端留空 = "该策略不用这个因子")
+      float w = std::nanf("");
+      for (const strategy::FactorWeight &fw : spec.weights) {
+        if (fw.f == factors[static_cast<std::size_t>(f)])
+          w = fw.w;
+      }
+      f_weight.push_back(w);
+    }
+
+    std::vector<std::string> q_label;
+    q_label.reserve(static_cast<std::size_t>(Q) + 1);
+    for (int q = 0; q < Q; ++q)
+      q_label.push_back("Q" + std::to_string(q + 1));
+    q_label.push_back("pool");
+
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+
+    yyjson_mut_val *ft = report::add_obj(doc, root, "factors");
+    report::add_str_arr(doc, ft, "因子", f_name);
+    report::add_f4_arr(doc, ft, "当期IC", f_ic_now);
+    report::add_f4_arr(doc, ft, "IC均值", f_ic_ma);
+    report::add_f4_arr(doc, ft, "平均IC", f_ic_mean);
+    report::add_f4_arr(doc, ft, "IR", f_ir);
+    report::add_f4_arr(doc, ft, "换手率", f_turn);
+    report::add_f4_arr(doc, ft, "权重", f_weight);
+
+    yyjson_mut_val *qt = report::add_obj(doc, root, "quantile");
+    report::add_str_arr(doc, qt, "分层", q_label);
+    report::add_f4_arr(doc, qt, "年化", q_cagr);
+
+    yyjson_mut_obj_add_int(doc, root, "ic_ma_window",
+                           ::config::ANALYSIS_IC_MA_WINDOW);
+
+    misc::atomic_write_json(out / "report.json", doc);
+    yyjson_mut_doc_free(doc);
   }
 
   auto t1 = std::chrono::high_resolution_clock::now();
