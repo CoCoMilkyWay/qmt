@@ -33,25 +33,46 @@ qmt/
 │   │   │       ├── spec.hpp         # SPECS (day_params 判别 range / per-day; drop_fields 防未来信息泄漏)
 │   │   │       ├── parse.hpp        # 响应 JSON → arrow::Table (列类型推断 + drop_fields 剥离)
 │   │   │       └── pipeline.hpp     # update: plan_months → fetch_month → 月 parquet (与 bigquant 对仗); probe: 积分门槛探针
-│   │   └── feature/                 # feature 子系统头文件 (张量出)
+│   │   ├── feature/                 # 特征子系统头文件 — 计算图 (无中心枚举, 见 §特征系统)
+│   │   │   ├── graph.hpp            # FeatureSpec (节点唯一身份) + consteval 可达性/拓扑排序/环检测
+│   │   │   ├── registry.hpp         # 计算图挂载点: FRAMEWORK_ROOTS + 全部策略引用 → consteval 推出 ALL_NODES/TS_ORDER/CS_ORDER
+│   │   │   ├── report.hpp           # print_dependency_table(): 运行期打印依赖表 (公共 → 各策略专属)
+│   │   │   ├── tensor.hpp           # Tensor 容器 (按 ALL_NODES 顺序存储, unordered_map<FeatureSpec*,int> 查行号)
+│   │   │   └── def/                 # 每节点一个 header-only 文件 (文件名 = 节点名 = FeatureSpec 变量名前缀)
+│   │   │       ├── basic/           # 框架固定根依赖的市场微观结构数据 (成交价/涨跌停/停牌/退市龄/两融/行业)
+│   │   │       ├── factor/          # 排序因子 (Kind::Factor) + 全部中间变量 (Kind::Inter)
+│   │   │       └── filter/          # 状态机最终排除位 (Kind::Filter)
+│   │   ├── strategy/                # 策略层头文件 (每策略一份小管线, 叶子指向共享图节点)
+│   │   │   ├── strategy.hpp         # StrategySpec / PoolSpec / FactorWeight / SF (5 固定列) 定义
+│   │   │   ├── registry.hpp         # STRATEGIES[] 挂载表 + consteval 校验
+│   │   │   ├── columns.hpp          # 5 列 (pool_b/pool/tradable/score/rank) 通用计算声明
+│   │   │   └── def/                 # 每策略一个 spec 文件 (白名单/filter/因子权重/回测窗口)
+│   │   ├── backtest/                # 回测引擎 (per-D 状态机, per-strategy 跑一遍)
+│   │   └── analysis/                # 因子诊断 (IC / turnover / 分层收益, per-strategy 跑一遍)
 │   └── src/
-│       ├── main.cpp                 # [pending? → preflight → bigquant::update → tushare::update] → feature::build → Tensor T[F][A][D]
+│       ├── main.cpp                 # [pending? → preflight → bigquant::update → tushare::update] → feature::build
+│       │                            #   → print_dependency_table → per-strategy {backtest::run → analysis::run} → meta.json
 │       │                            # 方括号段由 config::PIPELINE_UPDATE 门控 (见 §抓取开关);
 │       │                            # pending 纯本地判定全 fresh ⇒ 整段跳过 (连跑零网络)
 │       ├── api/
 │       │   ├── bigquant/            # dai / spec / pipeline
 │       │   └── tushare/             # http / spec / parse / pipeline
-│       └── feature/                 # 4-phase 特征系统; 业务密集化 + 外层 flow 完全 agnostic
-│                                    # 单点真理: pit.cpp (itf 维) + feature.cpp (feature 维)
-│           ├── axis.cpp             # Phase 0: load_axes + load_stock_meta (per-A 静态)
-│           ├── feature.cpp          # 【单点真理 feature】每 feature 一个 ts_xxx/cs_xxx compute fn + 末尾 FEATURES[] 表挂载
-│           │                        # F 枚举顺序 = FEATURES[] 索引 = 计算顺序 (后段读已写就的 T.ts_row(prior_f, a))
-│           ├── tensor.cpp           # Tensor 容器 (统一 [F][A][D] layout, ts_row 连续, gather/scatter cs_row)
-│           ├── pit.cpp              # 【单点真理 itf】每 itf 一个 namespace block (build + cache_layout [+ post_ffill]) + 末尾 ITFS[] 表挂载
-│           ├── load.cpp             # Phase 1 通用 flow: 仅迭代 ITFS[] (cache mmap hit / build miss → overlay → ffill), 不出现 itf 名
-│           ├── ts.cpp               # Phase 2 通用 flow: per-A 并行, 迭代 FEATURES[] 中 axis==TS 的 compute_ts 调; kernel 在 ts.hpp (state_machine_intervals 模板)
-│           ├── cs.cpp               # Phase 3 通用 flow: per-D 并行, 迭代 FEATURES[] 中 axis==CS 的 compute_cs 调; kernel (winsor_mad / z / pct_rank / factor_pipeline) 在 cs.hpp/cpp
-│           └── build.cpp            # 编排入口: 串 4 phase + misc::Timer 报段时
+│       ├── feature/                 # 通用 flow (agnostic, 不出现具体 itf/节点名) + 单点真理 pit.cpp
+│       │   ├── axis.cpp             # Phase 0: load_axes + load_stock_meta (per-A 静态)
+│       │   ├── pit.cpp              # 【单点真理 itf】每 itf 一个 namespace block (build + cache_layout [+ post_ffill]) + 末尾 ITFS[] 表挂载
+│       │   ├── load.cpp             # Phase 1 通用 flow: 仅迭代 ITFS[] (cache mmap hit / build miss → overlay → ffill), 不出现 itf 名
+│       │   ├── tensor.cpp           # Tensor 实现 (按 ALL_NODES 顺序建 index_, ts_row/gather_cs_row/scatter_cs_row)
+│       │   ├── ts.cpp               # Phase 2 通用 flow: per-A 并行, 迭代 TS_ORDER 调 compute_ts; kernel 在 ts.hpp (state_machine_intervals 模板)
+│       │   ├── cs.cpp               # Phase 3 通用 flow: per-D 并行, 迭代 CS_ORDER 调 compute_cs; kernel (winsor_mad / z / pct_rank / factor_pipeline) 在 cs.hpp/cpp
+│       │   ├── build.cpp            # 编排入口: 串 Phase 0/1/2/2s/3/3s/4 + misc::Timer 报段时
+│       │   ├── report.cpp           # print_dependency_table() 实现 (运行期 DFS 分组, 不参与计算图构建)
+│       │   └── describe.cpp         # Phase 4.x: describe() 统计 + dump_tensor() 逐点导出
+│       ├── strategy/
+│       │   └── columns.cpp          # Phase 2s/3s: 循环 STRATEGIES[] 算 pool_b → pool → tradable → score → rank
+│       ├── backtest/
+│       │   └── backtest.cpp         # per-strategy 回测器实现 (输出见 backtest.hpp 顶注)
+│       └── analysis/
+│           └── analysis.cpp         # per-strategy 因子诊断实现 (输出见 analysis.hpp 顶注)
 ├── data/                            # 落地 (全 parquet, gitignored)
 │   ├── _meta/                       # 单文件全量, 每次 update 覆盖刷新 (文件 mtime 即去重时间戳)
 │   │   ├── cn_stock_static_data.parquet # ★ 主 meta — 真盘前 09:00 全市场快照 (BigQuant Snapshot,
@@ -117,20 +138,7 @@ qmt/
         └── quote/                   # 行情 (daily / daily_basic / adj_factor / stk_limit / suspend_d)
 ```
 
-# 因子张量 T[D, A, F]
-
-- `D` = 交易日 (BigQuant `all_trading_days` WHERE `market_code='CN'`, 截到 today; 全年提前排程 ⇒ 盘中当日行已可拉. 多市场 `trading_days` 已弃用: CN 行当日盘后 ~19:00 才入库, 盘中 D 轴缺当日, 且他市场早到行会把开放月水位推过 CN 缺行日)
-- `A` = instrument (BigQuant `cn_stock_basic_info.instrument` 全量, 含已退市)
-- `F` = 下表 feature
-- dtype: 统一 **float** (32 比特 float; bool 用 0.0/1.0)
-- kind (与「轴」独立, 勿用 kind 推断时序/截面; 以字段表「轴」列与 `FEATURES[]` 为准):
-  - `filter` (1=排除该 D-A)
-  - `factor` (∈[0,1] NaN=不参与; 当前实现均为截面归一后的连续得分)
-  - `inter` (中间量; 含时序与截面两类, 不一刀切)
-
 ## 数据源 → 张量 (build-time PIT)
-
-**核心**: 偏移 `offset(itf)` 在 build 阶段一次性消化进 cutoff, 张量 `T[D, A, F]` row D 只含 T 当日信号时点已可知的信息. 下游 (策略/回测/实盘) 直读 row D, 不再处理未来数据.
 
 **数据通道与抓取策略** — 两路通道, 抓取规则各自一套:
 
@@ -160,11 +168,10 @@ BigQuant FetchKind (`<vd>` = `TableSpec::visible_date` — Static 为空, Partit
   - **tmp+rename 原子写**: 单文件替换, 中断不留半成品.
 - 外部资料: 入库时机 (BigQuant `doc/bigquant/api.md` 更新时间列, 多数 17:00–20:00 盘后批发; Tushare `doc/tushare/help/数据更新说明.md` 及各 API 自身 doc); 公告披露时段 (`doc/exchange/公告类别和发布时间.md`, SSE/SZSE 各时段 + 非交易日 13–17 / 12–16 直通).
 
-**cutoff** (build-time, 实盘/回测同一公式)
+**cutoff** (build-time, 实盘/回测同一公式): 偏移 `offset(itf)` 在 build 阶段一次性消化, 张量 row D 只含 T 当日信号时点已可知的信息, 下游 (策略/回测/实盘) 直读 row D 不再处理未来数据.
 - 信号时点 ≜ 交易日 T 盘中, 信号计算前 1 分钟刷库; 此后每个 itf 按 `visible_date ≤ T + offset(itf)` 切片写入 row D.
 - `offset` 单位 = **日历日**, 含周末/节假日.
-
-**全部 BigQuant 表实际入库时间都是盘后 17:00+** (`api.md` 更新时间列实测). 项目按业务可推出性把所有 itf 归到下面两种 cutoff 模式之一:
+- 全部 BigQuant 表实际入库时间都是盘后 17:00+ (`api.md` 更新时间列实测), 项目按业务可推出性把所有 itf 归到下面两种模式之一:
 
 | 模式              | offset | 含义                                                                                                                                                                                                                                    | 适用                                                                          |
 | ----------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
@@ -178,7 +185,7 @@ hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际�
 
 **入张量映射** (cutoff 后按 itf 类落 row D)
 - **网格** (D=trade_date, A=instrument): 每条记录唯一 (D, A) 单元. row D 取 `max{ visible_date ≤ T + offset }` (offset=0 → 自身; offset=−1 → 上一交易日, 周末/假日 visible_date 不存在自动跳过).
-- **事件 sparse PIT** (D, A): 每 (A, group_key) 取 `visible_date ≤ T + offset` 的最新一条. group_key 见 §字段表 deps (例: `forecast` / `income_general_pit` / `cashflow_general_pit` / `balance_general_pit` 按 `report_date`, `dividend` 按 `publish_date`, `name_change` 按 `end_date`). 状态机型 (`profit_st` / `revenue_st` / `dividend_st`) 同样按此 cutoff 回放 `visible_date` 升序流.
+- **事件 sparse PIT** (D, A): 每 (A, group_key) 取 `visible_date ≤ T + offset` 的最新一条. group_key 见各节点 `deps` (例: `forecast` / `income_general_pit` / `cashflow_general_pit` / `balance_general_pit` 按 `report_date`, `dividend` 按 `publish_date`, `name_change` 按 `end_date`). 状态机型 (`profit_st` / `revenue_st` / `dividend_st`) 同样按此 cutoff 回放 `visible_date` 升序流.
 - **月初快照** (D, A): `cn_stock_industry_component` 月初落一份, build 时取 `max{ visible_date ≤ T }` 的快照广播到 (D, A); 月内细变动叠加 `cn_stock_industry_change` 事件流 → `industry_l1` inter feature.
 - **overlay** (row=last_d 单行填充): `cn_stock_static_data` (`_meta` 单文件) → `status.{suspended, st_status}` 2 字段. 仅写 row=last_d, 历史日子完全不动. 详见 §cutoff 表里的 hybrid 模式. 快照新鲜度不变量 (快照日 == D 轴 last_d 的日期, 即"用 last_d 当日真盘前快照填 last_d 行") 仅在 `config::PIPELINE_UPDATE = true` 时断言 — 盘前/凌晨跑时当日快照未生成、last_d 也还是上一交易日, 自洽通过; 离线跑用旧快照, 见 §抓取开关.
 - **asset 静态**: `cn_stock_basic_info` 全量 snapshot 广播到 (D, A); `list_date / delist_date` 决定 (D, A) 行有效, 不走 `visible_date`.
@@ -191,8 +198,6 @@ hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际�
   1. 公告级时间戳缺失 → 同 `visible_date` 内盘前/盘中/盘后无法区分, 统一按盘后保守 → 计入 next-day cutoff (实盘错过 T 当日盘前直通公告, 与回测一致).
   2. `cn_stock_basic_info` 仅当前 snapshot → `list_sector` / `industry` 历史变更无法回溯; 行业变更已用 `cn_stock_industry_component` (月初) + `cn_stock_industry_change` (日频) 补救, 但 `list_sector` 转板股全期按当前归类.
   3. `cn_stock_status` hybrid 伪装的隐含假设: ST / 停牌当日盘前已生效 (公告 → 停牌一日 → 复牌即生效新标识). 极端情况下 T 盘中突发停牌不会反映到 row D=T (数据盘后才入库), 信号刷库时拿到的是 T-1 终态延续, 但 `cn_stock_static_data` 真盘前 09:00 快照对实盘当日已捕获 (next-day cutoff). 想绝对保守可把 status 退回 normal `−1`.
-
-「模式」列扩展取值 (`normal` / `hybrid` 见上方 cutoff 模式表): `真盘前` (offset=0, 入库 < 信号时点, 不需 overlay) / `axis` (axis 源, 不入张量) / `static` (Static 表, 无 date 维, 按 -1 滞后理解).
 
 | 类       | name                                      | 通道                | 入库时间 (api.md)    | visible_date   | 模式       | 偏移 |
 | -------- | ----------------------------------------- | ------------------- | -------------------- | -------------- | ---------- | ---- |
@@ -226,98 +231,65 @@ hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际�
 | 事件     | `express`                                 | Tushare             | 公告实时 (通常盘后)  | `ann_date`     | normal     | −1   |
 | 事件     | `disclosure`                              | Tushare             | 公告实时 (披露计划)  | `ann_date`     | normal     | −1   |
 
-## 字段表
+## 特征系统 (无中心枚举, header-only, 编译期自动挂载)
 
-本节是 feature 的「契约 / 数学定义」(描述"做什么"); 实现镜像在 `cpp/src/feature/feature.cpp` 的 `FEATURES[]` 表 + `impl::ts_*` / `impl::cs_*` (描述"怎么做"). 增减/修改 feature 须同步两处.
+张量 `T[node, A, D]`: `D` = 交易日 (`all_trading_days` WHERE `market_code='CN'`, 截到 today; 多市场 `trading_days` 已弃用, CN 行当日盘后才入库会导致盘中缺行/水位错乱); `A` = instrument (`cn_stock_basic_info.instrument` 全量, 含已退市); `node` = 一个 `FeatureSpec` (无中心枚举, 身份 = 其 `&<name>_spec` 地址, `Tensor` 按 `ALL_NODES` 拓扑序分配 `mats[i]`, `unordered_map<const FeatureSpec*,int>` 做地址→下标查询); dtype 统一 float (bool 用 0.0/1.0); kind (与轴独立, 以 `FeatureSpec::axis` 为准) 分 `Filter` (1=排除该 D-A) / `Factor` (∈[0,1], NaN=不参与, 截面归一后的连续得分) / `Inter` (中间量, 时序或截面皆可). 每个策略额外拥有固定 5 列 (`pool_b/pool/tradable/score/rank`), 存在独立的 `Tensor.strat_mats` (不占共享节点存储位), 见 §策略层.
 
-排序 (本表, 阅读用): filter → factor → inter; inter 内部按 causal (raw → derived); 相关字段就近. (注: `cpp/include/feature/feature.hpp` 的 `F` 枚举顺序 = 计算顺序, 与本表排序独立; enum 大段仅 TS / CS 两类, 段内按"相似聚集"对仗 — raw 网格 / raw 财务 / raw meta 派生 / derived / filter / pool.)
+**单点真理落在每个节点自己的定义文件里, README 不维护副本.** 每个特征节点 (raw / 中间量 / filter / factor, 三者在计算图层面完全等价) 是 `cpp/include/feature/def/{basic,factor,filter}/<name>.hpp` 下的一个 header-only 文件, 文件名 = 节点名, 声明恰一个:
 
-列约定:
-- `轴`: `时序` = per A 沿 D 计算 (无截面依赖, A 维可并行); `截面` = per D 沿 A 计算 (有截面依赖, A 维不可并行). `filter` / `factor` / `inter` 三类均可能出现两种轴之一, 仅读本行.
-- `deps`: `itf:<name>` ≡ 该 itf 经 §入张量统一规则 切到 (D, A); 其它为 inter / filter feature 名 或 `meta:<field>` (asset 静态).
-- `assumption`: `—` = 定义自洽; 形如 `[元]` `[%]` `[ratio]` `[股]` 的方括号前缀标注 inter 输出单位.
+```cpp
+namespace feature::def {
+inline void ts_<name>(...);          // 或 cs_<name>, 依 axis 而定
+inline constexpr FeatureSpec <name>_spec{
+    "<name>", Kind::Inter, Axis::TimeSeries,
+    <name>_deps,           // std::span<const FeatureSpec*const>, 空则无依赖
+    &ts_<name>, nullptr,   // TS 填 compute_ts, CS 填 compute_cs, 另一个 nullptr
+    /*must_be_finite=*/false,
+    /*formula=*/"...",     // 必填, 编译期 static_assert 校验非空
+    /*assumption=*/"...",  // 必填 (单位/边界条件/关键假设; 无则写 "—")
+};
+}
+```
+
+`&<name>_spec` (取地址) 即该节点编译期稳定的身份 (`inline` 保证跨 TU 同址), 用于三处、且**只**出现在这三处:
+- 依赖声明: 被依赖方 `#include` 本文件, 在自己的 `deps` 数组里放 `&<name>_spec`
+- `Tensor` 存取: `T.ts_row(<name>_spec, a)` / `T.gather_cs_row(<name>_spec, d, ...)`
+- 策略引用: `StrategySpec.filters` / `FactorWeight.f` / `PoolSpec.rank_key`
+
+**计算图完全自动推导, 无需手动注册**: `feature/registry.hpp` 从两类"根" (`FRAMEWORK_ROOTS` — 框架自身固定需要的少量 raw 节点, 与 `strategy::STRATEGIES[]` 引用到的全部节点) 出发, 用 `graph.hpp` 里的 `consteval` 函数沿 `deps` 做反向可达性 + 拓扑排序, 推出 `ALL_NODES` / `TS_ORDER` / `CS_ORDER`; 同时做环检测和"TS 节点不得依赖 CS 节点"的轴校验, 违规直接编译失败. 不在根可达闭包内的节点文件即使存在也不会进入计算 (不触发计算, 不占 `Tensor` 存储). CMake (`file(GLOB ...)`) 只负责把 `def/**/*.hpp` 收进构建系统给 IDE 看, 不参与依赖判定.
+
+`basic/` 目录例外: 里面是框架结算 / 策略白名单计算 (`backtest.cpp` / `strategy/columns.cpp`) 直接依赖的市场微观结构原始数据 (成交价/涨跌停/停牌/退市龄/两融/行业), 与具体策略无关, 是 `registry.hpp::FRAMEWORK_ROOTS` 的来源, 因此例外地会被框架代码直接 `#include` 引用 — 这是编译期图构建必须留的极小固定入口, 不是手动特征清单. `axis` 字段: `TimeSeries` = per A 沿 D 计算 (无截面依赖, A 维可并行); `CrossSection` = per D 沿 A 计算 (有截面依赖, A 维不可并行); 其余字段 (`must_be_finite`/`formula`/`assumption`) 含义见上面代码块内注释.
 
 估值/盈利因子按 `<base>_ttm<N>` 命名, period 由季节性决定:
 - **ttm12** (高季节性, 12 个月 ≡ 4 报告期): 取 `cn_stock_financial_ttm_shift.*_ttm` (shift=0) 或 mcap_raw / TTM 字段自算 (估值类, 支持负值).
 - **ttm1** (瞬时估值 / MRQ, 最新一期 snapshot): 取 `cn_stock_financial_balance_general_pit.*` (latest) 自算; 例 pb = mcap_raw / total_owner_equity.
 
-| kind   | feature      | 轴   | deps                                                                               | formula                                                                                                                                                                                                                                                | assumption                                                                                                                                                                                                          |
-| ------ | ------------ | ---- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| filter | profit_st    | 时序 | itf:forecast, itf:cn_stock_financial_income_general_pit                            | 状态机 (per A):                                                                                                                                                                                                                                        | 正式 PIT 年报出现即终止; 未披露的股票不出, 4 月底安全网兜底                                                                                                                                                         |
-|        |              |      |                                                                                    | `forecast.end_date.M == 12 ∧ forecast.type ∈ {首亏, 续亏} ∧ forecast.last_parent_net < 0` 时                                                                                                                                                           |                                                                                                                                                                                                                     |
-|        |              |      |                                                                                    | 按 `forecast.ann_date` 触发, 至 `cn_stock_financial_income_general_pit.report_date == forecast.end_date` 或 `(end_date.Y+1, 4, monthend)` 终止 (取较早)                                                                                                |                                                                                                                                                                                                                     |
-| filter | revenue_st   | 时序 | itf:forecast, itf:cn_stock_financial_income_general_pit, rev_raw, meta:list_sector | 状态机 (per A) ∧ `meta.list_sector == 1 ∧ rev_raw < (3e8 if end_date.Y ≥ 2024 else 1e8)`:                                                                                                                                                              | 同 profit_st 终止条件; `rev_raw` 仅作区间内营收阈值; list_sector int8: 1=主板 / 2=创业板 / 3=科创板 / 4=北交所                                                                                                      |
-|        |              |      |                                                                                    | `forecast.end_date.M == 12 ∧ forecast.type ∈ {首亏, 续亏} ∧ forecast.end_date.Y ≥ 2021 ∧ forecast.ann_date ≥ 20210101` 时                                                                                                                              |                                                                                                                                                                                                                     |
-|        |              |      |                                                                                    | 按 `forecast.ann_date` 触发, 至 `cn_stock_financial_income_general_pit.report_date == forecast.end_date` 或 `(end_date.Y+1, 4, monthend)` 终止 (取较早)                                                                                                |                                                                                                                                                                                                                     |
-| filter | dividend_st  | 时序 | itf:cn_stock_dividend, ni_raw, share_raw, meta:list_sector                         | `meta.list_sector == 1 ∧ ni_raw > 0 ∧ 3y_sum(dividend.cash_after_tax × share_raw) < 0.30 × ni_raw ∧ 3y_sum < 5e7`                                                                                                                                      | 3y 窗口 = `dividend.report_date.Y ∈ [Y-3, Y-1]` (Y = `dividend.publish_date.Y`); share_raw 取 `publish_date` 当日快照; 单位均 [元]                                                                                  |
-| filter | trading_st   | 时序 | low_p, low_mc                                                                      | `rolling_20D(low_p ∨ low_mc).all()`                                                                                                                                                                                                                    | —                                                                                                                                                                                                                   |
-| filter | risk_warn    | 时序 | itf:cn_stock_status                                                                | 派生 4 态 (int8 → float; 0=正常, 1=ST, 2=*ST, 3=退市整理期): 历史日由 `cn_stock_status.st_status` (1/2 → 1/2) ∧ `is_risk_warning` (st_status==0 ∧ rw!=0 → 3) 派生; 实盘当日由 `cn_stock_static_data.in_delist` (=1 → 3) ∧ `st_status` 派生             | —                                                                                                                                                                                                                   |
-| filter | new_list     | 时序 | list_age                                                                           | `0 ≤ list_age < 60`                                                                                                                                                                                                                                    | —                                                                                                                                                                                                                   |
-| factor | close        | 截面 | close_raw                                                                          | `pct_rank(z(winsor_mad(1 / close_raw)))` + 截面均值填充                                                                                                                                                                                                | —                                                                                                                                                                                                                   |
-| factor | mcap         | 截面 | mcap_raw                                                                           | `pct_rank(z(winsor_mad(1 / mcap_raw)))` + 截面均值填充                                                                                                                                                                                                 | —                                                                                                                                                                                                                   |
-| factor | fmcap        | 截面 | fmcap_raw                                                                          | `pct_rank(z(winsor_mad(1 / fmcap_raw)))` + 截面均值填充                                                                                                                                                                                                | —                                                                                                                                                                                                                   |
-| factor | pe_ttm12     | 截面 | pe_raw                                                                             | `pct_rank(z(neutralize(winsorize_quantile(1 / pe_raw))))` + 截面均值填充; 中性化 = 行业+log(mcap) OLS 残差                                                                                                                                             | —                                                                                                                                                                                                                   |
-| factor | pb_ttm1      | 截面 | pb_raw                                                                             | `pct_rank(z(neutralize(winsorize_quantile(1 / pb_raw))))` + 截面均值填充; 中性化 = 行业+log(mcap) OLS 残差                                                                                                                                             | —                                                                                                                                                                                                                   |
-| factor | ps_ttm12     | 截面 | ps_raw                                                                             | `pct_rank(z(neutralize(winsorize_quantile(1 / ps_raw))))` + 截面均值填充; 中性化 = 行业+log(mcap) OLS 残差                                                                                                                                             | —                                                                                                                                                                                                                   |
-| factor | pcf_ttm12    | 截面 | pcf_raw                                                                            | `pct_rank(z(neutralize(winsorize_quantile(1 / pcf_raw))))` + 截面均值填充; 中性化 = 行业+log(mcap) OLS 残差                                                                                                                                            | —                                                                                                                                                                                                                   |
-| factor | roe_ttm12    | 截面 | roe_raw                                                                            | `pct_rank(z(neutralize(winsorize_quantile(roe_raw))))` + 截面均值填充; 中性化 = 行业+log(mcap) OLS 残差                                                                                                                                                | —                                                                                                                                                                                                                   |
-| factor | roa_ttm12    | 截面 | roa_raw                                                                            | `pct_rank(z(neutralize(winsorize_quantile(roa_raw))))` + 截面均值填充; 中性化 = 行业+log(mcap) OLS 残差                                                                                                                                                | —                                                                                                                                                                                                                   |
-| factor | dy_ttm12     | 截面 | dy_raw                                                                             | `pct_rank(z(neutralize(winsorize_quantile(dy_raw))))` + 截面均值填充; 中性化 = 行业+log(mcap) OLS 残差                                                                                                                                                 | —                                                                                                                                                                                                                   |
-| inter  | close_raw    | 时序 | itf:cn_stock_real_bar1d                                                            | `cn_stock_real_bar1d.close` (不复权真价)                                                                                                                                                                                                               | [元/股, 不复权真价]; PIT-immutable (不随除权改写), 与 `limit_price` / `total_shares` 同口径 ⇒ 真市值 / 真涨跌停 / 真低价股都用它; `adjust_factor` 只在 `daily_return` 内部用, 不入 tensor                           |
-| inter  | daily_return | 时序 | itf:cn_stock_real_bar1d (close + adjust_factor)                                    | `(close[d]·adjust_factor[d]) / (close[d-1]·adjust_factor[d-1]) - 1` (后复权链式; 内部从 PitPool 直读, 不依赖 tensor close_raw)                                                                                                                         | [ratio]; 后复权链式 = 含分红再投入的真持有收益 (除权日 close 真跳 + af 反向跳 ⇒ 乘积无负跳); 前复权不 causal, 不采用. `d==0` 或前一日 close/af 非 finite/0 → NaN                                                    |
-| inter  | up_lim       | 时序 | itf:cn_stock_limit_price                                                           | `cn_stock_limit_price.upper_limit[d-1]` (未复权, **内部主动 -1**)                                                                                                                                                                                      | [元/股]; `close_raw[D]` 是 D-1 收盘, 判 "D-1 是否封板" 须配 D-1 适用的涨跌停, 故内部再取 `[d-1]`. `d==0` → NaN                                                                                                      |
-| inter  | dn_lim       | 时序 | itf:cn_stock_limit_price                                                           | `cn_stock_limit_price.lower_limit[d-1]` (未复权, **内部主动 -1**)                                                                                                                                                                                      | [元/股]; 同 `up_lim` 偏移逻辑                                                                                                                                                                                       |
-| inter  | susp         | 时序 | itf:cn_stock_status                                                                | `cn_stock_status.suspended == 1`                                                                                                                                                                                                                       | [bool]; 当日是否停牌                                                                                                                                                                                                |
-| inter  | share_raw    | 时序 | itf:cn_stock_shares                                                                | `cn_stock_shares.total_shares`                                                                                                                                                                                                                         | [股]                                                                                                                                                                                                                |
-| inter  | mcap_raw     | 时序 | close_raw, share_raw                                                               | `close_raw × share_raw`                                                                                                                                                                                                                                | [元, **真市值**]; 真价 × 当日 `total_shares`; 不用 hfq close (除权日 close 与 shares 同时变, 乘积非真市值)                                                                                                          |
-| inter  | fmcap_raw    | 时序 | close_raw, itf:cn_stock_shares                                                     | `close_raw × cn_stock_shares.total_float_shares`                                                                                                                                                                                                       | [元, **真流通市值**]; 同 `mcap_raw` 真值原则                                                                                                                                                                        |
-| inter  | pe_raw       | 时序 | mcap_raw, itf:cn_stock_financial_ttm_shift                                         | `mcap_raw / ttm.net_profit_to_parent_shareholders_ttm` (取 shift=0 latest visible)                                                                                                                                                                     | [ratio]; ttm12; 支持负 PE (亏损不剔); `shift=0` 行 = 该 visible_date 的最新报告期, 沿 v 单调推进; 分母 == 0 → NaN                                                                                                   |
-| inter  | pb_raw       | 时序 | mcap_raw, itf:cn_stock_financial_balance_general_pit                               | `mcap_raw / balance.total_equity_to_parent_shareholders` (取 latest report_date 的 latest visible 行)                                                                                                                                                  | [ratio]; ttm1 (瞬时估值 / MRQ); 分母取归母 — 分子 mcap_raw 只是母公司股权市值, 分母须同口径; 同 visible_date 多 report_date 取 max; 支持负 PB; 分母 == 0 或 mcap_raw ≤ 0 → NaN                                      |
-| inter  | ps_raw       | 时序 | mcap_raw, itf:cn_stock_financial_ttm_shift                                         | `mcap_raw / ttm.total_operating_revenue_ttm` (shift=0 latest visible)                                                                                                                                                                                  | [ratio]; ttm12; 用 `total_operating_revenue_ttm` (含利息/保费, ≠ `operating_revenue_ttm`); 分母 ≤ 0 → NaN (负营收是源数据脏值, 不给排序含义)                                                                        |
-| inter  | dy_raw       | 时序 | itf:cn_stock_dividend, share_raw, mcap_raw                                         | `Σ(dividend.cash_before_tax × share_raw[ev.v] for ev.v ∈ (D − 365d, D]) / mcap_raw[D]`                                                                                                                                                                 | [ratio]; ttm12; 窗口锚 `ev.v` (= publish_date 预案公告日) — 公告即定价, 除权日滞后 2-4 个月; 每股取**税前**, × **公告当日股本** (事后送转/增发会放大股本, 与当年每股分红错配). 无事件 → 0 (非 NaN); mcap 缺/0 → NaN |
-| inter  | pcf_raw      | 时序 | mcap_raw, itf:cn_stock_financial_ttm_shift                                         | `mcap_raw / ttm.net_cffoa_ttm` (shift=0 latest visible)                                                                                                                                                                                                | [ratio]; ttm12; 经营现金流可负 (烧钱企业 → 负 PCF), 不剔; 分母 == 0 → NaN                                                                                                                                           |
-| inter  | roe_raw      | 时序 | itf:cn_stock_financial_ttm_shift, itf:cn_stock_financial_balance_general_pit       | `ttm.net_profit_to_parent_shareholders_ttm / avg5(balance.total_equity_to_parent_shareholders) × 100`                                                                                                                                                  | [%]; ttm12; 分子分母同归母口径. `avg5` = `ttm.report_date` 及其前 4 个季末 5 点算术平均 (各点取最新可见版本): 12 个月流量须配同窗口平均存量, 期末单点在增发/回购/大额分红股上失真. 5 点任一缺失或分母 ≤ 0 → NaN     |
-| inter  | roa_raw      | 时序 | itf:cn_stock_financial_ttm_shift, itf:cn_stock_financial_balance_general_pit       | `ttm.net_profit_ttm / avg5(balance.total_assets) × 100`                                                                                                                                                                                                | [%]; ttm12; 分子取**含少数** `net_profit_ttm` — 总资产由全体股东与债权人共同支撑, 配归母净利是两边错配; 分母同 `avg5`; 5 点任一缺失或分母 ≤ 0 → NaN                                                                 |
-| inter  | rev_raw      | 时序 | itf:cn_stock_financial_ttm_shift                                                   | `ttm.total_operating_revenue_ttm` (shift=0 latest visible); `≤ 0 → NaN`                                                                                                                                                                                | [元]; ttm12; 与 `ps_raw` 同源 (含利息/保费); 给 `revenue_st` 用. **≤0 必须剔**: 负值让 `revenue_st` 的 `rev_raw < 3e8/1e8` 恒真, 脏值直接变误报退市预警                                                             |
-| inter  | ni_raw       | 时序 | itf:cn_stock_financial_income_general_pit                                          | `mean(latest 2 annuals.net_profit_to_parent_shareholders)` if N ≥ 2 else `latest 1` (`fs_quarter_index == 4` 过滤)                                                                                                                                     | [元]; 只取年报 (`fs_quarter_index == 4`), 同 report_date 多版本取 latest visible; 给 `dividend_st` 阈值用, 2 条平均以稳阈值; 0 条 → NaN                                                                             |
-| inter  | list_age     | 时序 | meta:list_date                                                                     | `D − meta.list_date` if `D ≥ list_date` else NaN                                                                                                                                                                                                       | [日历日]; 仅上市当日及之后写值 (上市当日=0), 否则 NaN; 下游 `is_finite` 判"已上市"                                                                                                                                  |
-| inter  | delist_age   | 时序 | meta:delist_date                                                                   | `D − meta.delist_date` if `D ≥ delist_date` else NaN                                                                                                                                                                                                   | [日历日]; 仅退市当日及之后写值 (退市当日=0), 否则 NaN; 下游 `is_finite` 判"已退市"                                                                                                                                  |
-| inter  | is_margin    | 时序 | itf:cn_stock_margin_trading_detail                                                 | `1.0 if itf:cn_stock_margin_trading_detail (D, A) 存在 else 0.0`                                                                                                                                                                                       | [bool]; 当日是否融资融券标的                                                                                                                                                                                        |
-| inter  | mr_bal_raw   | 时序 | itf:cn_stock_margin_trading_detail                                                 | `cn_stock_margin_trading_detail.financing_balance`                                                                                                                                                                                                     | [元]; 融资余额; per-A grid post_ffill                                                                                                                                                                               |
-| inter  | ms_bal_raw   | 时序 | itf:cn_stock_margin_trading_detail                                                 | `cn_stock_margin_trading_detail.securities_lending_balance`                                                                                                                                                                                            | [元]; 融券余额; 同上                                                                                                                                                                                                |
-| inter  | industry_l1  | 时序 | itf:cn_stock_industry_component, itf:cn_stock_industry_change                      | base = 最近一份月初 `cn_stock_industry_component WHERE industry='sw2021'` 取 `industry_level1_name` → SW2021 一级行业 ID 广播; 月内累加 `cn_stock_industry_change WHERE industry='sw2021' AND industry_level=1 AND change_flag=1` 事件 (写入新行业 ID) | [uint8 ID, 存为 float]; 0=未知 / 1..31 = SW2021 一级 (映射见 `feature/industry.hpp::SW2021_L1_NAMES`); 上市前/无事件期保持 0                                                                                        |
-| inter  | low_p        | 时序 | close_raw                                                                          | `close_raw < 1.0`                                                                                                                                                                                                                                      | [bool]                                                                                                                                                                                                              |
-| inter  | low_mc       | 时序 | mcap_raw, meta:list_sector                                                         | `mcap_raw < (5e8 if meta.list_sector == 1 else 3e8)`                                                                                                                                                                                                   | [bool]; 主板判定 inline `meta.list_sector[a] == 1`                                                                                                                                                                  |
-| inter  | limit_up     | 时序 | close_raw, up_lim                                                                  | `close_raw ≥ up_lim − 1e-4`                                                                                                                                                                                                                            | [bool]; 策略涨停判定                                                                                                                                                                                                |
-| inter  | limit_dn     | 时序 | close_raw, dn_lim                                                                  | `close_raw ≤ dn_lim + 1e-4`                                                                                                                                                                                                                            | [bool]; 策略跌停判定                                                                                                                                                                                                |
-| inter  | pool_b       | 时序 | susp, is_margin, delist_age, meta:exchange, meta:list_sector, industry_l1          | `meta.exchange ∈ POOL_EXCHANGE_WHITELIST ∧ meta.list_sector ∈ POOL_LIST_SECTOR_WHITELIST ∧ industry_l1 ∈ POOL_INDUSTRY_L1_WHITELIST ∧ ¬susp ∧ ¬is_finite(delist_age) ∧ (true if POOL_INCLUDE_MARGIN else ¬is_margin)`                                  | [bool]; basic pool, 白名单 + 开关集中在 `config.hpp`; exchange 走中文全称 (与 cn_stock_basic_info.exchange 一致), list_sector 走 int8 集合 (默认 {1}=主板), industry_l1 白名单启动期转 SW2021 ID mask               |
-| inter  | pool         | 截面 | pool_b, mcap_raw                                                                   | `pool_b ∧ rank(mcap_raw asc) ≤ POOL_UNIVERSE_SIZE` (per D, within `pool_b`; 默认 100)                                                                                                                                                                  | [bool]; 排名母集 (pct_rank 母集 + nth-smallest 母集)                                                                                                                                                                |
-| inter  | tradable     | 截面 | pool, profit_st, revenue_st, dividend_st, trading_st, risk_warn, new_list          | `pool ∧ ¬(profit_st ∨ revenue_st ∨ dividend_st ∨ trading_st ∨ risk_warn ∨ new_list)`                                                                                                                                                                   | [bool]; 选股母集 (策略实际可买入的 a); pool 保持不变以稳定 factor pct_rank 口径, 下游 top-K 在 tradable 内挑                                                                                                        |
+**依赖表格现场生成, 不在文档里维护副本**: `main.cpp` 在 `feature::build()` 之后调用 `feature::print_dependency_table()` (`config::FEATURE_TABLE_ENABLE` 门控), 运行期沿 `deps` 遍历打印定宽表格 (kind / feature / 轴 / deps / formula / assumption, 每行截断到固定宽度), 分组顺序 = 公共 (`FRAMEWORK_ROOTS` 可达闭包 ∪ 被全部策略共同引用的节点) → 各策略专属, 组内保持拓扑序. 想看当前全部特征的公式/假设, 直接跑一次 build 看 stdout, 或读对应 `def/**/<name>.hpp` 里的 `formula`/`assumption` 字段 (二者同源, 不可能不一致).
 
-**涨跌停交易约束** (下游策略, 不在张量内):
-- 物理约束 (做不到): 涨停日不买入 / 跌停日不卖出.
-- 策略主动 (业务选择): 涨停日不卖出 (赌 T+1 超额) / 跌停日不买入 (避 T+1 风险).
+## 构建流水线 (data → Tensor → 策略)
 
-## 构建流水线 (data → Tensor)
-
-`feature::build()` 串 4 phase 全过程式; 入口 `cpp/src/feature/build.cpp`.
+`feature::build()` 串 0/1/2/2s/3/3s/4 共 7 个 phase 全过程式; 入口 `cpp/src/feature/build.cpp`; build 完成后 `main.cpp` 逐策略跑 `backtest::run` + `analysis::run`.
 
 **Phase 切分动机**
 
-| phase  | 数据形态          | 任务粒度 | 并行性             | 主要工作                                                      |
-| ------ | ----------------- | -------- | ------------------ | ------------------------------------------------------------- |
-| 0 axes | 标量级元数据      | 主线程   | 无                 | 一次性确定 D / A / per-A 静态                                 |
-| 1 load | itf PIT pool      | itf ≈ 12 | mmap cache + build | hit: mmap pool.bin; miss: 并行读月 parquet → 直写 pool + dump |
-| 2 时序 | 列式 (per-A 全 D) | a ≈ 5500 | embarrassingly (A) | 单调时间序列计算 + 状态机                                     |
-| 3 截面 | 行式 (per-D 全 A) | d ≈ 2750 | embarrassingly (D) | 截面归一 + universe 选取                                      |
+| phase   | 数据形态          | 任务粒度       | 并行性             | 主要工作                                                      |
+| ------- | ----------------- | -------------- | ------------------ | ------------------------------------------------------------- |
+| 0 axes  | 标量级元数据      | 主线程         | 无                 | 一次性确定 D / A / per-A 静态                                 |
+| 1 load  | itf PIT pool      | itf ≈ 12       | mmap cache + build | hit: mmap pool.bin; miss: 并行读月 parquet → 直写 pool + dump |
+| 2 时序  | 列式 (per-A 全 D) | a ≈ 5500       | embarrassingly (A) | 共享图 TS_ORDER 节点: 单调时间序列计算 + 状态机               |
+| 2s 策略 | 列式 (per-A 全 D) | a ≈ 5500       | embarrassingly (A) | 逐策略算 `pool_b` (依赖共享 TS 节点)                          |
+| 3 截面  | 行式 (per-D 全 A) | d ≈ 2750       | embarrassingly (D) | 共享图 CS_ORDER 节点: 截面归一 (winsor/z/pct_rank/中性化)     |
+| 3s 策略 | 行式 (per-D 全 A) | d ≈ 2750       | embarrassingly (D) | 逐策略算 `pool → tradable → score → rank`                     |
+| 4 校验  | 逐节点/逐策略列   | ALL_NODES 规模 | 串行 (轻量)        | `must_be_finite` 契约 + 策略 5 列全 finite 断言               |
 
-**设计原则** (业务密集化 + 性能选择, 改字段表/计算图不动外层):
-- **agnostic 外层 + 单点真理**: `pit.cpp` (itf 维, 每 itf 一组 `{build, cache_layout, post_ffill?}` + `ITFS[]` 表挂载), `feature.cpp` (feature 维, 每 feature 一个 `ts_xxx` / `cs_xxx` + `FEATURES[]` 表挂载); 外层 flow (`load.cpp` / `ts.cpp` / `cs.cpp` / `build.cpp`) 仅通过函数指针表迭代调度, 不出现任何具体 itf 名 / feature 名.
+**设计原则** (业务密集化 + 性能选择, 改计算图不动外层; 同步点仅 phase 间硬屏障 [`build.cpp` 顺序 `join` + `misc::Timer` 报段时], phase 内无屏障):
+- **agnostic 外层 + 单点真理**: `pit.cpp` (itf 维, 每 itf 一组 `{build, cache_layout, post_ffill?}` + `ITFS[]` 表挂载) 与 `feature/def/**/*.hpp` (节点维, 每节点一个 `FeatureSpec`); 外层 flow (`load.cpp` / `ts.cpp` / `cs.cpp` / `build.cpp`) 仅通过函数指针/`FeatureSpec*` 表迭代调度, 不出现任何具体 itf 名 / 节点名.
 - **pool cache 零反序列化**: `data/pool/<itf>.bin` 是 `PitPool` 字段的紧凑 POD blob 拼接 (header + section table + raw bytes). hit 路径 `mmap(MAP_PRIVATE)` → `PoolArr.map_view` 把 PitPool 字段指针指过去 ⇒ **零 copy / 零反序列化 / 零 hash lookup** (后续 overlay / ffill 的少量写入由 OS COW 落匿名页, 不脏文件). cache key = FNV(POOL_VERSION + itf name + 该 itf 全部月 parquet `relpath/size/mtime` + axes 语义 hash (dates+codes 内容)). 月 parquet 与轴不变 ⇒ cache 永远 hit; 开放月重拉只打穿该 itf, 其他 itf 不受影响.
 - **PIT cutoff 在 Phase 1 build 一次性消化**: `build` 内 `row = floor_date(visible_date) - itf::CUTOFF` 直接定位行 D, 写完后 `pool[a, d]` 即 "T 当日合法可见数据". Phase 2/3 不再做任何时间偏移 — 杜绝下游漏算 cutoff 导致的未来数据泄漏.
-- **F 枚举顺序 = 计算顺序 = 隐式 topo sort**: 调度器 (`ts.cpp` / `cs.cpp`) 仅按 `FEATURES[]` 索引顺序串行调; 只要 "新 feature 加在其依赖之后", 后段直接读 `T.ts_row(prior_f, a)` 即可, 无需运行时 topo / 依赖锁.
+- **计算顺序 = 编译期拓扑序, 无运行时依赖锁**: `registry.hpp` 的 `TS_ORDER` / `CS_ORDER` 已是合法拓扑序 (见 §特征系统); 调度器 (`ts.cpp` / `cs.cpp`) 仅按该顺序串行调, 后段直接读 `T.ts_row(prior_spec, a)` 即可.
 - **网格无锁 + 事件 per-A 锁**: 网格 itf 因 `(a, v_idx)` slot 唯一 → 完全无锁写; 事件 itf 多对一 emplace, 锁粒度精到 `vector<mutex>(n_a)` (非全局, 非 per-itf), 接近无争用.
-- **F 段独立 A*D layout (a-major / d-minor)**: Phase 2 的 `ts_row(f, a)` 是连续 span (cache friendly, 主路径); Phase 3 的 `gather/scatter_cs_row(f, d)` 是 stride-D copy (3 buffer 复用, 一次性付出).
+- **独立 A×D layout (a-major / d-minor)**: Phase 2 的 `ts_row(spec, a)` 是连续 span (cache friendly, 主路径); Phase 3 的 `gather/scatter_cs_row(spec, d)` 是 stride-D copy (3 buffer 复用, 一次性付出); 策略块 `strat_mats` 布局相同, 各策略固定 5 列独立存储, 不占共享图节点位.
+- **策略与共享图解耦**: Phase 2/3 只算图上通用节点 (raw/中间量/filter/factor), 对策略配置一无所知; Phase 2s/3s 才引入 `strategy::STRATEGIES[]`, 把每策略的 `pool_b/pool/tradable/score/rank` 算成独立的 5 列, 新增策略不影响共享图.
 
 ```text
 Phase 0 axes  (主线程; axis.cpp + tensor.cpp)
@@ -330,10 +302,11 @@ Phase 0 axes  (主线程; axis.cpp + tensor.cpp)
   meta ← load_stock_meta(axes)               # per-A 静态: name / list_date / delist_date /
                                              #   list_sector (int8: 1=主板/2=创业板/3=科创板/4=北交所) /
                                              #   exchange (中文全称, 与 cn_stock_basic_info.exchange 一致)
-                                             #   industry_l1 是时变, 见 Phase 2 inter feature, 不入 meta
-  T    ← Tensor(axes)                        # F 段独立 A*D float, NaN 初始化, a-major / d-minor
-                                             #   ts_row(f,a) = 连续 D span (Phase 2 主路径)
-                                             #   gather/scatter_cs_row(f,d) = stride D copy (Phase 3 入口)
+                                             #   industry_l1 是时变节点 (见 def/basic/), 不入 meta
+  T    ← Tensor(axes, ALL_NODES, N_STRAT_SLOTS)  # 共享图段按 ALL_NODES 顺序建 index_ (地址→下标);
+                                             #   ts_row(spec,a) = 连续 D span (Phase 2 主路径)
+                                             #   gather/scatter_cs_row(spec,d) = stride D copy (Phase 3 入口)
+                                             #   strat_mats 另存各策略固定 5 列
 
 Phase 1 PIT load  (per-itf pool cache via mmap; load.cpp 通用 flow + pit.cpp 单点 itf 表)
   # 形态: 月度 parquet → (miss 时) 直写 PitPool → 落 data/pool/<itf>.bin (POD blob 紧凑拼接).
@@ -368,125 +341,101 @@ Phase 1 PIT load  (per-itf pool cache via mmap; load.cpp 通用 flow + pit.cpp �
   for itf in ITFS[] where itf.post_ffill:    # 网格 itf per-A forward fill (停牌期间继承前值)
     itf.post_ffill(axes, pool)               # 同样走 mmap COW, ffill 逻辑改不用 bump POOL_VERSION
 
-Phase 2 时序  (per-A 并行; ts.cpp 通用 flow + feature.cpp 单点 feature 表)
+Phase 2 时序  (per-A 并行; ts.cpp 通用 flow + registry.hpp::TS_ORDER)
   # 形态: 列式 (per-A 全 D), A 维 embarrassingly parallel; D 内强 causal (滚动/状态机).
-  # 不变量: 每 worker 独占一段 ts_row(*, a), 无写冲突; FEATURES[] TS 段顺序 = 计算顺序,
-  #         后段直读 T.ts_row(prior_f, a) (例: low_p 读 close_raw; revenue_st 读 rev_raw).
+  # 不变量: 每 worker 独占一段 ts_row(*, a), 无写冲突; TS_ORDER 已是合法拓扑序,
+  #         后段直读 T.ts_row(prior_spec, a) (例: low_p 读 close_raw; revenue_st 读 rev_raw).
   # NaN 策略: 不人为补 0 — 上市前/退市后/长期停牌的 NaN 自然流到下游, 让数据可用性显式可判.
+  # 具体每个节点算什么/为什么 → §特征系统 (公式/假设即代码里的 FeatureSpec::formula/assumption, 不重复贴此处).
 
   parallel for a in [0, n_a) (n_threads = core_count):
-    for f in FEATURES[] where axis == TimeSeries:
-      f.compute_ts(a, axes, pool, meta, T)   # 写 T.ts_row(F::self, a); 读 PitPool / StockMeta / 前段 T.ts_row
+    for spec in TS_ORDER:
+      spec->compute_ts(a, axes, pool, meta, T)   # 写 T.ts_row(*spec, a); 读 PitPool / StockMeta / 前段 T.ts_row
 
-  # FEATURES[] 索引 = F 枚举值 = 计算顺序; enum 大段仅 TS / CS, 段内对仗如下:
-  #   raw 网格      (PitPool dense 直读, pool[a, d] 已是 row D 合法数据):
-  #     close_raw   ← cn_stock_real_bar1d.close                              (不复权真价 [元/股]; PIT-immutable)
-  #                   (PitPool 同时携带 adjust_factor, 不入 tensor 顶层, 仅 ts_daily_return 内部用)
-  #     share_raw   ← cn_stock_shares.total_shares[a, d]                    (单位股)
-  #     mcap_raw    ← close_raw × share_raw                                 (单位元, 真市值)
-  #     fmcap_raw   ← close_raw × cn_stock_shares.total_float_shares[a, d]   (真流通市值)
-  #     up_lim / dn_lim ← cn_stock_limit_price.upper_limit / lower_limit[a, d-1]  (内部主动 -1, 对齐 close_raw[D]=D-1)
-  #     susp        ← cn_stock_status.suspended[a, d] == 1
-  #     is_margin   ← cn_stock_margin_trading_detail[a, d] 存在性
-  #     mr_bal_raw  ← cn_stock_margin_trading_detail.financing_balance[a, d]
-  #     ms_bal_raw  ← cn_stock_margin_trading_detail.securities_lending_balance[a, d]
-  #     risk_warn   ← pool.status.st_status[a, d]                            (派生 4 态 0/1/2/3; 每日快照, 不需回放; 详见 §字段表)
-  #     industry_l1 ← 最近月初 cn_stock_industry_component WHERE industry='sw2021' 取 industry_level1_name
-  #                   并按 cn_stock_industry_change 月内累加
-  #   raw 财务      ← cn_stock_financial_ttm_shift (shift=0)
-  #                  + cn_stock_financial_balance_general_pit (latest shift)
-  #                  + cn_stock_financial_income_general_pit (年报筛选)
-  #                  + cn_stock_dividend (12M sum)
-  #     pe_raw / ps_raw / pcf_raw / dy_raw / pb_raw / roe_raw / roa_raw / rev_raw / ni_raw
-  #     共享 helper scan_latest_{ttm,balance,ttm_and_balance} 统一设防:
-  #       丢弃 ev.v < list_d 的事件 (BigQuant 上市前就标可见, 且值不可信) → 上市前留 NaN
-  #     roe_raw / roa_raw 分母走 avg5 = TTM 窗口 5 点平均 (anchor=ttm.report_date + 前 4 季末),
-  #       窗口不完整 → NaN; 分子 12 个月流量必须配同窗口平均存量
-  #   raw meta 派生 (per-A 动态: 每天 +1; PIT — 仅在事件日及之后写值, 否则 NaN):
-  #     list_age   ← date_days[d] − parse(meta.list_date[a])   if D ≥ list_date   else NaN
-  #     delist_age ← date_days[d] − parse(meta.delist_date[a]) if D ≥ delist_date else NaN
-  #   derived       (T 内依赖):
-  #     daily_return ← (close[d]·af[d]) / (close[d-1]·af[d-1]) - 1           # 后复权链式; 内部从 PitPool 读 close+adjust_factor
-  #                                                                         # (含分红再投入的真持有收益; 除权日平滑无负跳)
-  #                                                                         # d==0 或前一日 close/af NaN/0 → NaN
-  #     low_p        ← close_raw < 1.0                                       # 真低价股 (用真价)
-  #     low_mc       ← mcap_raw < (5e8 if meta.list_sector[a] == 1 else 3e8) # 真市值阈值
-  #     limit_up / limit_dn ← close_raw vs up_lim / dn_lim                   # 真价 vs 真涨跌停 (二者同未复权口径)
-  #   filter        (state machine; ts.hpp::state_machine_intervals 模板):
-  #     profit_st   ← OR over { forecast 触发 → off=min(income_general_pit 同 report_date, ceil(Y+1,4,30)) }
-  #                   on_d=trigger.v, 区间 [on_d, off_d) 写 1
-  #     revenue_st  ← forecast 触发 → off=min(income_general_pit 同 report_date, ceil(Y+1,4,30)),
-  #                   区间内再叠 (meta.list_sector == 1 ∧ rev_raw < threshold(end_date.Y))
-  #     dividend_st ← 阶梯 forward fill: 每 dividend event 重算 3y_sum (累加历史 events with
-  #                     report_date.Y ∈ [publish_y-3, publish_y-1] 的 cash_after_tax × share_raw[event.v]),
-  #                     仅 meta.list_sector==1 (主板); 区间 [e.v, next.v) 内按 (ni_raw>0 ∧ 3y_sum 双阈) 写 1.
-  #                     warmup_d = max(axes 起点+3y, list_date+3y), 之前一律 0 (3y 窗口不完整, 不偏严).
-  #     trading_st  ← rolling 20D over (low_p ∨ low_mc).all()                # 单调计数
-  #     new_list    ← is_finite(list_age) ∧ list_age < 60
-  #   pool (TS):
-  #     pool_b   ← (meta.exchange ∈ config::POOL_EXCHANGE_WHITELIST)        # 中文全称 string
-  #                ∧ (meta.list_sector ∈ config::POOL_LIST_SECTOR_WHITELIST) # int8 集合, {1}=仅主板
-  #                ∧ (industry_l1[a, d] ∈ ID-mask of POOL_INDUSTRY_L1_WHITELIST)  # 时变, mask 启动期一次性建
-  #                ∧ ¬susp ∧ ¬is_finite(delist_age)
-  #                ∧ (true if config::POOL_INCLUDE_MARGIN else ¬is_margin)
+Phase 2s 策略 TS 列  (per-A 并行; strategy/columns.cpp::compute_ts_columns)
+  # 依赖共享 TS 节点 (susp / is_margin / list_age / delist_age / industry_l1), 逐策略算 pool_b
+  # (exchange/list_sector/industry_l1 白名单 ∧ 已上市 ∧ ¬susp ∧ ¬退市 ∧ margin 开关), 写 T.strat_mats.
 
-Phase 3 截面  (per-D 并行; cs.cpp 通用 flow + feature.cpp 单点 feature 表)
+  parallel for a in [0, n_a):
+    for s in strategy::STRATEGIES:
+      compute pool_b for (s, a)   # 写 T.strat_ts_row(slot(s_idx, SF::pool_b), a)
+
+Phase 3 截面  (per-D 并行; cs.cpp 通用 flow + registry.hpp::CS_ORDER)
   # 形态: 行式 (per-D 全 A), D 维 embarrassingly parallel; A 内强 causal (winsor/z/rank).
   # 入口代价: gather_cs_row 是 stride-D copy (vs Phase 2 ts_row 连续 span); 每 worker
   #          thread-local 3 buffer (length=n_a) 复用, 避免反复分配.
-  # 不变量: FEATURES[] CS 段顺序 = 计算顺序 (tradable 在最后, 读 pool + 6 filter).
+  # 不变量: CS_ORDER 已是合法拓扑序. 截面参与集统一先 mask_offmarket(d) — 当日未上市
+  #   (list_age NaN) 或已退市 (delist_age finite) 的 a 置 NaN, 不进 winsor 分位 / OLS / pct_rank.
 
   parallel for d in [0, n_d) (n_threads = core_count):
     bufs ← thread-local {a, b, c}: 3 × vector<float>(n_a)
-    for f in FEATURES[] where axis == CrossSection:
-      f.compute_cs(d, axes, T, bufs)         # 写 T.scatter_cs_row(F::self, d, …)
+    for spec in CS_ORDER:
+      spec->compute_cs(d, axes, T, bufs)         # 写 T.scatter_cs_row(*spec, d, …)
 
-  # CS 业务一览 (实现见 feature.cpp::impl::cs_*):
-  #   截面参与集: 两条流水开头统一 mask_offmarket(d) — 当日未上市 (list_age NaN) 或
-  #     已退市 (delist_age finite) 的 a 置 NaN, 不进 winsor 分位 / OLS / pct_rank.
-  #     bar1d+shares 网格是 per-A ffill 的, 退市后 close/total_shares 永久冻结 ⇒ 估值
-  #     raw 退市后仍 finite 但已是僵尸值; 实测 2024 后每日 150-200 只, EP 低到 -26,
-  #     数量超过 1% 缩尾名额, 把 1% 分位从 -0.43 拉到 -3.18, 中性EP 秩相关 0.996→0.568.
-  #   factor 流水: cs.hpp::factor_pipeline(d, src, dst, invert, T, bufs):
-  #     buf[A] ← T.gather_cs_row(src, d); mask_offmarket(d)
-  #     if invert: buf[a] ← 1/buf[a]         # NaN 或 0 → NaN; 价/估值类 invert=true (越小越优), 收益类 invert=false
-  #     buf ← winsor_mad(buf, k=3)           # 截断到 [med ± k·MAD]; 全等/<2 finite → 跳过
-  #     buf ← z(buf)                         # (x − mean)/std, 跳 NaN; var≤0 → 跳过
-  #     buf ← pct_rank(buf)                  # 升序百分位 ∈ [0,1], 同值平均秩, 跳 NaN
-  #     T.scatter_cs_row(dst, d) ← buf
-  #   close (← close_raw, invert), mcap, fmcap (全 invert, winsor_mad 流水)
-  #   估值/收益中性化因子: cs.hpp::neutral_pipeline(d, src, dst, invert, T, bufs):
-  #     a ← gather(src); mask_offmarket(d); if invert: 1/a; winsorize_quantile(1%,99%)
-  #     b ← log(mcap_raw); c ← industry_l1; neutralize(a,b,c)  # 行业+log(mcap) OLS 残差 (FWL 等价)
-  #     a ← z(a); a ← pct_rank(a); 均值填充; scatter(dst)
-  #     倒数类 (pe/pb/ps/pcf) invert=true (raw 取倒数, 负值保留), roe/roa/dy 无 invert
-  #   注: 中性化口径实测对齐果仁 "中性BP/EP/CP/SP/ROE/ROA/股息率"
-  #       (winsor 1%-99% + 申万一级 + log 总市值 OLS 残差, 全市场截面); 负值参与拟合.
-  #   pool: cands ← {a : pool_b[a,d]=1 ∧ is_finite(mcap_raw[a,d])}
-  #         pool[a,d] ← 1.0 if a ∈ nth_smallest(cands by mcap_raw, UNIVERSE_SIZE) else 0.0
-  #   tradable: pool[a,d] ∧ ¬(profit_st ∨ revenue_st ∨ dividend_st ∨ trading_st ∨ risk_warn ∨ new_list)[a,d]
+  # 通用 CS kernel (cs.hpp, 跨 factor 共用):
+  #   factor_pipeline(d, src, dst, invert, T, bufs): gather → mask_offmarket → [invert 1/x]
+  #     → winsor_mad(k=3) → z → pct_rank → scatter (close/mcap/fmcap/cffoa_ttm12 等直接用)
+  #   neutral_pipeline(d, src, dst, invert, T, bufs): gather → mask_offmarket → [invert] →
+  #     winsorize_quantile(1%,99%) → neutralize(行业+log(mcap) OLS 残差, FWL 等价) → z →
+  #     pct_rank → 均值填充 → scatter (估值/盈利 ttm 系因子用; 倒数类 pe/pb/ps/pcf invert=true)
+  #   中性化口径实测对齐果仁 "中性BP/EP/CP/SP/ROE/ROA/股息率"
+  #     (winsor 1%-99% + 申万一级 + log 总市值 OLS 残差, 全市场截面); 负值参与拟合.
+
+Phase 3s 策略 CS 列  (per-D 并行; strategy/columns.cpp::compute_cs_columns)
+  # 依赖共享 CS 节点 (rank_key / factor 全集) + Phase 2s 的 pool_b, 逐策略算:
+  #   pool     ← pool_b ∧ rank(rank_key) ≤ universe_size (per D, within pool_b)
+  #   tradable ← pool ∧ ¬OR(filters)
+  #   score    ← Σ w·factor / Σ w·1{finite}                (全截面可算, 供 analysis IC)
+  #   rank     ← score 在 tradable 内的 1-based 降序排名, 0 = 不在母集
+  # 回测 top-N / exit / watch 与实盘选股读同一个 rank 列 ⇒ "回测 = 实盘" 收敛到单一入口.
+
+  parallel for d in [0, n_d):
+    for s in strategy::STRATEGIES:
+      compute pool/tradable/score/rank for (s, d)
+
+Phase 4 校验  (串行, 轻量)
+  for spec in ALL_NODES where spec->must_be_finite:
+    T.assert_finite(*spec)              # 状态机 bool / factor pipeline 输出等契约列必须全 finite
+  for slot in [0, N_STRAT_SLOTS):
+    T.assert_finite_strat(slot)         # 策略 5 列契约上全 finite
 ```
 
-并发模型规格 (动机/不变量已在各 Phase 头部展开, 此处仅列数据 + 同步点)
-- Phase 0: 主线程; 全量 in-memory; 跑一次.
-- Phase 1: per-itf pool cache (mmap MAP_PRIVATE); hit ≈ μs 级零 copy; miss 走并行读月 parquet → 直写 pool → dump. 网格无锁, 事件 `vector<mutex>(n_a)`; 末段 `apply_meta_overlays` + `post_ffill` 单线程串行 (mmap COW 触发, 不脏文件).
-- Phase 2: 任务数 ≈ n_a (5500); 每 worker 独占 `T.ts_row(*, a)`.
-- Phase 3: 任务数 ≈ n_d (2750); 每 worker 独占 `cs_row` 段 + thread-local 3 buffer (length=n_a).
-- 同步点: 仅 phase 间硬屏障 (`build.cpp` 顺序 `join` + `misc::Timer` 报段时), phase 内无屏障.
+## 策略层 (每策略一份固定小管线)
 
-## 增减用法 (改计算图 / 字段表)
+每个策略是 `cpp/include/strategy/def/<name>.hpp` 下的一个 `StrategySpec`, 叶子全部指向共享计算图节点 (`FeatureSpec` 指针), 只在 `cpp/include/strategy/registry.hpp::STRATEGIES[]` 挂载一行:
 
-新增/修改/删除一个 itf:
+```cpp
+inline constexpr std::array<const StrategySpec *, N> STRATEGIES = {{
+    &def::small_cap,
+    // &def::<new_strategy>,
+}};
+```
+
+`StrategySpec` 字段:
+- `pool`: `PoolSpec` — exchange/list_sector/行业白名单 + `rank_key` (排名用的共享节点, 如 `mcap_raw_spec`) + `rank_asc` + `universe_size`.
+- `filters`: `std::span<const FeatureSpec *const>`, 全部必须 `Kind::Filter` (registry consteval 校验).
+- `weights`: `std::span<const FactorWeight>` (`{f, w}`), `f` 必须 `Kind::Factor` 且 `w > 0`.
+- `bt_start_date` / `hold_n` / `exit_ratio`: per-策略回测参数 (成本 / `capital_base` 是券商账户属性, 留在 `config.hpp` 全策略共享).
+
+每策略固定绑定 5 列 (`strategy::SF`), 存 `Tensor.strat_mats` (不占共享图 `mats`), 计算见 §构建流水线 Phase 2s/3s: `pool_b` (静态白名单母集) → `pool` (截面 universe) → `tradable` (可买母集) → `score` (加权因子) → `rank` (tradable 内降序排名, 0=不在母集). 回测/实盘选股/分析全部只读这 5 列, 不重复实现选股逻辑.
+
+`main.cpp` 对 `strategy::STRATEGIES[]` 循环跑 `backtest::run` + `analysis::run`, 各自输出到独立的 `output/strategy/<name>/{backtest,analysis}/`; 共享的 `feature::ALL_NODES` 计算图与 `backtest::NameTimeline` 只算一次. 涨跌停交易约束 (下单层面, 不在张量内): 物理约束 (做不到) — 涨停日不买入 / 跌停日不卖出; 策略主动 (业务选择) — 涨停日不卖出 (赌 T+1 超额) / 跌停日不买入 (避 T+1 风险).
+
+## 增减用法
+
+新增/修改/删除一个 itf (数据源接入):
 1. `cpp/src/api/{bigquant,tushare}/spec.cpp`: 在 `SPECS[]` 追加 spec (BigQuant 的 `TableSpec{name, visible_date, FetchKind, FetchFreq}` / Tushare 的 `InterfaceSpec{name, api, day_params, drop_fields}`).
 2. `cpp/include/feature/pit.hpp`: 加/改 typed `Grid<…>` / `<…>Ev` struct (字段必须 POD: `int32_t` 日期 / `uint8_t` enum / float / int), 在 `PitPool` 加 `PoolArr<T>` / `EventStore<Ev>` 成员.
 3. `cpp/src/feature/pit.cpp`: 加 `namespace itf_<name> { build, cache_layout, [post_ffill] }` 一组 dense block; `build` 端到端从月度 parquet (TableView 列访问) 直接写入 pool (内部 prealloc → 并行读月 → emplace → sort → finalize 一路串通); `cache_layout(pool, visitor)` 按固定顺序对每个 PoolArr/EventStore 调 `v.section(...)`.
 4. `cpp/src/feature/pit.cpp`: `ITFS[]` 末尾追加一行 (`{file_name, &build, &cache_layout, post_ffill_or_nullptr}`).
    外层 `load.cpp` / `build.cpp` 不动. 改 PitPool 字段 / Ev struct / cache_layout 顺序时, `load.cpp::POOL_VERSION` +1.
 
-新增/修改/删除一个 feature:
-1. `cpp/include/feature/feature.hpp`: 在 `F` 枚举对应位置加一行 (位置 = 计算顺序; 后于其依赖).
-2. `cpp/src/feature/feature.cpp`: 在 `namespace impl` 加 `ts_<name>` (签名 `TsComputeFn`) 或 `cs_<name>` (签名 `CsComputeFn`).
-3. `cpp/src/feature/feature.cpp`: `FEATURES[]` 对应位置加一行 `{name, kind, axis, &impl::ts_xxx | nullptr, &impl::cs_xxx | nullptr}`.
-   外层 `ts.cpp` / `cs.cpp` / `build.cpp` 不动. 依赖通过 enum 顺序保证 (无需 topo sort).
+新增一个 raw / 中间量 / filter / factor 节点 (见 §特征系统):
+1. 写 `cpp/include/feature/def/{basic,factor,filter}/<name>.hpp`: 一个 `ts_<name>`/`cs_<name>` + 一个 `inline constexpr FeatureSpec <name>_spec` (含必填的 `formula`/`assumption`).
+2. 在需要它的地方 `#include` 这个文件并引用 `&<name>_spec`: 某个已挂载节点的 `deps` 数组, 或某个 `StrategySpec` 的 `filters`/`weights`/`pool.rank_key`.
+   没有第三步 — 不改 `registry.hpp`, 不改 `ts.cpp`/`cs.cpp`/`build.cpp`, 计算图/顺序/环检测全部编译期自动完成. 通用 kernel: `feature/ts.hpp::state_machine_intervals<TEv>` 模板; `feature/cs.hpp::winsor_mad/z/pct_rank/factor_pipeline/neutral_pipeline`. 大多数新 factor 一行 `factor_pipeline(d, xxx_raw_spec, xxx_spec, invert, T, b.a)` 即可.
 
-通用 kernel (跨 feature 共用): `feature/ts.hpp` 暴露 `state_machine_intervals<TEv>` 模板; `feature/cs.hpp` 暴露 `winsor_mad / z / pct_rank / factor_pipeline`. 大多数新 factor 一行 `factor_pipeline(d, F::xxx_raw, F::xxx, invert, T, b.a)` 即可.
+新增一个策略:
+1. 写 `cpp/include/strategy/def/<name>.hpp`: 一个 `inline constexpr StrategySpec <name>` (白名单/filters/weights/回测窗口), 叶子引用现有或新增的 `FeatureSpec`.
+2. `cpp/include/strategy/registry.hpp::STRATEGIES[]` 追加一行 `&def::<name>`.
+   `consteval registry_detail::validate()` 会校验名字唯一非空 / filters 全 `Kind::Filter` / weights 全 `Kind::Factor` 且 w>0 / 参数域合法; `feature/registry.hpp` 会自动把该策略新引用到的节点纳入计算图 (无需再改共享图任何文件).
