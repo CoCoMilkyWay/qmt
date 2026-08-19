@@ -168,9 +168,11 @@ void cs_tradable(int s, const StrategySpec &spec, int d, Tensor &T,
                          std::span<const float>(buf_a.data(), na));
 }
 
-// score: 配置因子 finite-加权平均 (全截面可算, 供 analysis IC).
+// score: 配置因子 finite-加权平均 (全截面可算, 供 analysis IC). w 可正可负
+//   (符号定义该因子的方向), 分母用 Σ|w| (非 Σw) 归一, 避免正负抵消导致
+//   除零或整体符号被意外翻转.
 //   factor_pipeline 已保证每个 factor 全 finite; pool/tradable 由下游另行 mask.
-//   buf_a=acc→输出, buf_b=权重和, buf_c=factor gather.
+//   buf_a=acc→输出, buf_b=|权重|和, buf_c=factor gather.
 void cs_score(int s, const StrategySpec &spec, int d, Tensor &T,
               std::span<float> buf_a, std::span<float> buf_b,
               std::span<float> buf_c) {
@@ -180,11 +182,12 @@ void cs_score(int s, const StrategySpec &spec, int d, Tensor &T,
 
   for (const FactorWeight &fw : spec.weights) {
     T.gather_cs_row(*fw.f, d, buf_c);
+    float abs_w = std::fabs(fw.w);
     for (std::size_t a = 0; a < na; ++a) {
       float v = buf_c[a];
       if (is_finite(v)) {
         buf_a[a] += fw.w * v;
-        buf_b[a] += fw.w;
+        buf_b[a] += abs_w;
       }
     }
   }

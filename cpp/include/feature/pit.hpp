@@ -278,7 +278,7 @@ struct ForecastEv {
 
 // cn_stock_financial_ttm_shift: 财务 TTM (shift=0 为主记录;
 //   同 (date, instrument) 的 shift=4 记录 [4 个季度 = 12 个月前的同口径 TTM]
-//   在 build 时配对写入 net_cffoa_ttm_shift4, 供 cfo 增长率用).
+//   在 build 时配对写入 net_cffoa_ttm_shift4, 供 cffoa_raw 算同比增量用).
 //   per-A 沿 v 升序取 latest event 即可 (max v 自然取新).
 struct FinancialTtmEv {
   std::int32_t v;

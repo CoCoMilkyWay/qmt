@@ -15,7 +15,8 @@
 
 #include <array>
 
-// 策略: low_pb_small_cap — 主板小市值, 低估值 (中性 EP + 中性 BP) 双因子.
+// 策略: low_pb_small_cap — 主板小市值 + 低价 (mcap/fmcap/close 负权) +
+//   中性 BP 估值因子 (正权).
 
 namespace strategy::def {
 
@@ -77,9 +78,9 @@ inline constexpr const feature::FeatureSpec *low_pb_small_cap_filters[] = {
 };
 
 inline constexpr FactorWeight low_pb_small_cap_weights[] = {
-    {&feature::def::mcap_spec, 10.0f},
-    {&feature::def::fmcap_spec, 10.0f},
-    {&feature::def::close_spec, 1.0f},
+    {&feature::def::mcap_spec, -10.0f},
+    {&feature::def::fmcap_spec, -10.0f},
+    {&feature::def::close_spec, -1.0f},
     {&feature::def::bp_ttm3_spec, 4.0f},
 };
 

@@ -51,7 +51,8 @@ inline constexpr int slot(int s, SF c) {
 
 struct FactorWeight {
   const feature::FeatureSpec *f; // 必须 Kind::Factor (registry consteval 校验)
-  float w;                       // 必须 > 0; 不想要的 factor 直接删行 (=禁用)
+  float w;                       // 必须 != 0 (符号定义方向, 正/负均可); 不想要的
+                                 // factor 直接删行 (=禁用)
 };
 
 // 两融标的 (is_margin==1) 的池化策略 — per-D per-A 动态判定:

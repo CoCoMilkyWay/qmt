@@ -9,7 +9,7 @@
 #include "feature/graph.hpp"
 
 // factor: roa_ttm12 — 中性 ROA. pct_rank(z(neutralize(winsorize_quantile(roa_raw))))
-//   + 截面均值填充; 无 invert.
+//   + 截面均值填充.
 
 namespace feature::def {
 
@@ -27,7 +27,8 @@ inline constexpr FeatureSpec roa_ttm12_spec{
     /*assumption=*/"—"};
 
 inline void cs_roa_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
-  neutral_pipeline(d, roa_raw_spec, roa_ttm12_spec, /*invert=*/false, T, b);
+  T.gather_cs_row(roa_raw_spec, d, b.a);
+  neutral_pipeline(d, roa_ttm12_spec, T, b);
 }
 
 } // namespace feature::def

@@ -1,9 +1,9 @@
 #include "feature/cs.hpp"
 
-#include "feature/def/basic/industry_l1.hpp"
-#include "feature/def/factor/mcap_raw.hpp"
 #include "feature/def/basic/delist_age.hpp"
+#include "feature/def/basic/industry_l1.hpp"
 #include "feature/def/basic/list_age.hpp"
+#include "feature/def/factor/mcap_raw.hpp"
 #include "feature/industry.hpp"
 #include "feature/registry.hpp"
 #include "misc/affinity.hpp"
@@ -232,19 +232,9 @@ void mask_offmarket(int d, Tensor &T, std::span<float> y, std::span<float> tmp) 
 }
 } // namespace
 
-void factor_pipeline(int d, const FeatureSpec &src, const FeatureSpec &dst,
-                     bool invert, Tensor &T, CsBufs &bufs) {
-  std::span<float> buf = bufs.a;
-  T.gather_cs_row(src, d, buf);
+void factor_pipeline(int d, const FeatureSpec &dst, Tensor &T, CsBufs &bufs) {
+  std::span<float> buf = bufs.a; // 调用方已 gather(+ 自定义变换) 好待处理值
   mask_offmarket(d, T, buf, bufs.b);
-  if (invert) {
-    for (float &v : buf) {
-      if (!is_finite(v) || v == 0.0f)
-        v = std::nanf("");
-      else
-        v = 1.0f / v;
-    }
-  }
   winsor_mad(buf, 3.0f);
   z(buf);
   pct_rank(buf);
@@ -272,25 +262,16 @@ void factor_pipeline(int d, const FeatureSpec &src, const FeatureSpec &dst,
   T.scatter_cs_row(dst, d, std::span<const float>(buf.data(), buf.size()));
 }
 
-// 中性化因子流水: raw → [1/x] → winsorize_quantile(1%,99%) → neutralize(行业+log mcap)
-//   → z → pct_rank → 坪值填充 → scatter. 输出 ∈[0,1], 与 factor_pipeline 下游兼容.
-//   buf 分配: a=y(残差), b=log mcap, c=industry.
-void neutral_pipeline(int d, const FeatureSpec &src, const FeatureSpec &dst,
-                      bool invert, Tensor &T, CsBufs &b) {
-  std::span<float> y = b.a;
+// 中性化因子流水: b.a 已由调用方 gather(+ 自定义变换) 好待处理值 →
+//   winsorize_quantile(1%,99%) → neutralize(行业+log mcap) → z → pct_rank
+//   → 均值填充 → scatter. 输出 ∈[0,1], 与 factor_pipeline 下游兼容.
+//   buf 分配: a=y(输入/残差), b=log mcap, c=industry.
+void neutral_pipeline(int d, const FeatureSpec &dst, Tensor &T, CsBufs &b) {
+  std::span<float> y = b.a; // 调用方已 gather(+ 自定义变换) 好待处理值
   std::span<float> lm = b.b;
   std::span<float> ind = b.c;
 
-  T.gather_cs_row(src, d, y);
   mask_offmarket(d, T, y, lm);
-  if (invert) {
-    for (float &v : y) {
-      if (!is_finite(v) || v == 0.0f)
-        v = std::nanf("");
-      else
-        v = 1.0f / v;
-    }
-  }
   winsorize_quantile(y, 0.01f, 0.99f);
 
   T.gather_cs_row(def::mcap_raw_spec, d, lm);

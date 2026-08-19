@@ -372,14 +372,16 @@ Phase 3 截面  (per-D 并行; cs.cpp 通用 flow + registry.hpp::CS_ORDER)
     for spec in CS_ORDER:
       spec->compute_cs(d, axes, T, bufs)         # 写 T.scatter_cs_row(*spec, d, …)
 
-  # 通用 CS kernel (cs.hpp, 跨 factor 共用):
-  #   factor_pipeline(d, src, dst, invert, T, bufs): gather → mask_offmarket → [invert 1/x]
-  #     → winsor_mad(k=3) → z → pct_rank → scatter (close/mcap/fmcap/cffoa_ttm12 等直接用)
-  #   neutral_pipeline(d, src, dst, invert, T, bufs): gather → mask_offmarket → [invert] →
-  #     winsorize_quantile(1%,99%) → neutralize(行业+log(mcap) OLS 残差, FWL 等价) → z →
-  #     pct_rank → 均值填充 → scatter (估值/盈利 ttm 系因子用; 倒数类 pe/pb/ps/pcf invert=true)
+  # 通用 CS kernel (cs.hpp, 跨 factor 共用; 无方向配置, 只做统计标准化):
+  #   factor_pipeline(d, dst, T, bufs): bufs.a 需已由调用方 gather(+ 自定义变换) 好 →
+  #     mask_offmarket → winsor_mad(k=3) → z → pct_rank → scatter (close/mcap/fmcap/cffoa_ttm12 等直接用)
+  #   neutral_pipeline(d, dst, T, bufs): bufs.a 需已由调用方 gather(+ 自定义变换) 好 →
+  #     mask_offmarket → winsorize_quantile(1%,99%) → neutralize(行业+log(mcap) OLS 残差,
+  #     FWL 等价) → z → pct_rank → 均值填充 → scatter (估值/盈利 ttm 系因子用; BP/EP/CP/SP
+  #     是各自因子文件里定义的比率 [如 EP := 1/pe_raw], 不是 pipeline 的方向配置)
   #   中性化口径实测对齐果仁 "中性BP/EP/CP/SP/ROE/ROA/股息率"
   #     (winsor 1%-99% + 申万一级 + log 总市值 OLS 残差, 全市场截面); 负值参与拟合.
+  #   因子本身不预设"好/坏"方向; 方向由 strategy::FactorWeight.w 的符号决定 (w ≠ 0, 可正可负).
 
 Phase 3s 策略 CS 列  (per-D 并行; strategy/columns.cpp::compute_cs_columns)
   # 依赖共享 CS 节点 (rank_key / factor 全集) + Phase 2s 的 pool_b, 逐策略算:
@@ -417,7 +419,7 @@ inline constexpr std::array<const StrategySpec *, N> STRATEGIES = {{
 `StrategySpec` 字段:
 - `pool`: `PoolSpec` — exchange/list_sector/行业白名单 + `rank_key` (排名用的共享节点, 如 `mcap_raw_spec`) + `rank_asc` + `universe_size`.
 - `filters`: `std::span<const FeatureSpec *const>`, 全部必须 `Kind::Filter` (registry consteval 校验).
-- `weights`: `std::span<const FactorWeight>` (`{f, w}`), `f` 必须 `Kind::Factor` 且 `w > 0`.
+- `weights`: `std::span<const FactorWeight>` (`{f, w}`), `f` 必须 `Kind::Factor` 且 `w ≠ 0` (符号定义该因子的方向, 正负均可; `score` 分母按 `Σ|w|` 归一).
 - `bt_start_date` / `hold_n` / `exit_ratio`: per-策略回测参数 (成本 / `capital_base` 是券商账户属性, 留在 `config.hpp` 全策略共享).
 
 每策略固定绑定 5 列 (`strategy::SF`), 存 `Tensor.strat_mats` (不占共享图 `mats`), 计算见 §构建流水线 Phase 2s/3s: `pool_b` (静态白名单母集) → `pool` (截面 universe) → `tradable` (可买母集) → `score` (加权因子) → `rank` (tradable 内降序排名, 0=不在母集). 回测/实盘选股/分析全部只读这 5 列, 不重复实现选股逻辑.
@@ -436,9 +438,9 @@ inline constexpr std::array<const StrategySpec *, N> STRATEGIES = {{
 新增一个 raw / 中间量 / filter / factor 节点 (见 §特征系统):
 1. 写 `cpp/include/feature/def/{basic,factor,filter}/<name>.hpp`: 一个 `ts_<name>`/`cs_<name>` + 一个 `inline constexpr FeatureSpec <name>_spec` (含必填的 `formula`/`assumption`).
 2. 在需要它的地方 `#include` 这个文件并引用 `&<name>_spec`: 某个已挂载节点的 `deps` 数组, 或某个 `StrategySpec` 的 `filters`/`weights`/`pool.rank_key`.
-   没有第三步 — 不改 `registry.hpp`, 不改 `ts.cpp`/`cs.cpp`/`build.cpp`, 计算图/顺序/环检测全部编译期自动完成. 通用 kernel: `feature/ts.hpp::state_machine_intervals<TEv>` 模板; `feature/cs.hpp::winsor_mad/z/pct_rank/factor_pipeline/neutral_pipeline`. 大多数新 factor 一行 `factor_pipeline(d, xxx_raw_spec, xxx_spec, invert, T, b.a)` 即可.
+   没有第三步 — 不改 `registry.hpp`, 不改 `ts.cpp`/`cs.cpp`/`build.cpp`, 计算图/顺序/环检测全部编译期自动完成. 通用 kernel: `feature/ts.hpp::state_machine_intervals<TEv>` 模板; `feature/cs.hpp::winsor_mad/z/pct_rank/factor_pipeline/neutral_pipeline` (纯统计, 不带方向). 大多数新 factor 只需 `T.gather_cs_row(xxx_raw_spec, d, b.a)` 一行 + `factor_pipeline(d, xxx_spec, T, b)` 一行; 若该因子有自己的定义性变换 (如 EP := 1/PE), 在 gather 之后自行对 `b.a` 做该变换再调 pipeline, 方向本身不在此处配置, 由使用它的策略 `weights` 里的 `w` 符号决定.
 
 新增一个策略:
 1. 写 `cpp/include/strategy/def/<name>.hpp`: 一个 `inline constexpr StrategySpec <name>` (白名单/filters/weights/回测窗口), 叶子引用现有或新增的 `FeatureSpec`.
 2. `cpp/include/strategy/registry.hpp::STRATEGIES[]` 追加一行 `&def::<name>`.
-   `consteval registry_detail::validate()` 会校验名字唯一非空 / filters 全 `Kind::Filter` / weights 全 `Kind::Factor` 且 w>0 / 参数域合法; `feature/registry.hpp` 会自动把该策略新引用到的节点纳入计算图 (无需再改共享图任何文件).
+   `consteval registry_detail::validate()` 会校验名字唯一非空 / filters 全 `Kind::Filter` / weights 全 `Kind::Factor` 且 w≠0 / 参数域合法; `feature/registry.hpp` 会自动把该策略新引用到的节点纳入计算图 (无需再改共享图任何文件).

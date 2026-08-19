@@ -9,7 +9,7 @@
 #include "feature/graph.hpp"
 
 // factor: roe_ttm12 — 中性 ROE. pct_rank(z(neutralize(winsorize_quantile(roe_raw))))
-//   + 截面均值填充; 无 invert (越大越优).
+//   + 截面均值填充.
 
 namespace feature::def {
 
@@ -27,7 +27,8 @@ inline constexpr FeatureSpec roe_ttm12_spec{
     /*assumption=*/"—"};
 
 inline void cs_roe_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
-  neutral_pipeline(d, roe_raw_spec, roe_ttm12_spec, /*invert=*/false, T, b);
+  T.gather_cs_row(roe_raw_spec, d, b.a);
+  neutral_pipeline(d, roe_ttm12_spec, T, b);
 }
 
 } // namespace feature::def

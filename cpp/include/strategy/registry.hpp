@@ -4,7 +4,7 @@
 // 策略挂载表 — 唯一挂载点.
 //   新增策略: 1) strategy/def/<name>.hpp 写 spec  2) 此处 include + 挂一行.
 //   consteval 校验: 名字唯一非空 / filters 全 Kind::Filter / weights 全
-//   Kind::Factor 且 w > 0 / 参数域合法 / BENCHMARK 在册. 违规直接编译失败.
+//   Kind::Factor 且 w != 0 / 参数域合法 / BENCHMARK 在册. 违规直接编译失败.
 //
 //   本文件不依赖 feature/registry.hpp (避免循环: feature/registry.hpp 需要
 //   STRATEGIES[] 来推导计算图 roots). 校验只需 FeatureSpec::kind, 由
@@ -64,7 +64,7 @@ consteval bool validate() {
     for (const FactorWeight &fw : s.weights) {
       if (fw.f == nullptr || fw.f->kind != feature::Kind::Factor)
         return false;
-      if (!(fw.w > 0.0f))
+      if (fw.w == 0.0f)
         return false;
     }
     if (s.bt_start_date == nullptr ||

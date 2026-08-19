@@ -66,10 +66,9 @@ Fitness 定义 (阶段 1): 周期内分层单调度的跨周期均值 Y ∈ [0, 
 ============================================================
     直读 cpp 张量的 factor 特征 (cs.cpp factor_pipeline 产物:
     全市场截面 winsor/z/pct_rank ∈ [0,1], 截面均值填充后全 finite).
-    score = Σ w_f · factor_f 与 cpp cs_factor_score 完全同口径
-    (factor 全 finite 时分母 Σw 为常数, 排序不变); 全非负权重可
-    直接填回 config::STRATEGY_FACTOR_WEIGHTS, 负权重 (因子反转)
-    需 cpp 侧翻转该因子 pipeline 的 invert 标志后取 |w|.
+    score = Σ w_f · factor_f / Σ|w_f| 与 cpp cs_score 完全同口径
+    (factor 全 finite 时分母 Σ|w| 为常数, 排序不变); w 可正可负 (符号
+    = 因子方向), 挖掘结果可直接填回 strategy/def/<name>.hpp 的 weights.
 
 ============================================================
 搜索算法 (Simplex lattice / stars-and-bars)
@@ -78,7 +77,7 @@ Fitness 定义 (阶段 1): 周期内分层单调度的跨周期均值 Y ∈ [0, 
         w 与 c*w (任意 c > 0) 产生完全相同的持仓 / 换手 / NAV.
     结论: 有意义的搜索空间是权重的 "方向", 即 L1 球面 { Σ |w_i| = 1 }.
         负权重 = 因子反转 (f 全 finite 时 -w·f 与 w·(1-f) 排序等价),
-        无方向先验: 方向不由 cpp pipeline 的 invert 固定, 由搜索自行决定.
+        方向完全由搜索决定, cpp 侧 feature 本身不预设方向.
 
     lattice 离散化: w_i = k_i / M, k_i 整数, Σ|k_i| = M.
     stars-and-bars 递归枚举非负点 + 对非零坐标做 2^nnz 符号展开,
@@ -153,7 +152,7 @@ MIN_PERIOD_DAYS = {       # 各周期内活跃日数下限, 活跃日数 < 下�
 COST_ROUND_TRIP = 0.002  # 一次换手综合成本 (买 0.0005 + 卖 0.0015)
 LATTICE_M = 6  # lattice 阶数: w_i = k_i / M, k_i ∈ Z, Σ|k_i| = M (无方向先验, 恒带符号)
 # 负权重 = 因子反转: 排序意义上 -w·f ≡ w·(1-f) (f 全 finite 时差常数),
-# 方向不采用 cpp pipeline invert 的先验, 完全由搜索决定.
+# 方向完全由搜索决定, cpp 侧 feature 本身不预设方向.
 # 点数 = Σ_j C(n,j)·C(M-1,j-1)·2^j; 8 因子 M=10 -> 658048
 TOP_N = 200  # 阶段2：按 fitness 取前 N 条做 NAV 复评、邻居表与打印 (可改)
 NEIGHBOR_DISTANCE_MAX = 10  # 阶段 2b 邻居敏感度: 统计 [1, N] 跳内全部 lattice 点的 Y 均值
@@ -171,7 +170,7 @@ SKIP_MONTHS = frozenset({})
 POOL_FEATURE = "tradable"
 
 # 搜索权重的 factor 特征 (张量 F 枚举 CS factor 段, 名单见 meta.json factor_names;
-# 顺序即权重维度顺序). 挖到的权重可直接填回 config::STRATEGY_FACTOR_WEIGHTS.
+# 顺序即权重维度顺序). 挖到的权重可直接填回 strategy/def/<name>.hpp 的 weights.
 SEARCH_FACTOR_NAMES = [
     "bp_ttm3",
     "ep_ttm12",
@@ -1280,11 +1279,7 @@ def main():
     for name, w in zip(selected_names, best_weights):
         if w != 0:
             print(f"  {name:20s}: {w:+.4f}")
-    if (best_weights < 0).any():
-        print("  注: 含负权重, 不能直接填 config::STRATEGY_FACTOR_WEIGHTS (cpp 要求 w > 0);")
-        print("      需 cpp 侧为该因子翻转 pipeline invert 标志后取 |w|, 或让 cs_factor_score 支持负权.")
-    else:
-        print("  (全非负, 可直接填 config::STRATEGY_FACTOR_WEIGHTS)")
+    print("  (cpp FactorWeight.w 支持任意非零符号, 可直接填入 strategy/def/<name>.hpp 的 weights)")
 
     return {
         "selected_factors": selected_names,

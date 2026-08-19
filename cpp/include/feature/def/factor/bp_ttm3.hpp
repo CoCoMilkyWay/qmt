@@ -8,8 +8,10 @@
 #include "feature/def/factor/pb_raw.hpp"
 #include "feature/graph.hpp"
 
-// factor: bp_ttm3 — 中性 BP (瞬时估值 / MRQ). pct_rank(z(neutralize(
-//   winsorize_quantile(1 / pb_raw)))) + 截面均值填充.
+#include <cmath>
+
+// factor: bp_ttm3 — 中性 BP (账面市值比 = 1 / pb_raw; 瞬时估值 / MRQ).
+//   pct_rank(z(neutralize(winsorize_quantile(BP)))) + 截面均值填充.
 
 namespace feature::def {
 
@@ -22,12 +24,19 @@ inline constexpr FeatureSpec bp_ttm3_spec{
     "bp_ttm3", "中性BP", Kind::Factor, Axis::CrossSection, bp_ttm3_deps, nullptr,
     &cs_bp_ttm3, /*must_be_finite=*/true,
     /*formula=*/
-    "pct_rank(z(neutralize(winsorize_quantile(1 / pb_raw)))) + 截面均值填充; "
+    "BP = 1 / pb_raw; pct_rank(z(neutralize(winsorize_quantile(BP)))) + 截面均值填充; "
     "中性化 = 行业+log(mcap) OLS 残差",
-    /*assumption=*/"—"};
+    /*assumption=*/"—; pb_raw == 0 → BP 记 NaN"};
 
 inline void cs_bp_ttm3(int d, const Axes &, Tensor &T, CsBufs &b) {
-  neutral_pipeline(d, pb_raw_spec, bp_ttm3_spec, /*invert=*/true, T, b);
+  T.gather_cs_row(pb_raw_spec, d, b.a);
+  for (float &v : b.a) {
+    if (!is_finite(v) || v == 0.0f)
+      v = std::nanf("");
+    else
+      v = 1.0f / v;
+  }
+  neutral_pipeline(d, bp_ttm3_spec, T, b);
 }
 
 } // namespace feature::def

@@ -78,10 +78,10 @@ inline constexpr const feature::FeatureSpec *low_price_small_cap_filters[] = {
 };
 
 inline constexpr FactorWeight low_price_small_cap_weights[] = {
-    {&feature::def::mcap_spec, 0.7f},
-    {&feature::def::fmcap_spec, 0.7f},
-    {&feature::def::close_spec, 0.1f},
-    {&feature::def::cffoa_ttm12_spec, 0.1f},
+    {&feature::def::mcap_spec, -0.7f},
+    {&feature::def::fmcap_spec, -0.7f},
+    {&feature::def::close_spec, -0.1f},
+    {&feature::def::cffoa_ttm12_spec, -0.1f},
 };
 
 inline constexpr StrategySpec low_price_small_cap{

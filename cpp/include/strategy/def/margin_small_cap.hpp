@@ -14,7 +14,8 @@
 
 #include <array>
 
-// 策略: margin_small_cap — 主板小市值, 仅融资标的 (margin_policy=Only), 单市值因子.
+// 策略: margin_small_cap — 主板小市值 + 低价 (mcap/fmcap/close 负权) +
+//   现金流增速 (正权), 仅融资标的 (margin_policy=Only).
 
 namespace strategy::def {
 
@@ -76,10 +77,10 @@ inline constexpr const feature::FeatureSpec *margin_small_cap_filters[] = {
 };
 
 inline constexpr FactorWeight margin_small_cap_weights[] = {
-    {&feature::def::mcap_spec, 0.7f},
-    {&feature::def::fmcap_spec, 0.7f},
-    {&feature::def::close_spec, 0.1f},
-    {&feature::def::cffoa_ttm12_spec, 0.1f},
+    {&feature::def::mcap_spec, -0.7f},
+    {&feature::def::fmcap_spec, -0.7f},
+    {&feature::def::close_spec, -0.1f},
+    {&feature::def::cffoa_ttm12_spec, -0.1f},
 };
 
 inline constexpr StrategySpec margin_small_cap{

@@ -8,8 +8,10 @@
 #include "feature/def/factor/ps_raw.hpp"
 #include "feature/graph.hpp"
 
-// factor: sp_ttm12 — 中性 SP. pct_rank(z(neutralize(winsorize_quantile(1 / ps_raw))))
-//   + 截面均值填充.
+#include <cmath>
+
+// factor: sp_ttm12 — 中性 SP (营收收益率 = 1 / ps_raw).
+//   pct_rank(z(neutralize(winsorize_quantile(SP)))) + 截面均值填充.
 
 namespace feature::def {
 
@@ -22,12 +24,19 @@ inline constexpr FeatureSpec sp_ttm12_spec{
     "sp_ttm12", "中性SP", Kind::Factor, Axis::CrossSection, sp_ttm12_deps, nullptr,
     &cs_sp_ttm12, /*must_be_finite=*/true,
     /*formula=*/
-    "pct_rank(z(neutralize(winsorize_quantile(1 / ps_raw)))) + 截面均值填充; "
+    "SP = 1 / ps_raw; pct_rank(z(neutralize(winsorize_quantile(SP)))) + 截面均值填充; "
     "中性化 = 行业+log(mcap) OLS 残差",
-    /*assumption=*/"—"};
+    /*assumption=*/"—; ps_raw == 0 → SP 记 NaN"};
 
 inline void cs_sp_ttm12(int d, const Axes &, Tensor &T, CsBufs &b) {
-  neutral_pipeline(d, ps_raw_spec, sp_ttm12_spec, /*invert=*/true, T, b);
+  T.gather_cs_row(ps_raw_spec, d, b.a);
+  for (float &v : b.a) {
+    if (!is_finite(v) || v == 0.0f)
+      v = std::nanf("");
+    else
+      v = 1.0f / v;
+  }
+  neutral_pipeline(d, sp_ttm12_spec, T, b);
 }
 
 } // namespace feature::def

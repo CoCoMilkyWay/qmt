@@ -6,7 +6,8 @@
 #include "feature/def/factor/mcap_raw.hpp"
 #include "feature/graph.hpp"
 
-// factor: mcap — 小市值因子. pct_rank(z(winsor_mad(1 / mcap_raw))) + 截面均值填充.
+// factor: mcap — 总市值截面排名. pct_rank(z(winsor_mad(mcap_raw))) + 截面均值填充.
+//   值越大表示市值越大.
 
 namespace feature::def {
 
@@ -18,11 +19,12 @@ inline constexpr const FeatureSpec *mcap_deps[] = {&mcap_raw_spec, &list_age_spe
 inline constexpr FeatureSpec mcap_spec{
     "mcap", "总市值因子", Kind::Factor, Axis::CrossSection, mcap_deps, nullptr, &cs_mcap,
     /*must_be_finite=*/true,
-    /*formula=*/"pct_rank(z(winsor_mad(1 / mcap_raw))) + 截面均值填充",
-    /*assumption=*/"—"};
+    /*formula=*/"pct_rank(z(winsor_mad(mcap_raw))) + 截面均值填充",
+    /*assumption=*/"—; 值越大市值越大"};
 
 inline void cs_mcap(int d, const Axes &, Tensor &T, CsBufs &b) {
-  factor_pipeline(d, mcap_raw_spec, mcap_spec, /*invert=*/true, T, b);
+  T.gather_cs_row(mcap_raw_spec, d, b.a);
+  factor_pipeline(d, mcap_spec, T, b);
 }
 
 } // namespace feature::def

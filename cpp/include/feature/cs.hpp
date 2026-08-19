@@ -6,7 +6,6 @@
 #include "feature/tensor.hpp"
 
 #include <span>
-#include <vector>
 
 namespace feature {
 
@@ -21,12 +20,14 @@ void compute_cs(const Axes &, Tensor &);
 // 通用 CS kernel (供 def/factor/*.hpp 的 per-factor compute_cs 复用)
 //
 // 1) winsor_mad / z / pct_rank: 截面统计原语 (跳 NaN, 原地修改).
-// 2) factor_pipeline: 1 行串起来的 raw → factor 槽位标准流水
-//      gather_cs_row(src, d) → 剔非在市 → [optional 1/x] → winsor_mad(k=3) → z
-//      → pct_rank → scatter_cs_row(dst, d).
-//
-// 跨 feature 共用通用动作; 业务上每个 factor 节点只写一行
-//   factor_pipeline(d, xxx_raw_spec, xxx_spec, invert=true/false, T, buf);
+// 2) factor_pipeline / neutral_pipeline: 纯统计标准化流水, 对"方向"一无所知 —
+//      不做任何 1/x 之类的定向变换. 调用方 (各 cs_<name>) 自己先
+//      T.gather_cs_row(src, d, b.a), 需要的话在 b.a 上做自己的 elementwise
+//      变换 (例如 EP := 1/PE 是该因子自身的定义, 不是"方向偏好", 留在各自
+//      文件里), 再调 pipeline 完成 剔非在市 → winsor → [neutralize] → z →
+//      pct_rank → 均值填充 → scatter(dst, d).
+//   因子"好坏方向"完全由 strategy::FactorWeight.w 的符号决定 (可正可负),
+//   feature 层不预设任何方向.
 // ============================================================================
 void winsor_mad(std::span<float> x, float k = 3.0f);
 void z(std::span<float> x);
@@ -43,14 +44,15 @@ void winsorize_quantile(std::span<float> x, float lo_pct = 0.01f,
 void neutralize(std::span<float> y, std::span<const float> logmc,
                 std::span<const float> industry);
 
-// 中性化因子流水: gather raw → 剔非在市 → [1/x] → winsorize_quantile(1%,99%)
-//   → neutralize(行业+log mcap) → z → pct_rank → 均值填充 → scatter.
-//   输出仍 ∈[0,1], factor_score 兼容.
-//   buf 需求: a=y(残差), b=log mcap, c=industry; 正好 3 个 CsBufs.
-void neutral_pipeline(int d, const FeatureSpec &src, const FeatureSpec &dst,
-                      bool invert, Tensor &T, CsBufs &b);
+// 中性化因子流水: b.a 需已由调用方 gather(+ 自定义变换) 好待处理原始值 →
+//   剔非在市 → winsorize_quantile(1%,99%) → neutralize(行业+log mcap) → z
+//   → pct_rank → 均值填充 → scatter(dst, d). 输出仍 ∈[0,1], factor_score 兼容.
+//   buf 占用: a=y(输入/残差), b=log mcap, c=industry; 正好 3 个 CsBufs.
+void neutral_pipeline(int d, const FeatureSpec &dst, Tensor &T, CsBufs &b);
 
-void factor_pipeline(int d, const FeatureSpec &src, const FeatureSpec &dst,
-                     bool invert, Tensor &T, CsBufs &b);
+// b.a 需已由调用方 gather(+ 自定义变换) 好待处理原始值 → 剔非在市 →
+//   winsor_mad(k=3) → z → pct_rank → 均值填充 → scatter(dst, d).
+//   buf 占用: a=输入/输出, b=mask 借用.
+void factor_pipeline(int d, const FeatureSpec &dst, Tensor &T, CsBufs &b);
 
 } // namespace feature

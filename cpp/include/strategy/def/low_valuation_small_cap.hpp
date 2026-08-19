@@ -15,8 +15,8 @@
 
 #include <array>
 
-// 策略: low_valuation_small_cap — 主板小市值 + 低价/现金流/中性EP 因子
-//   (基于 low_price_small_cap, 额外加入中性 PE 即 ep_ttm12, 权重 0.1).
+// 策略: low_valuation_small_cap — 主板+创业板小市值 (mcap/fmcap 负权) +
+//   中性 CP / 中性 SP 估值因子 (正权).
 
 namespace strategy::def {
 
@@ -78,14 +78,14 @@ inline constexpr const feature::FeatureSpec *low_valuation_small_cap_filters[] =
 };
 
 inline constexpr FactorWeight low_valuation_small_cap_weights[] = {
-    {&feature::def::mcap_spec, 1.0f},
-    {&feature::def::fmcap_spec, 1.0f},
+    {&feature::def::mcap_spec, -1.0f},
+    {&feature::def::fmcap_spec, -1.0f},
     {&feature::def::cp_ttm12_spec, 1.0f},
     {&feature::def::sp_ttm12_spec, 1.0f},
 };
 
 inline constexpr StrategySpec low_valuation_small_cap{
-    .name = "低估小市值",
+    .name = "低值小市值",
     .pool =
         {
             .exchange_wl = low_valuation_small_cap_exchange_wl,
