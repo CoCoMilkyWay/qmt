@@ -1,7 +1,7 @@
 #include "feature/describe.hpp"
 
 #include "config.hpp"
-#include "feature/feature.hpp"
+#include "feature/registry.hpp"
 #include "misc/affinity.hpp"
 #include "misc/fs.hpp"
 #include "misc/npy.hpp"
@@ -278,16 +278,16 @@ void describe(const Axes &axes, const Tensor &T) {
 
   // 并行: 按 feature 派发; 每线程私有 scratch (复用跨 bucket).
   //   先把全部 (feature × bucket) 的 Stats 算到 all_stats[f][bi], 再串行 emit
-  //   按 feature 顺序输出 (与 FEATURES[] / 历史日志一致).
+  //   按 feature 顺序输出 (与 ALL_NODES / 历史日志一致).
   std::vector<std::vector<Stats>> all_stats(
-      FEATURES.size(), std::vector<Stats>(buckets.size()));
+      ALL_NODES.size(), std::vector<Stats>(buckets.size()));
   std::atomic<std::size_t> next{0};
 
   auto worker = [&]() {
     std::vector<float> scratch;
     for (;;) {
       std::size_t f = next.fetch_add(1, std::memory_order_relaxed);
-      if (f >= FEATURES.size())
+      if (f >= ALL_NODES.size())
         break;
       const std::vector<float> &mat = T.mats[f];
       for (std::size_t bi = 0; bi < buckets.size(); ++bi) {
@@ -301,8 +301,8 @@ void describe(const Axes &axes, const Tensor &T) {
   unsigned n_threads = misc::Affinity::core_count();
   if (n_threads == 0)
     n_threads = 1;
-  if (n_threads > FEATURES.size())
-    n_threads = static_cast<unsigned>(FEATURES.size());
+  if (n_threads > ALL_NODES.size())
+    n_threads = static_cast<unsigned>(ALL_NODES.size());
 
   std::vector<std::thread> threads;
   threads.reserve(n_threads);
@@ -311,8 +311,8 @@ void describe(const Axes &axes, const Tensor &T) {
   for (auto &th : threads)
     th.join();
 
-  for (std::size_t f = 0; f < FEATURES.size(); ++f) {
-    const FeatureMeta &fm = FEATURES[f];
+  for (std::size_t f = 0; f < ALL_NODES.size(); ++f) {
+    const FeatureSpec &fm = *ALL_NODES[f];
     for (std::size_t bi = 0; bi < buckets.size(); ++bi) {
       const YearBucket &b = buckets[bi];
       const Stats &s = all_stats[f][bi];
@@ -332,11 +332,10 @@ void dump_tensor(const Axes &axes, const Tensor &T) {
   std::size_t n_d = static_cast<std::size_t>(axes.n_d());
   std::array<std::size_t, 2> shape{n_a, n_d};
 
-  for (std::size_t f = 0; f < FEATURES.size(); ++f) {
+  for (std::size_t f = 0; f < ALL_NODES.size(); ++f) {
     const std::vector<float> &mat = T.mats[f];
     assert(mat.size() == n_a * n_d);
-    misc::write_npy_f4(out_dir / (std::string(FEATURES[f].name) + ".npy"), mat,
-                       shape);
+    misc::write_npy_f4(out_dir / (std::string(ALL_NODES[f]->name) + ".npy"), mat, shape);
   }
 }
 

@@ -12,9 +12,9 @@
     TAG 4: 排名分析 (分层年收益/累计/累积IC) | 因子相关性 (汇总表/相关阵)
 
 数据全部来自:
-    output/meta.json
-    output/backtest/*.npy + labels.json   (后者: 当日历史简称)
-    output/analysis/*.npy
+    output/meta.json                      (strategies[0] 定位策略输出目录)
+    output/strategy/<name>/backtest/*.npy + labels.json   (后者: 当日历史简称)
+    output/strategy/<name>/analysis/*.npy
     output/tensor/close_raw.npy           (今日持仓最近收盘价)
     data/*/cn_stock_industry_component.parquet  (申万 L1 -- L2)
 """
@@ -36,8 +36,13 @@ from plotly.subplots import make_subplots
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "output"
-BT_DIR = OUT_DIR / "backtest"
-AN_DIR = OUT_DIR / "analysis"
+
+# 多策略最小适配: 报告只渲染 strategies[0] (多策略对比报告后续单独做).
+_META = json.loads((OUT_DIR / "meta.json").read_text(encoding="utf-8"))
+assert _META["strategies"], "meta.json strategies 为空"
+_STRAT0 = _META["strategies"][0]
+BT_DIR = OUT_DIR / "strategy" / _STRAT0["name"] / "backtest"
+AN_DIR = OUT_DIR / "strategy" / _STRAT0["name"] / "analysis"
 
 TRADING_DAYS = 252
 
@@ -223,7 +228,7 @@ def _load() -> dict:
 
     an_d_idx = np.load(AN_DIR / "dates.npy")
     assert np.array_equal(an_d_idx, bt_d_idx), "analysis/backtest dates 不一致"
-    assert "hold_n" in meta["config"], "meta.json config 缺 hold_n"
+    assert "hold_n" in meta["strategies"][0], "meta.json strategies[0] 缺 hold_n"
     an = {
         "dates": bt_dates,
         "factor_ic": np.load(AN_DIR / "factor_ic.npy"),
@@ -381,7 +386,7 @@ def _trade_stats(bt, an, meta) -> dict:
 
     nav_s = bt["strategy_nav"]
     n_d = len(nav_s)
-    hold_n = int(meta["config"]["hold_n"])
+    hold_n = int(meta["strategies"][0]["hold_n"])
     turn = bt["turnover"]
     mean_turn = float(np.nanmean(turn)) if n_d else float("nan")
     # turnover = 双边: 当日买卖额 / 2 / 组合市值; 满额换 1 个成分股 = 1/HOLD_N
@@ -846,7 +851,7 @@ def fig_tag2(bt, an, meta, codes) -> list[tuple[str, go.Figure]]:
     nav_s_norm = nav_s / nav_s[0]
     nav_p_norm = nav_p / nav_p[0]
     nav_t_norm = nav_t / nav_t[0]
-    n_rank = int(meta["config"]["hold_n"]) * 2
+    n_rank = int(meta["strategies"][0]["hold_n"]) * 2
     strat_hover = _build_strategy_hover(bt, codes, n_rank)
 
     fig1 = make_subplots(

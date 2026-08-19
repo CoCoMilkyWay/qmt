@@ -1,7 +1,5 @@
 #pragma once
 
-#include <array>
-#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <span>
@@ -14,97 +12,30 @@ struct Axes;
 struct PitPool;
 struct StockMeta;
 struct Tensor;
+struct FeatureSpec;
 
 // ============================================================================
-// F 枚举: 顺序 = 计算顺序 = FEATURES[] 索引. 单点真理.
-//   增减 feature: 1) 此处加一行 2) feature.cpp 加一行 compute fn + FEATURES[] 一行
-//   计算顺序保证 (per-A / per-D 串行调用):
-//     phase 2 TS: 顺序遍历 FEATURES[], 仅触发 axis==TimeSeries 的项
-//     phase 3 CS: 同序遍历, 仅触发 axis==CrossSection 的项
-//     依赖 = 出现在 enum 更靠后 ⇒ 其依赖 (无论 PitPool/StockMeta 还是先前 F) 已经就绪
+// 特征节点无中心枚举: 每个节点是 cpp/include/feature/def/{basic,factor,filter}/
+//   <name>.hpp 下的一个 header-only 文件 (文件名 == 节点名), 声明一个 inline
+//   constexpr FeatureSpec (见 graph.hpp) 作为自己的唯一身份 (取地址即 ID, inline
+//   保证跨 TU 同址). 依赖 = #include 对方头文件 + 在 deps 数组里放对方 spec 的
+//   地址 — 绝大多数节点只出现在 3 处: 自己的定义 / 被其他节点依赖处 / 被策略
+//   (weights / filters / pool.rank_key) 引用处. 不存在任何中心化清单需要为新
+//   节点手动挂载.
 //
-//   分段: TS 段 (一切 per-A 沿 D 计算) → CS 段 (一切 per-D 沿 A 计算).
-//   段内不强分小类, 但聚集相似项以利对仗 (raw / derived / filter / pool):
-//     raw     = 网格直读或事件 ttm12 拼接 / meta 派生 (单位 [元/股/%/ratio/bool])
-//     derived = TS 内由 raw 推 (单位通常 [bool] 或 [ratio])
-//     filter  = 状态机或单点判 → 排除位 [bool], 1 = 排除 (D, A)
-//     pool    = universe 母集 [bool]
+//   计算图 (哪些节点真正参与计算) 由 feature/registry.hpp 从"根集合"
+//   (框架自身少量固定需求 + 全部 strategy::STRATEGIES[] 引用到的节点) 出发,
+//   consteval 沿 deps 做可达性 + 拓扑排序反向推导出来; 不在根可达闭包内的节点
+//   文件即使存在也不会进入计算 (不触发计算, 不占 Tensor 存储).
+//
+//   目录约定 (图构建阶段完全不区分, 统一按 FeatureSpec 处理):
+//     basic/  框架结算/白名单计算直接依赖的市场微观结构数据 (成交价/涨跌停/
+//             停牌/退市龄/两融/行业等), 与具体策略无关, 是 registry.hpp
+//             FRAMEWORK_ROOTS 的来源, 因此例外地会被框架代码 (backtest.cpp /
+//             strategy/columns.cpp / feature/cs.cpp) 直接 #include 引用.
+//     factor/ 排序因子 (Kind::Factor) + 全部中间变量 (Kind::Inter, 估值/财务 raw).
+//     filter/ 状态机最终排除位 (Kind::Filter).
 // ============================================================================
-enum class F : int {
-  // ============================== TS ==============================
-  // raw 网格 — PitPool dense 直读 / 由 raw 直接相乘 (per-A 动态)
-  close_raw = 0, // bar1d.close (不复权 [元/股]; ← cn_stock_real_bar1d.close)
-  mcap_raw,      // close_raw × shares.total_shares  ([元])
-  fmcap_raw,     // close_raw × shares.a_float_shares  ([元]; BigQuant 实测口径 = A 股流通市值, 不含 H 股)
-  share_raw,     // shares.total_shares  ([股])
-  pb_raw,        // (财务: 暂保留 NaN 输出, 待 BigQuant 财务表迁移后实现)
-  ps_raw,        // (财务: 暂保留 NaN)
-  dy_raw,        // (财务: 暂保留 NaN)
-  up_lim,        // limit_price.upper_limit (主动 -1 对齐到 close_raw[D]=D-1 收盘的同源比较)
-  dn_lim,        // limit_price.lower_limit (同上)
-  susp,          // status.suspended ([bool])
-  is_margin,     // margin_detail (D,A) 存在性 ([bool])
-  mr_bal_raw,    // margin_detail.financing_balance ([元])
-  ms_bal_raw,    // margin_detail.securities_lending_balance ([元])
-  industry_l1,   // sw2021 一级行业 ID 0..31 (industry_component 月初 + industry_change 月内回放)
-
-  // raw 自算 — ttm12 拼接 (财务 itf 暂未落地数据 → events 空 → 全 NaN)
-  rev_raw,
-  ni_raw,
-  pe_raw,
-  pcf_raw,
-  roe_raw,
-  roa_raw,
-  cffoa_raw, // 经营现金流量净额增长: net_cffoa_ttm / shift4(4季度前同口径) - 1
-
-  // raw meta 派生 — per-A 动态 (D - list_date / D - delist_date)
-  list_age,
-  delist_age,
-
-  // derived — 由 raw 推 (TS 内依赖)
-  daily_return,
-  low_p,
-  low_mc,
-  limit_up,
-  limit_dn,
-
-  // filter — 状态机或单点判, 1 = 排除 (D, A)
-  profit_st,
-  revenue_st,
-  dividend_st,
-  risk_warn,
-  trading_st,
-  new_list,
-
-  // pool (TS) — asset 静态白名单 ∩ industry_l1 白名单 ∩ ¬susp ∩ ¬退市 ∩ (可选 ¬is_margin)
-  pool_b,
-
-  // ============================== CS ==============================
-  // factor — winsor_mad → z → pct_rank, ∈ [0, 1]
-  close,
-  mcap,
-  fmcap,
-  pe_ttm12,
-  pb_ttm1, // 瞬时估值 (MRQ)
-  ps_ttm12,
-  pcf_ttm12,
-  roe_ttm12,
-  roa_ttm12,
-  dy_ttm12,
-  cffoa_ttm12,
-
-  // pool (CS) — universe 母集
-  pool,     // pool_b ∧ rank(mcap_raw asc) ≤ POOL_UNIVERSE_SIZE
-  tradable, // pool ∧ ¬(filter OR), filter 列表 = config::STRATEGY_ENABLED_FILTERS
-
-  // 加权合成因子分数 (配置见 config::STRATEGY_FACTOR_WEIGHTS):
-  //   factor_score[a, d] = Σ w_f · factor_f[a, d] / Σ w_f · 1{is_finite(factor_f[a, d])}
-  //   factor_pipeline 已保证 factor 全 finite; pool/tradable 由下游另行 mask.
-  //   范围近似 [0, 1] (各 factor 已 pct_rank)
-  factor_score,
-
-  COUNT,
-};
 
 enum class Kind : uint8_t { Filter,
                             Factor,
@@ -112,13 +43,13 @@ enum class Kind : uint8_t { Filter,
 enum class Axis : uint8_t { TimeSeries,
                             CrossSection };
 
-// per-A TS compute: 写自己 ts_row(F::self, a). 可读 pool / meta / 已写就的 T.ts_row(prior_f, a).
-//   入参对所有 TS feature 统一; 不需要的子集就忽略.
+// per-A TS compute: 写自己 ts_row(self_spec, a). 可读 pool / meta / 已写就的
+//   T.ts_row(dep_spec, a) (dep_spec 来自 #include 的依赖头文件).
 using TsComputeFn = void (*)(int a, const Axes &, const PitPool &,
                              const StockMeta &, Tensor &);
 
 // per-D CS scratch: thread-local, 长度 = n_a 的 3 个 buffer (复用避免反复分配).
-//   factor pipeline 用 a; pool 用 a (pool_b) + b (mcap_raw); c 留给未来扩展.
+//   factor_pipeline 用 a+b; neutral_pipeline 用满 a(残差)+b(log mcap)+c(industry).
 struct CsBufs {
   std::span<float> a;
   std::span<float> b;
@@ -127,19 +58,11 @@ struct CsBufs {
 
 using CsComputeFn = void (*)(int d, const Axes &, Tensor &, CsBufs &);
 
-struct FeatureMeta {
-  const char *name;
-  Kind kind;
-  Axis axis;
-  TsComputeFn compute_ts; // axis==TimeSeries 时非 null; CS 时 null
-  CsComputeFn compute_cs; // axis==CrossSection 时非 null; TS 时 null
-};
-
-// 静态表, 索引 = F 枚举值. 单点真理. 在 feature.cpp 定义.
-extern const std::array<FeatureMeta, static_cast<std::size_t>(F::COUNT)> FEATURES;
+// 节点完整声明 FeatureSpec (name/kind/axis/deps/fn/must_be_finite) 见 graph.hpp;
+// 可达性 + 拓扑排序 (TS_ORDER/CS_ORDER/ALL_NODES) 见 registry.hpp.
 
 // ============================================================================
-// 公用小工具 (供 feature.cpp / ts.cpp / cs.cpp 共享)
+// 公用小工具 (供 def/ 节点文件 / ts.cpp / cs.cpp 共享)
 // ============================================================================
 
 // -ffast-math 下 std::isfinite/std::isnan UB; 用 IEEE-754 bit-pattern 判定.

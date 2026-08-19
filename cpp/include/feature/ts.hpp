@@ -13,9 +13,9 @@
 namespace feature {
 
 // ============================================================================
-// Phase 2 入口: per-A 并行, 对每个 a 串行调用 FEATURES[] 中 axis==TimeSeries 的
-//   compute_ts(a, axes, pool, meta, T). 不涉及具体 feature 名 — 业务逻辑全部
-//   下沉到 feature.cpp 的 per-feature 函数.
+// Phase 2 入口: per-A 并行, 对每个 a 串行调用 registry.hpp 编译期推出的
+//   TS_ORDER 中各节点的 compute_ts(a, axes, pool, meta, T). 不涉及具体
+//   feature 名 — 业务逻辑全部下沉到 feature/def/ 的 per-node 函数.
 // ============================================================================
 void compute_ts(const Axes &, const PitPool &, const StockMeta &, Tensor &);
 
@@ -30,12 +30,16 @@ void state_machine_intervals(const std::vector<TEv> &triggers, int n_d,
                              FindOff find_off, std::span<float> dst) {
   std::fill(dst.begin(), dst.end(), 0.0f);
   for (const TEv &e : triggers) {
-    int on_d  = e.v;
+    int on_d = e.v;
     int off_d = find_off(e);
-    if (on_d < 0) on_d = 0;
-    if (off_d > n_d) off_d = n_d;
-    if (off_d <= on_d) continue;
-    for (int d = on_d; d < off_d; ++d) dst[d] = 1.0f;
+    if (on_d < 0)
+      on_d = 0;
+    if (off_d > n_d)
+      off_d = n_d;
+    if (off_d <= on_d)
+      continue;
+    for (int d = on_d; d < off_d; ++d)
+      dst[d] = 1.0f;
   }
 }
 

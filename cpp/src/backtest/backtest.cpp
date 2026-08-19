@@ -2,7 +2,14 @@
 
 #include "config.hpp"
 #include "feature/axis.hpp"
+#include "feature/def/basic/close_raw.hpp"
+#include "feature/def/basic/daily_return.hpp"
+#include "feature/def/basic/delist_age.hpp"
+#include "feature/def/basic/limit_dn.hpp"
+#include "feature/def/basic/limit_up.hpp"
+#include "feature/def/basic/susp.hpp"
 #include "feature/feature.hpp"
+#include "feature/graph.hpp"
 #include "feature/tensor.hpp"
 #include "misc/date.hpp"
 #include "misc/fs.hpp"
@@ -33,17 +40,24 @@ namespace fs = std::filesystem;
 
 namespace {
 
-using feature::F;
+using feature::FeatureSpec;
 using feature::is_finite;
 
 // ---- helpers ---------------------------------------------------------------
 
 // 读"契约 bool" feature: 必 finite + ∈ {0, 1}. 任一违背 → assert fail (定位污染源).
-//   适用: tradable / pool / susp / limit_up / limit_dn 等 BUILD_NO_NAN_FEATURES 子集.
+//   适用: susp / limit_up / limit_dn 等 must_be_finite=true 的节点.
 //   raw / factor / daily_return 等可 NaN 列禁用此 helper.
-inline bool read_bool(const feature::Tensor &T, F f, int a, int d) {
+inline bool read_bool(const feature::Tensor &T, const FeatureSpec &f, int a, int d) {
   float v = T.at(f, a, d);
   assert(is_finite(v) && "backtest::read_bool: NaN — feature should be 0/1");
+  return v > 0.5f;
+}
+
+// 策略块契约 bool (pool / tradable): 同上, F 换扁平 slot.
+inline bool strat_read_bool(const feature::Tensor &T, int slot, int a, int d) {
+  float v = T.strat_at(slot, a, d);
+  assert(is_finite(v) && "backtest::strat_read_bool: NaN — column should be 0/1");
   return v > 0.5f;
 }
 
@@ -72,16 +86,6 @@ inline void wi(const fs::path &p, const std::vector<std::int32_t> &v) {
                      std::span<const std::size_t>(shape, 1));
 }
 
-struct NameInterval {
-  int lo;
-  int hi;
-  std::string name;
-};
-
-struct NameTimeline {
-  std::vector<std::vector<NameInterval>> by_a;
-};
-
 // yyyymmdd int32 → "YYYYMMDD"; <= 0 → 空串.
 inline std::string ymd_str(std::int32_t v) {
   if (v <= 0)
@@ -102,7 +106,20 @@ void add_name_interval(const feature::Axes &axes, std::vector<NameInterval> &v,
   v.push_back(NameInterval{lo, hi, std::move(name)});
 }
 
+inline std::string_view name_of(const NameTimeline &tl,
+                                const feature::StockMeta &meta, int a, int d) {
+  const auto &v = tl.by_a[static_cast<std::size_t>(a)];
+  for (auto it = v.rbegin(); it != v.rend(); ++it) {
+    if (it->lo <= d && d <= it->hi)
+      return it->name;
+  }
+  return meta.name[static_cast<std::size_t>(a)];
+}
+
+} // namespace
+
 NameTimeline load_name_timeline(const feature::Axes &axes) {
+  misc::Timer t("[backtest] load_name_timeline");
   int n_a = axes.n_a();
   NameTimeline tl;
   tl.by_a.resize(static_cast<std::size_t>(n_a));
@@ -157,35 +174,29 @@ NameTimeline load_name_timeline(const feature::Axes &axes) {
   return tl;
 }
 
-inline std::string_view name_of(const NameTimeline &tl,
-                                const feature::StockMeta &meta, int a, int d) {
-  const auto &v = tl.by_a[static_cast<std::size_t>(a)];
-  for (auto it = v.rbegin(); it != v.rend(); ++it) {
-    if (it->lo <= d && d <= it->hi)
-      return it->name;
-  }
-  return meta.name[static_cast<std::size_t>(a)];
-}
-
-} // namespace
-
 double run(const feature::Axes &axes, const feature::StockMeta &meta,
-           const feature::Tensor &T) {
+           const feature::Tensor &T, const NameTimeline &name_timeline,
+           const strategy::StrategySpec &spec, int s_idx) {
   // 注: meta.delist_date 是 ex-post (build 时拉的最新表), 但 `delist_age` 已在
   //     feature 层做 PIT 截断 — 仅 D ≥ delist_date 写值 (≥ 0), 否则 NaN. 此处兜底
   //     用 is_finite 判 "今日已退市" 即可, 不需也不应去读"距退市天数".
   misc::Timer t("[backtest] run");
   auto t0 = std::chrono::high_resolution_clock::now();
 
+  using strategy::SF;
+  const int slot_pool = strategy::slot(s_idx, SF::pool);
+  const int slot_tradable = strategy::slot(s_idx, SF::tradable);
+  const int slot_score = strategy::slot(s_idx, SF::score);
+  const int slot_rank = strategy::slot(s_idx, SF::rank);
+
   // ---- 解析回测窗口 (闭区间; 右端点固定为最新日) --------------------------
-  int bt_d_lo = find_d(axes, ::config::BACKTEST_START_DATE, /*floor=*/false);
+  int bt_d_lo = find_d(axes, spec.bt_start_date, /*floor=*/false);
   int bt_d_hi_inc = axes.n_d() - 1;
   assert(bt_d_lo >= 0 && bt_d_hi_inc >= bt_d_lo &&
          bt_d_hi_inc < axes.n_d() && "backtest window invalid");
   int bt_d_hi = bt_d_hi_inc + 1; // half-open
   int n_d_bt = bt_d_hi - bt_d_lo;
   int n_a = axes.n_a();
-  NameTimeline name_timeline = load_name_timeline(axes);
 
   // ---- 状态 ----------------------------------------------------------------
   std::unordered_map<int, double> holdings; // a → shares (float 仓位, 不取整)
@@ -205,12 +216,15 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   std::vector<std::int32_t> hold_codes;
   std::vector<float> hold_weights;
   std::vector<std::string> hold_names; // 与 hold_codes 同序, 按当日历史简称切段
-  hold_codes.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BACKTEST_HOLD_N);
-  hold_weights.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BACKTEST_HOLD_N);
-  hold_names.reserve(static_cast<std::size_t>(n_d_bt) * ::config::BACKTEST_HOLD_N);
+  hold_codes.reserve(static_cast<std::size_t>(n_d_bt) *
+                     static_cast<std::size_t>(spec.hold_n));
+  hold_weights.reserve(static_cast<std::size_t>(n_d_bt) *
+                       static_cast<std::size_t>(spec.hold_n));
+  hold_names.reserve(static_cast<std::size_t>(n_d_bt) *
+                     static_cast<std::size_t>(spec.hold_n));
 
-  // CSR 因子观察窗 (top HOLD_N*2, 段内因子降序 — 报告 tooltip 用)
-  int watch_n = ::config::BACKTEST_HOLD_N * 2;
+  // CSR 因子观察窗 (top hold_n*2, 段内因子降序 — 报告 tooltip 用)
+  int watch_n = spec.hold_n * 2;
   std::vector<std::int32_t> watch_off(static_cast<std::size_t>(n_d_bt) + 1, 0);
   std::vector<std::int32_t> watch_codes;
   std::vector<float> watch_scores;
@@ -261,7 +275,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   double pool_nav_d = ::config::BACKTEST_CAPITAL_BASE;
   double tradable_nav_d = ::config::BACKTEST_CAPITAL_BASE;
 
-  int hold_n = ::config::BACKTEST_HOLD_N;
+  int hold_n = spec.hold_n;
 
   // ---- 主循环 --------------------------------------------------------------
   for (int i = 0; i < n_d_bt; ++i) {
@@ -271,7 +285,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
 
     // (1) 更新 last_close 缓存 (T 的 close_raw 已 ffill, finite 保留)
     for (int a = 0; a < n_a; ++a) {
-      float c = T.at(F::close_raw, a, d);
+      float c = T.at(feature::def::close_raw_spec, a, d);
       if (is_finite(c))
         last_close[a] = c;
     }
@@ -282,7 +296,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     //   不 assert, 打印 [WARN] 后继续, 与 sell 逻辑一致地关闭 trade record.
     for (auto it = holdings.begin(); it != holdings.end();) {
       int a = it->first;
-      float da = T.at(F::delist_age, a, d);
+      float da = T.at(feature::def::delist_age_spec, a, d);
       if (!is_finite(da)) {
         ++it;
         continue;
@@ -329,25 +343,33 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     double pv = cash + mv_holdings;
     assert(pv > 0.0 && "portfolio value <= 0");
 
-    // (3) 候选 universe: tradable ∧ finite(factor_score)
-    //   factor_score 表达因子是否可算; universe 边界由 tradable/pool mask 表达.
+    // (3) 候选 universe: 策略 rank 列直读 (rank ≥ 1 ⇔ tradable ∧ finite(score);
+    //   排名已在 columns.cpp 固化, 回测与实盘选股读同一列).
+    //   cands[r-1] = (score, a): rank 是 1..K 连续整数, 两遍扫描按位回填.
     std::vector<std::pair<float, int>> cands;
-    cands.reserve(::config::POOL_UNIVERSE_SIZE);
+    int n_ranked = 0;
     for (int a = 0; a < n_a; ++a) {
-      if (!read_bool(T, F::tradable, a, d))
-        continue;
-      float s = T.at(F::factor_score, a, d);
-      if (!is_finite(s))
-        continue;
-      cands.emplace_back(s, a);
+      float r = T.strat_at(slot_rank, a, d);
+      assert(is_finite(r) && r >= 0.0f && "rank column: NaN/negative");
+      if (r > 0.0f)
+        ++n_ranked;
     }
-    std::sort(cands.begin(), cands.end(),
-              [](const auto &x, const auto &y) { return x.first > y.first; });
+    cands.assign(static_cast<std::size_t>(n_ranked),
+                 {std::nanf(""), -1});
+    for (int a = 0; a < n_a; ++a) {
+      float r = T.strat_at(slot_rank, a, d);
+      if (!(r > 0.0f))
+        continue;
+      int ri = static_cast<int>(r);
+      assert(ri >= 1 && ri <= n_ranked && "rank column: not contiguous 1..K");
+      cands[static_cast<std::size_t>(ri - 1)] = {T.strat_at(slot_score, a, d),
+                                                 a};
+    }
 
     int n_top = std::min(hold_n, static_cast<int>(cands.size()));
     int n_top_exit =
         std::min(static_cast<int>(static_cast<float>(hold_n) *
-                                  ::config::BACKTEST_EXIT_RATIO),
+                                  spec.exit_ratio),
                  static_cast<int>(cands.size()));
     if (n_top_exit > static_cast<int>(cands.size()))
       n_top_exit = static_cast<int>(cands.size());
@@ -369,7 +391,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
       int a = kv.first;
       if (top_exit_set.count(a))
         continue;
-      if (read_bool(T, F::limit_up, a, d) || read_bool(T, F::limit_dn, a, d))
+      if (read_bool(T, feature::def::limit_up_spec, a, d) || read_bool(T, feature::def::limit_dn_spec, a, d))
         continue;
       intended_sell.push_back(a);
     }
@@ -391,7 +413,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
           continue; // 已持仓且未卖
         if (!top_n_set.count(a))
           break; // 已超 top N 范围 (排序后)
-        if (read_bool(T, F::limit_up, a, d) || read_bool(T, F::limit_dn, a, d))
+        if (read_bool(T, feature::def::limit_up_spec, a, d) || read_bool(T, feature::def::limit_dn_spec, a, d))
           continue;
         intended_buy.push_back(a);
         --slots;
@@ -404,7 +426,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     int n_buy_intent = static_cast<int>(intended_buy.size());
 
     for (int a : intended_sell) {
-      bool susp = read_bool(T, F::susp, a, d);
+      bool susp = read_bool(T, feature::def::susp_spec, a, d);
       float c = last_close[static_cast<std::size_t>(a)];
       if (susp || !is_finite(c))
         continue; // 失败: 停牌或无价
@@ -475,9 +497,9 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
           float c = last_close[static_cast<std::size_t>(a)];
           if (!is_finite(c) || c <= 0.0f)
             continue;
-          if (read_bool(T, F::susp, a, d) ||
-              read_bool(T, F::limit_up, a, d) ||
-              read_bool(T, F::limit_dn, a, d))
+          if (read_bool(T, feature::def::susp_spec, a, d) ||
+              read_bool(T, feature::def::limit_up_spec, a, d) ||
+              read_bool(T, feature::def::limit_dn_spec, a, d))
             continue;
           double cur_mv = kv.second * static_cast<double>(c);
           double def = target_per_slot - cur_mv;
@@ -515,19 +537,19 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
 
     // pool / tradable 等权影子指数.
     //   时点: D-1 close 按 mask[a, d-1] 等权 → 持有到 D close, 得 daily_return[a, d].
-    //   pool     = 小市值宇宙 (含 ST/次新等策略买不了的)
-    //   tradable = 策略可买 (pool ∧ ¬STRATEGY_ENABLED_FILTERS), 与分层同口径.
+    //   pool     = 策略 universe (含 ST/次新等策略买不了的)
+    //   tradable = 策略可买 (pool ∧ ¬spec.filters), 与分层同口径.
     //   PIT: mask[d-1]; daily_return[d] NaN ⇒ 该持仓退出当日均值.
     //   i=0: NAV = capital_base; i>=1: 累乘.
     if (i > 0) {
-      auto ew = [&](F mask) {
+      auto ew = [&](int mask_slot) {
         double dr_sum = 0.0;
         int dr_n = 0;
         int d_prev = d - 1;
         for (int a = 0; a < n_a; ++a) {
-          if (!read_bool(T, mask, a, d_prev))
+          if (!strat_read_bool(T, mask_slot, a, d_prev))
             continue;
-          float r = T.at(F::daily_return, a, d);
+          float r = T.at(feature::def::daily_return_spec, a, d);
           if (!is_finite(r))
             continue;
           dr_sum += static_cast<double>(r);
@@ -535,8 +557,8 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
         }
         return dr_n > 0 ? dr_sum / static_cast<double>(dr_n) : 0.0;
       };
-      pool_nav_d *= (1.0 + ew(F::pool));
-      tradable_nav_d *= (1.0 + ew(F::tradable));
+      pool_nav_d *= (1.0 + ew(slot_pool));
+      tradable_nav_d *= (1.0 + ew(slot_tradable));
     }
     pool_nav[i] = static_cast<float>(pool_nav_d);
     tradable_nav[i] = static_cast<float>(tradable_nav_d);
@@ -548,7 +570,7 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
     turnover[i] = static_cast<float>(turn_amt / (2.0 * pv));
     int n_susp_h = 0;
     for (auto &kv : holdings) {
-      if (read_bool(T, F::susp, kv.first, d))
+      if (read_bool(T, feature::def::susp_spec, kv.first, d))
         ++n_susp_h;
     }
     susp_pct[i] = holdings.empty()
@@ -609,7 +631,8 @@ double run(const feature::Axes &axes, const feature::StockMeta &meta,
   }
 
   // ---- 写盘 ----------------------------------------------------------------
-  fs::path out = misc::git_root() / "output" / "backtest";
+  fs::path out =
+      misc::git_root() / "output" / "strategy" / std::string(spec.name) / "backtest";
   fs::create_directories(out);
 
   wi(out / "dates.npy", dates_out);

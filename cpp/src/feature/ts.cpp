@@ -1,6 +1,6 @@
 #include "feature/ts.hpp"
 
-#include "feature/feature.hpp"
+#include "feature/registry.hpp"
 #include "misc/affinity.hpp"
 
 #include <atomic>
@@ -10,11 +10,9 @@
 namespace feature {
 
 // ============================================================================
-// 通用 dispatcher: per-A 并行; 每 worker 串行调 FEATURES[] 内 axis==TimeSeries 的
-//   compute_ts(a, ...). 不出现具体 feature 名 — 业务全部下沉 feature.cpp.
-//
-// 顺序依赖: FEATURES[] 索引顺序 = 计算顺序 = F 枚举顺序 (见 feature.hpp). 后段
-//   feature 可读已写就的 T.ts_row(prior_f, a), 无需 topo sort.
+// 通用 dispatcher: per-A 并行; 每 worker 按 TS_ORDER (编译期 topo 排出的计算
+//   顺序, 见 registry.hpp) 串行调 compute_ts(a, ...). 不出现具体 feature 名 —
+//   业务全部下沉 feature/def/. 后段 feature 可读已写就的 T.ts_row(prior_f, a).
 // ============================================================================
 void compute_ts(const Axes &axes, const PitPool &pool, const StockMeta &meta,
                 Tensor &T) {
@@ -27,11 +25,8 @@ void compute_ts(const Axes &axes, const PitPool &pool, const StockMeta &meta,
     for (;;) {
       int a = next.fetch_add(1, std::memory_order_relaxed);
       if (a >= n_a) break;
-      for (std::size_t f = 0; f < FEATURES.size(); ++f) {
-        const FeatureMeta &fm = FEATURES[f];
-        if (fm.axis != Axis::TimeSeries) continue;
-        if (!fm.compute_ts) continue;
-        fm.compute_ts(a, axes, pool, meta, T);
+      for (const FeatureSpec *f : TS_ORDER) {
+        f->compute_ts(a, axes, pool, meta, T);
       }
     }
   };

@@ -1,7 +1,8 @@
 // 主入口: [preflight → bigquant::update → tushare::update] → feature::build →
-//   backtest::run → analysis::run → write_meta. 完整闭环: 数据接入 → PIT 张量 →
-//   回测 → 因子分析 → summary JSON, 落 <git_root>/output/{meta.json, backtest/*,
-//   analysis/*}. py/report.py 直读 output/ 生成 HTML 报告.
+//   per-strategy {backtest::run → analysis::run} → write_meta. 完整闭环:
+//   数据接入 → PIT 张量 (共享图 + 策略列) → 回测 → 因子分析 → summary JSON, 落
+//   <git_root>/output/{meta.json, strategy/<name>/{backtest/*, analysis/*}}.
+//   py/report.py 直读 output/ 生成 HTML 报告.
 //   方括号段由 config::PIPELINE_UPDATE 门控: false 则完全不联网, 直接吃本地 parquet.
 
 #include "analysis/analysis.hpp"
@@ -15,11 +16,12 @@
 #include "feature/axis.hpp"
 #include "feature/build.hpp"
 #include "feature/describe.hpp"
-#include "feature/feature.hpp"
+#include "feature/registry.hpp"
 #include "feature/tensor.hpp"
 #include "misc/date.hpp"
 #include "misc/fs.hpp"
 #include "package/yyjson/yyjson.h"
+#include "strategy/registry.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -31,9 +33,10 @@
 namespace {
 
 // output/meta.json: py/report.py 直读的元数据 + 计时.
-//   schema 仅含 py 实际消费的字段 (dates / codes / factor_names /
-//   config.{ic_ma_window, hold_n} /
-//   timing.{backtest_seconds, analysis_seconds, tensor_bytes}); 其他诊断字段不写.
+//   schema: dates / codes / factor_names / strategies[].{name, hold_n,
+//   exit_ratio, start_date, filters[], weights{}} / config.ic_ma_window /
+//   timing.{backtest_seconds, analysis_seconds, tensor_bytes} (bt/an 为全策略
+//   累计). 其他诊断字段不写.
 //   yyjson + misc::atomic_write_json (与 bigquant / tushare store 对仗).
 void write_meta(const feature::Axes &axes, const feature::Tensor &T,
                 double bt_seconds, double an_seconds) {
@@ -58,21 +61,43 @@ void write_meta(const feature::Axes &axes, const feature::Tensor &T,
   add_str_arr("codes", axes.codes);
 
   yyjson_mut_val *factor_arr = yyjson_mut_arr(doc);
-  for (std::size_t i = 0; i < feature::FEATURES.size(); ++i) {
-    if (feature::FEATURES[i].kind == feature::Kind::Factor) {
-      yyjson_mut_arr_add_str(doc, factor_arr, feature::FEATURES[i].name);
+  for (const feature::FeatureSpec *f : feature::ALL_NODES) {
+    if (f->kind == feature::Kind::Factor) {
+      yyjson_mut_arr_add_str(doc, factor_arr, f->name);
     }
   }
   yyjson_mut_obj_add_val(doc, root, "factor_names", factor_arr);
 
+  yyjson_mut_val *strat_arr = yyjson_mut_arr(doc);
+  for (const strategy::StrategySpec *spec : strategy::STRATEGIES) {
+    yyjson_mut_val *s = yyjson_mut_arr_add_obj(doc, strat_arr);
+    yyjson_mut_obj_add_strn(doc, s, "name", spec->name.data(),
+                            spec->name.size());
+    yyjson_mut_obj_add_int(doc, s, "hold_n", spec->hold_n);
+    yyjson_mut_obj_add_real(doc, s, "exit_ratio",
+                            static_cast<double>(spec->exit_ratio));
+    yyjson_mut_obj_add_str(doc, s, "start_date", spec->bt_start_date);
+    yyjson_mut_val *filters = yyjson_mut_arr(doc);
+    for (const feature::FeatureSpec *f : spec->filters)
+      yyjson_mut_arr_add_str(doc, filters, f->name);
+    yyjson_mut_obj_add_val(doc, s, "filters", filters);
+    yyjson_mut_val *weights = yyjson_mut_obj(doc);
+    for (const strategy::FactorWeight &fw : spec->weights)
+      yyjson_mut_obj_add_real(doc, weights, fw.f->name,
+                              static_cast<double>(fw.w));
+    yyjson_mut_obj_add_val(doc, s, "weights", weights);
+  }
+  yyjson_mut_obj_add_val(doc, root, "strategies", strat_arr);
+
   yyjson_mut_val *cfg = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_int(doc, cfg, "ic_ma_window",
                          ::config::ANALYSIS_IC_MA_WINDOW);
-  yyjson_mut_obj_add_int(doc, cfg, "hold_n", ::config::BACKTEST_HOLD_N);
   yyjson_mut_obj_add_val(doc, root, "config", cfg);
 
   std::size_t tensor_bytes = 0;
   for (const auto &m : T.mats)
+    tensor_bytes += m.size() * sizeof(float);
+  for (const auto &m : T.strat_mats)
     tensor_bytes += m.size() * sizeof(float);
   yyjson_mut_val *timing = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_real(doc, timing, "backtest_seconds", bt_seconds);
@@ -185,13 +210,21 @@ int main() {
     feature::dump_tensor(axes, T);
   }
 
-  // ---- Phase 3: backtest (per-D 状态机) → output/backtest/*.npy + labels.json
-  double bt_seconds = backtest::run(axes, meta, T);
+  // ---- Phase 3+4: per-strategy backtest (per-D 状态机) + analysis (per-D IC /
+  //   quantile / corr) → output/strategy/<name>/{backtest, analysis}/*.npy.
+  //   name_timeline 全策略共享, 循环外只加载一次; timing 按策略累计.
+  backtest::NameTimeline name_timeline = backtest::load_name_timeline(axes);
+  double bt_seconds = 0.0;
+  double an_seconds = 0.0;
+  for (int s = 0; s < strategy::N_STRATEGIES; ++s) {
+    const strategy::StrategySpec &spec =
+        *strategy::STRATEGIES[static_cast<std::size_t>(s)];
+    std::cout << "\n[strategy] " << spec.name << std::endl;
+    bt_seconds += backtest::run(axes, meta, T, name_timeline, spec, s);
+    an_seconds += analysis::run(axes, T, spec, s);
+  }
 
-  // ---- Phase 4: analysis (per-D IC / quantile / corr) → output/analysis/*.npy
-  double an_seconds = analysis::run(axes, T);
-
-  // ---- 收尾: output/meta.json (axes / factor_names / timing) ----
+  // ---- 收尾: output/meta.json (axes / factor_names / strategies / timing) ----
   write_meta(axes, T, bt_seconds, an_seconds);
 
   return 0;

@@ -103,8 +103,9 @@ include_directories(SYSTEM ${ARROW_INCLUDE})
 # Source Files
 # ============================================================================
 # 完整闭环串到 main.cpp: bigquant::update → tushare::update → feature::build →
-# backtest::run → analysis::run → write_meta. 输出 <git_root>/output/{meta.json,
-# backtest/*.npy + labels.json, analysis/*.npy}; py/report.py 直读生成报告.
+# per-strategy {backtest::run → analysis::run} → write_meta. 输出
+# <git_root>/output/{meta.json, strategy/<name>/{backtest/*.npy + labels.json,
+# analysis/*.npy}}; py/report.py 直读生成报告.
 set(SOURCES
     ../../src/main.cpp
     ../../src/misc/date.cpp
@@ -123,7 +124,6 @@ set(SOURCES
     ../../src/api/tushare/pipeline.cpp
     ../../src/feature/axis.cpp
     ../../src/feature/industry.cpp
-    ../../src/feature/feature.cpp
     ../../src/feature/tensor.cpp
     ../../src/feature/pit.cpp
     ../../src/feature/load.cpp
@@ -131,6 +131,7 @@ set(SOURCES
     ../../src/feature/cs.cpp
     ../../src/feature/build.cpp
     ../../src/feature/describe.cpp
+    ../../src/strategy/columns.cpp
     ../../src/backtest/backtest.cpp
     ../../src/analysis/analysis.cpp
     ../../include/package/yyjson/yyjson.c
@@ -158,6 +159,8 @@ set(HEADERS
     ../../include/feature/axis.hpp
     ../../include/feature/industry.hpp
     ../../include/feature/feature.hpp
+    ../../include/feature/graph.hpp
+    ../../include/feature/registry.hpp
     ../../include/feature/tensor.hpp
     ../../include/feature/pit.hpp
     ../../include/feature/load.hpp
@@ -165,11 +168,28 @@ set(HEADERS
     ../../include/feature/cs.hpp
     ../../include/feature/build.hpp
     ../../include/feature/describe.hpp
+    ../../include/strategy/strategy.hpp
+    ../../include/strategy/registry.hpp
+    ../../include/strategy/columns.hpp
     ../../include/backtest/backtest.hpp
     ../../include/analysis/analysis.hpp
 )
 
-add_executable(app_main ${SOURCES} ${HEADERS})
+# feature/def/{factor,filter}/*.hpp 与 strategy/def/*.hpp 是 header-only 节点定义
+#   (一节点一文件, 文件名 == 节点名), 无需在此手动逐条挂载 — 加新节点只需写
+#   文件本身 + 在依赖它的节点/策略 config 里 #include, glob 只为让 IDE/构建系统
+#   看到文件, 不参与 C++ 层的依赖解析/注册 (那部分由 graph.hpp consteval 完成).
+file(GLOB FEATURE_DEF_HEADERS
+    ../../include/feature/def/*.hpp
+    ../../include/feature/def/basic/*.hpp
+    ../../include/feature/def/factor/*.hpp
+    ../../include/feature/def/filter/*.hpp
+)
+file(GLOB STRATEGY_DEF_HEADERS
+    ../../include/strategy/def/*.hpp
+)
+
+add_executable(app_main ${SOURCES} ${HEADERS} ${FEATURE_DEF_HEADERS} ${STRATEGY_DEF_HEADERS})
 
 # vendored Arrow C++ Flight + Parquet + pthread (Flight 走明文 gRPC, 无 TLS 依赖)
 target_link_libraries(app_main PRIVATE

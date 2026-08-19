@@ -1,10 +1,5 @@
 #pragma once
 
-#include "feature/feature.hpp"
-
-#include <array>
-#include <string_view>
-
 namespace config {
 
 // ============================================================================
@@ -59,112 +54,21 @@ inline constexpr int PIPELINE_LOOKBACK_DAYS = 7;
 inline constexpr int PIPELINE_DEDUP_WINDOW_SECONDS = 60 * 60;
 
 // ============================================================================
-// D. Pool (basic + universe)
-//   pool_b (TS, asset 静态 ∩ industry_l1 时变):
-//     exchange     ∈ POOL_EXCHANGE_WHITELIST     匹配 _meta/cn_stock_basic_info.json::exchange
-//                                                 (中文全称: "上海证券交易所" / "深圳证券交易所" /
-//                                                  "北京证券交易所"; 与 BigQuant 字段值一致)
-//     list_sector  ∈ POOL_LIST_SECTOR_WHITELIST  匹配 cn_stock_basic_info.list_sector (int8)
-//                                                 编码: 1=主板 / 2=创业板 / 3=科创板 / 4=北交所
-//     industry_l1  ∈ POOL_INDUSTRY_L1_WHITELIST  匹配 itf:cn_stock_industry_component 申万 SW2021
-//                                                 一级行业中文名 (全量 31 个; 此处保留 28, 排除
-//                                                 环保/交通运输/房地产). feature.cpp 启动期一次性
-//                                                 转 ID mask, 运行期 inline 查 (industry_l1 ID 0
-//                                                 = 未知, 永远不命中).
-//     POOL_INCLUDE_MARGIN                         是否包含两融标的 (per-D per-A 动态)
-//   pool (CS): pool_b ∧ rank(mcap_raw asc) ≤ POOL_UNIVERSE_SIZE  (per D, 截面 top-N)
-//   注: low_mc / revenue_st / dividend_st 仍硬编码 list_sector==1 (主板) 判定阈值, 因为
-//       这些是业务规则 (板块特定阈值与适用范围), 非策略可调过滤.
-// ============================================================================
-inline constexpr std::array<std::string_view, 2> POOL_EXCHANGE_WHITELIST = {{
-    "上海证券交易所",
-    "深圳证券交易所",
-}};
-
-// list_sector int8 编码: 1=主板, 2=创业板, 3=科创板, 4=北交所; 0=未知 (不应入).
-inline constexpr std::array<int8_t, 1> POOL_LIST_SECTOR_WHITELIST = {{
-    1, // 主板
-}};
-
-inline constexpr std::array<std::string_view, 25> POOL_INDUSTRY_L1_WHITELIST = {{
-    "基础化工",
-    "有色金属",
-    "建筑材料",
-    "建筑装饰",
-    "机械设备",
-    "电子",
-    "汽车",
-    "家用电器",
-    "食品饮料",
-    "纺织服饰",
-    "轻工制造",
-    "医药生物",
-    "公用事业",
-    "商贸零售",
-    "社会服务",
-    "非银金融",
-    "综合",
-    "电力设备",
-    "国防军工",
-    "计算机",
-    "传媒",
-    "通信",
-    "煤炭",
-    "石油石化",
-    "美容护理",
-    //"农林牧渔",
-    //"钢铁",
-    //"银行",
-}};
-
-inline constexpr bool POOL_INCLUDE_MARGIN = true; // true = 池内含两融 (与 py margin_tradings=["两融标的","非两融标的"] 等价)
-inline constexpr int POOL_UNIVERSE_SIZE = 400;
-
-// ============================================================================
-// E. 策略 (cs_tradable filter 子集 + cs_factor_score 加权)
-//   STRATEGY_ENABLED_FILTERS  cs_tradable = pool ∧ ¬OR(此处 filter); 删一行即禁用一项
-//   STRATEGY_FACTOR_WEIGHTS   cs_factor_score = Σ w_f · factor_f / Σ w_f · 1{finite}
-//     w 必须 > 0; 不想要的 factor 直接删行 (=禁用); F 必须是 enum 中的 factor (Kind::Factor)
-// ============================================================================
-inline constexpr std::array<feature::F, 6> STRATEGY_ENABLED_FILTERS = {{
-    feature::F::profit_st,
-    feature::F::revenue_st,
-    feature::F::dividend_st,
-    feature::F::trading_st,
-    feature::F::risk_warn,
-    feature::F::new_list,
-}};
-
-struct FactorWeight {
-  feature::F f;
-  float w;
-};
-inline constexpr std::array<FactorWeight, 4> STRATEGY_FACTOR_WEIGHTS = {{
-    // {feature::F::mcap, 0.7f},
-    // {feature::F::fmcap, 0.7f},
-    // {feature::F::pcf_ttm12, 0.1f},
-    // {feature::F::ps_ttm12, 0.1f},
-
-    {feature::F::mcap, 0.7f},
-    {feature::F::fmcap, 0.7f},
-    {feature::F::close, 0.1f},
-    {feature::F::cffoa_ttm12, 0.1f},
-}};
-
-// ============================================================================
-// F. 回测 (窗口 + 持仓 + 成本 + 再平衡; 右端点固定为 axes 最新日)
-//   BACKTEST_START_DATE            左端点 (YYYYMMDD, 含); 必为交易日或落 axes 内
-//   BACKTEST_HOLD_N                目标持仓数
-//   BACKTEST_EXIT_RATIO            离开 top-(HOLD_N × EXIT_RATIO) 的持仓必卖
+// D/E. Pool / 策略参数已迁入策略层 (每策略一个 spec 文件):
+//   cpp/include/strategy/strategy.hpp   PoolSpec / FactorWeight / StrategySpec / SF
+//   cpp/include/strategy/def/<name>.hpp 每策略白名单 / filter / 因子权重 /
+//                                       回测窗口 (bt_start_date / hold_n / exit_ratio)
+//   cpp/include/strategy/registry.hpp   STRATEGIES[] 挂载表 + consteval 校验
+//   注: low_mc / revenue_st / dividend_st 仍硬编码 list_sector==1 (主板) 判定阈值,
+//       因为这些是业务规则 (板块特定阈值与适用范围), 非策略可调过滤.
+//
+// F. 回测 (成本 + 资金; 券商账户属性, 全策略共享)
 //   BACKTEST_CAPITAL_BASE          初始资金 [元]
 //   BACKTEST_PRICE_LIMIT_EPS       涨跌停判定容差
 //   BACKTEST_BUY_COST              单边买入成本 (万 3)
 //   BACKTEST_SELL_COST             单边卖出成本 (万 13)
 //   BACKTEST_MIN_COST              单笔最低成本 [元]
 // ============================================================================
-inline constexpr const char *BACKTEST_START_DATE = "20170101";
-inline constexpr int BACKTEST_HOLD_N = 10;
-inline constexpr float BACKTEST_EXIT_RATIO = 2.0f;
 inline constexpr float BACKTEST_CAPITAL_BASE = 1.0e6f;
 inline constexpr float BACKTEST_PRICE_LIMIT_EPS = 1e-4f;
 inline constexpr float BACKTEST_BUY_COST = 3e-4f;
@@ -195,41 +99,9 @@ inline constexpr bool DESCRIBE_BY_YEAR = false;
 inline constexpr bool TENSOR_DUMP_ENABLE = true;
 
 // ============================================================================
-// I. Build 契约 (build 末尾必须全 finite 的 feature 白名单; fail fast)
-//   任何一格 NaN 都表示 compute fn 漏写或上游污染. raw / *_age /
-//   daily_return 等列预期可能 NaN, 不在此列表; factor 经截面均值补缺后必须全 finite.
+// I. Build 契约 (build 末尾必须全 finite 校验) — 已下沉到每个节点自己声明的
+//   FeatureSpec::must_be_finite (feature/graph.hpp), 无中心清单.
+//   build.cpp 遍历 feature::ALL_NODES, must_be_finite=true 的节点逐一校验.
 // ============================================================================
-inline constexpr std::array<feature::F, 27> BUILD_NO_NAN_FEATURES = {{
-    // TS bool (ts_* 内 std::fill(0.0f) 后选中置 1.0f, 或 grid_copy_bool)
-    feature::F::susp,
-    feature::F::is_margin,
-    feature::F::low_p,
-    feature::F::low_mc,
-    feature::F::limit_up,
-    feature::F::limit_dn,
-    feature::F::profit_st,
-    feature::F::revenue_st,
-    feature::F::dividend_st,
-    feature::F::risk_warn,
-    feature::F::trading_st,
-    feature::F::new_list,
-    feature::F::pool_b,
-    // CS bool (cs_pool / cs_tradable scatter 全行)
-    feature::F::pool,
-    feature::F::tradable,
-    // CS factor / score (factor_pipeline 截面均值补缺后应全 finite)
-    feature::F::close,
-    feature::F::mcap,
-    feature::F::fmcap,
-    feature::F::pe_ttm12,
-    feature::F::pb_ttm1,
-    feature::F::ps_ttm12,
-    feature::F::pcf_ttm12,
-    feature::F::roe_ttm12,
-    feature::F::roa_ttm12,
-    feature::F::dy_ttm12,
-    feature::F::cffoa_ttm12,
-    feature::F::factor_score,
-}};
 
 } // namespace config

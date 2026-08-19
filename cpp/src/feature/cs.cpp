@@ -1,7 +1,11 @@
 #include "feature/cs.hpp"
 
-#include "feature/feature.hpp"
+#include "feature/def/basic/industry_l1.hpp"
+#include "feature/def/factor/mcap_raw.hpp"
+#include "feature/def/basic/delist_age.hpp"
+#include "feature/def/basic/list_age.hpp"
 #include "feature/industry.hpp"
+#include "feature/registry.hpp"
 #include "misc/affinity.hpp"
 
 #include <algorithm>
@@ -217,18 +221,19 @@ void neutralize(std::span<float> y, std::span<const float> logmc,
 //   属策略选股范围, 不该缩小因子的统计母集.
 namespace {
 void mask_offmarket(int d, Tensor &T, std::span<float> y, std::span<float> tmp) {
-  T.gather_cs_row(F::list_age, d, tmp);
+  T.gather_cs_row(def::list_age_spec, d, tmp);
   for (std::size_t a = 0; a < y.size(); ++a)
     if (!is_finite(tmp[a]))
       y[a] = std::nanf("");
-  T.gather_cs_row(F::delist_age, d, tmp);
+  T.gather_cs_row(def::delist_age_spec, d, tmp);
   for (std::size_t a = 0; a < y.size(); ++a)
     if (is_finite(tmp[a]))
       y[a] = std::nanf("");
 }
 } // namespace
 
-void factor_pipeline(int d, F src, F dst, bool invert, Tensor &T, CsBufs &bufs) {
+void factor_pipeline(int d, const FeatureSpec &src, const FeatureSpec &dst,
+                     bool invert, Tensor &T, CsBufs &bufs) {
   std::span<float> buf = bufs.a;
   T.gather_cs_row(src, d, buf);
   mask_offmarket(d, T, buf, bufs.b);
@@ -270,7 +275,8 @@ void factor_pipeline(int d, F src, F dst, bool invert, Tensor &T, CsBufs &bufs) 
 // 中性化因子流水: raw → [1/x] → winsorize_quantile(1%,99%) → neutralize(行业+log mcap)
 //   → z → pct_rank → 坪值填充 → scatter. 输出 ∈[0,1], 与 factor_pipeline 下游兼容.
 //   buf 分配: a=y(残差), b=log mcap, c=industry.
-void neutral_pipeline(int d, F src, F dst, bool invert, Tensor &T, CsBufs &b) {
+void neutral_pipeline(int d, const FeatureSpec &src, const FeatureSpec &dst,
+                      bool invert, Tensor &T, CsBufs &b) {
   std::span<float> y = b.a;
   std::span<float> lm = b.b;
   std::span<float> ind = b.c;
@@ -287,14 +293,14 @@ void neutral_pipeline(int d, F src, F dst, bool invert, Tensor &T, CsBufs &b) {
   }
   winsorize_quantile(y, 0.01f, 0.99f);
 
-  T.gather_cs_row(F::mcap_raw, d, lm);
+  T.gather_cs_row(def::mcap_raw_spec, d, lm);
   for (float &v : lm) {
     if (!is_finite(v) || v <= 0.0f)
       v = std::nanf("");
     else
       v = std::log(v);
   }
-  T.gather_cs_row(F::industry_l1, d, ind);
+  T.gather_cs_row(def::industry_l1_spec, d, ind);
 
   neutralize(y, lm, ind);
   z(y);
@@ -323,7 +329,8 @@ void neutral_pipeline(int d, F src, F dst, bool invert, Tensor &T, CsBufs &b) {
 
 // ============================================================================
 // 通用 dispatcher: per-D 并行; 每 worker 拿 thread-local 3 buf (length=n_a),
-//   串行调 FEATURES[] 内 axis==CrossSection 的 compute_cs(d, ...).
+//   按 CS_ORDER (编译期从策略/框架根可达性推出, 见 registry.hpp) 串行调
+//   compute_cs(d, ...).
 // ============================================================================
 void compute_cs(const Axes &axes, Tensor &T) {
   int n_d = axes.n_d();
@@ -347,13 +354,8 @@ void compute_cs(const Axes &axes, Tensor &T) {
       int d = next.fetch_add(1, std::memory_order_relaxed);
       if (d >= n_d)
         break;
-      for (std::size_t f = 0; f < FEATURES.size(); ++f) {
-        const FeatureMeta &fm = FEATURES[f];
-        if (fm.axis != Axis::CrossSection)
-          continue;
-        if (!fm.compute_cs)
-          continue;
-        fm.compute_cs(d, axes, T, bufs);
+      for (const FeatureSpec *f : CS_ORDER) {
+        f->compute_cs(d, axes, T, bufs);
       }
     }
   };

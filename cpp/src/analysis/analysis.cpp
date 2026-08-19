@@ -2,7 +2,8 @@
 
 #include "config.hpp"
 #include "feature/axis.hpp"
-#include "feature/feature.hpp"
+#include "feature/def/basic/daily_return.hpp"
+#include "feature/registry.hpp"
 #include "feature/tensor.hpp"
 #include "misc/affinity.hpp"
 #include "misc/fs.hpp"
@@ -18,6 +19,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <span>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -27,8 +29,8 @@ namespace fs = std::filesystem;
 
 namespace {
 
-using feature::F;
-using feature::FEATURES;
+using feature::ALL_NODES;
+using feature::FeatureSpec;
 using feature::is_finite;
 using feature::Kind;
 
@@ -80,7 +82,7 @@ float pearson_masked(const float *x, const float *y, int n,
 }
 
 // 当日 top-K (within tradable, finite score) 集合 (升序 a 索引数组).
-//   K = BACKTEST_HOLD_N; 不足 K 时返回所有可用. score 用于排序.
+//   K = spec.hold_n; 不足 K 时返回所有可用. score 用于排序.
 void compute_top_k(const float *score, const float *univ_mask, int n,
                    int K, std::vector<int> &out) {
   out.clear();
@@ -130,11 +132,16 @@ float jaccard_turnover(const std::vector<int> &a, const std::vector<int> &b) {
 
 } // namespace
 
-double run(const feature::Axes &axes, const feature::Tensor &T) {
+double run(const feature::Axes &axes, const feature::Tensor &T,
+           const strategy::StrategySpec &spec, int s_idx) {
   misc::Timer t("[analysis] run");
   auto t0 = std::chrono::high_resolution_clock::now();
 
-  int bt_d_lo = find_d(axes, ::config::BACKTEST_START_DATE, false);
+  using strategy::SF;
+  const int slot_tradable = strategy::slot(s_idx, SF::tradable);
+  const int slot_score = strategy::slot(s_idx, SF::score);
+
+  int bt_d_lo = find_d(axes, spec.bt_start_date, false);
   int bt_d_hi_inc = axes.n_d() - 1;
   assert(bt_d_lo >= 0 && bt_d_hi_inc >= bt_d_lo &&
          bt_d_hi_inc < axes.n_d());
@@ -143,17 +150,17 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
   int n_a = axes.n_a();
 
   // ---- 收集 factor 列 (Kind::Factor) --------------------------------------
-  std::vector<F> factors;
+  std::vector<const FeatureSpec *> factors;
   std::vector<const char *> factor_names;
-  for (std::size_t i = 0; i < FEATURES.size(); ++i) {
-    if (FEATURES[i].kind == Kind::Factor) {
-      factors.push_back(static_cast<F>(i));
-      factor_names.push_back(FEATURES[i].name);
+  for (const FeatureSpec *f : ALL_NODES) {
+    if (f->kind == Kind::Factor) {
+      factors.push_back(f);
+      factor_names.push_back(f->name);
     }
   }
   int n_factor = static_cast<int>(factors.size());
   int Q = ::config::ANALYSIS_N_QUANTILES;
-  int K = ::config::BACKTEST_HOLD_N;
+  int K = spec.hold_n;
 
   // ---- 输出缓冲 ------------------------------------------------------------
   std::vector<std::int32_t> dates_out(n_d_bt);
@@ -215,19 +222,18 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
       int d = bt_d_lo + i;
       int d_next = d + 1;
 
-      T.gather_cs_row(F::tradable, d, std::span<float>(buf_tradable));
-      T.gather_cs_row(F::factor_score, d,
-                      std::span<float>(buf_score));
-      T.gather_cs_row(F::daily_return, d,
+      T.strat_gather_cs_row(slot_tradable, d, std::span<float>(buf_tradable));
+      T.strat_gather_cs_row(slot_score, d, std::span<float>(buf_score));
+      T.gather_cs_row(feature::def::daily_return_spec, d,
                       std::span<float>(buf_dr_today));
       if (d_next < axes.n_d()) {
-        T.gather_cs_row(F::daily_return, d_next,
+        T.gather_cs_row(feature::def::daily_return_spec, d_next,
                         std::span<float>(buf_dr_next));
       } else {
         std::fill(buf_dr_next.begin(), buf_dr_next.end(), std::nanf(""));
       }
       for (int f = 0; f < n_factor; ++f) {
-        T.gather_cs_row(factors[static_cast<std::size_t>(f)], d,
+        T.gather_cs_row(*factors[static_cast<std::size_t>(f)], d,
                         std::span<float>(buf_factors[static_cast<std::size_t>(f)]));
       }
 
@@ -235,7 +241,7 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
       if (i == 0) {
         pool_ret[i] = 0.0f;
       } else {
-        T.gather_cs_row(F::tradable, d - 1, std::span<float>(buf_pool));
+        T.strat_gather_cs_row(slot_tradable, d - 1, std::span<float>(buf_pool));
         double dr_sum = 0.0;
         int dr_n = 0;
         for (int a = 0; a < n_a; ++a) {
@@ -403,10 +409,10 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
       static_cast<std::size_t>(n_factor));
   for (int i = 0; i < n_d_bt; ++i) {
     int d = bt_d_lo + i;
-    T.gather_cs_row(F::tradable, d, std::span<float>(buf_tradable));
-    T.gather_cs_row(F::factor_score, d, std::span<float>(buf_score));
+    T.strat_gather_cs_row(slot_tradable, d, std::span<float>(buf_tradable));
+    T.strat_gather_cs_row(slot_score, d, std::span<float>(buf_score));
     for (int f = 0; f < n_factor; ++f) {
-      T.gather_cs_row(factors[static_cast<std::size_t>(f)], d,
+      T.gather_cs_row(*factors[static_cast<std::size_t>(f)], d,
                       std::span<float>(buf_factors_seq[static_cast<std::size_t>(f)]));
     }
     compute_top_k(buf_score.data(), buf_tradable.data(), n_a, K, today_score_top);
@@ -433,7 +439,8 @@ double run(const feature::Axes &axes, const feature::Tensor &T) {
   }
 
   // ---- 写盘 ----------------------------------------------------------------
-  fs::path out = misc::git_root() / "output" / "analysis";
+  fs::path out =
+      misc::git_root() / "output" / "strategy" / std::string(spec.name) / "analysis";
   fs::create_directories(out);
 
   {
