@@ -20,7 +20,7 @@ inline void ts_revenue_st(int a, const Axes &axes, const PitPool &pool,
 inline constexpr const FeatureSpec *revenue_st_deps[] = {&rev_raw_spec};
 
 inline constexpr FeatureSpec revenue_st_spec{
-    "revenue_st", Kind::Filter, Axis::TimeSeries, revenue_st_deps,
+    "revenue_st", "营收预警", Kind::Filter, Axis::TimeSeries, revenue_st_deps,
     &ts_revenue_st, nullptr, /*must_be_finite=*/true,
     /*formula=*/
     "状态机 (per A) ∧ meta.list_sector == 1 ∧ rev_raw < (3e8 if end_date.Y ≥ "

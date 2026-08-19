@@ -19,7 +19,7 @@ inline constexpr const FeatureSpec *roe_ttm12_deps[] = {
     &roe_raw_spec, &mcap_raw_spec, &industry_l1_spec, &list_age_spec, &delist_age_spec};
 
 inline constexpr FeatureSpec roe_ttm12_spec{
-    "roe_ttm12", Kind::Factor, Axis::CrossSection, roe_ttm12_deps, nullptr,
+    "roe_ttm12", "中性ROE", Kind::Factor, Axis::CrossSection, roe_ttm12_deps, nullptr,
     &cs_roe_ttm12, /*must_be_finite=*/true,
     /*formula=*/
     "pct_rank(z(neutralize(winsorize_quantile(roe_raw)))) + 截面均值填充; "

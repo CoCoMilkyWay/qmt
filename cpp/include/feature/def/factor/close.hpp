@@ -16,7 +16,7 @@ inline constexpr const FeatureSpec *close_deps[] = {
     &close_raw_spec, &list_age_spec, &delist_age_spec};
 
 inline constexpr FeatureSpec close_spec{
-    "close", Kind::Factor, Axis::CrossSection, close_deps, nullptr, &cs_close,
+    "close", "低价因子", Kind::Factor, Axis::CrossSection, close_deps, nullptr, &cs_close,
     /*must_be_finite=*/true,
     /*formula=*/"pct_rank(z(winsor_mad(1 / close_raw))) + 截面均值填充",
     /*assumption=*/"—; 低价因子, 越低价越优"};

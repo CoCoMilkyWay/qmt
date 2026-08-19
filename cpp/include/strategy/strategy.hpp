@@ -54,6 +54,15 @@ struct FactorWeight {
   float w;                       // 必须 > 0; 不想要的 factor 直接删行 (=禁用)
 };
 
+// 两融标的 (is_margin==1) 的池化策略 — per-D per-A 动态判定:
+//   Exclude = 排除两融标的 (只留非两融); Include = 包含两融 (普通+两融都留);
+//   Only = 只要两融标的 (只留 is_margin==1).
+enum class MarginPolicy : std::uint8_t {
+  Exclude,
+  Include,
+  Only,
+};
+
 // Pool 定义 — 可独立成常量被多个策略复用 (定义级共享).
 struct PoolSpec {
   // exchange 中文全称白名单 (匹配 _meta/cn_stock_basic_info::exchange):
@@ -64,7 +73,7 @@ struct PoolSpec {
   // 申万 SW2021 一级行业中文名白名单 (columns.cpp 启动期一次性转 ID mask;
   //   industry_l1 ID 0 = 未知, 永远不命中)
   std::span<const std::string_view> industry_l1_wl;
-  bool include_margin;                  // 是否包含两融标的 (per-D per-A 动态)
+  MarginPolicy margin_policy;           // 两融标的池化策略 (Exclude/Include/Only)
   const feature::FeatureSpec *rank_key; // 截面 universe 排名 key (小市值池 = mcap_raw_spec)
   bool rank_asc;                        // true = 升序取前 N (小市值), false = 降序 (大市值)
   int universe_size;                    // pool = pool_b ∧ rank(rank_key) ≤ universe_size

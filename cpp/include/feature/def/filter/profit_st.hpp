@@ -18,7 +18,7 @@ inline void ts_profit_st(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec profit_st_spec{
-    "profit_st", Kind::Filter, Axis::TimeSeries, {}, &ts_profit_st, nullptr,
+    "profit_st", "预亏预警", Kind::Filter, Axis::TimeSeries, {}, &ts_profit_st, nullptr,
     /*must_be_finite=*/true,
     /*formula=*/
     "状态机 (per A): forecast.end_date.M == 12 ∧ forecast.type ∈ {首亏, 续亏} "

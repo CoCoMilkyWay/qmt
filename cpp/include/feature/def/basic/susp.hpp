@@ -14,7 +14,7 @@ inline void ts_susp(int a, const Axes &axes, const PitPool &pool,
                     const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec susp_spec{
-    "susp", Kind::Inter, Axis::TimeSeries, {}, &ts_susp, nullptr,
+    "susp", "停牌标记", Kind::Inter, Axis::TimeSeries, {}, &ts_susp, nullptr,
     /*must_be_finite=*/true,
     /*formula=*/"cn_stock_status.suspended == 1",
     /*assumption=*/"[bool]; 当日是否停牌"};

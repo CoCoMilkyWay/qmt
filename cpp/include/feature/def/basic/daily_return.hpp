@@ -25,7 +25,7 @@ inline void ts_daily_return(int a, const Axes &axes, const PitPool &pool,
                             const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec daily_return_spec{
-    "daily_return", Kind::Inter, Axis::TimeSeries, {}, &ts_daily_return,
+    "daily_return", "日收益率", Kind::Inter, Axis::TimeSeries, {}, &ts_daily_return,
     nullptr, /*must_be_finite=*/false,
     /*formula=*/
     "(close[d]·adjust_factor[d]) / (close[d-1]·adjust_factor[d-1]) - 1 "

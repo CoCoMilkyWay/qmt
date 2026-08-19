@@ -20,7 +20,7 @@ inline void ts_cffoa_raw(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec cffoa_raw_spec{
-    "cffoa_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_cffoa_raw, nullptr,
+    "cffoa_raw", "现金流增速", Kind::Inter, Axis::TimeSeries, {}, &ts_cffoa_raw, nullptr,
     /*must_be_finite=*/false,
     /*formula=*/"net_cffoa_ttm / net_cffoa_ttm_shift4 - 1",
     /*assumption=*/

@@ -19,7 +19,7 @@ inline void ts_delist_age(int a, const Axes &axes, const PitPool &pool,
                           const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec delist_age_spec{
-    "delist_age", Kind::Inter, Axis::TimeSeries, {}, &ts_delist_age, nullptr,
+    "delist_age", "退市龄", Kind::Inter, Axis::TimeSeries, {}, &ts_delist_age, nullptr,
     /*must_be_finite=*/false,
     /*formula=*/"D − meta.delist_date if D ≥ delist_date else NaN",
     /*assumption=*/

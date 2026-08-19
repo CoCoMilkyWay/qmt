@@ -31,7 +31,7 @@ inline void ts_dy_raw(int a, const Axes &axes, const PitPool &pool,
 inline constexpr const FeatureSpec *dy_raw_deps[] = {&mcap_raw_spec};
 
 inline constexpr FeatureSpec dy_raw_spec{
-    "dy_raw", Kind::Inter, Axis::TimeSeries, dy_raw_deps, &ts_dy_raw, nullptr,
+    "dy_raw", "股息率TTM", Kind::Inter, Axis::TimeSeries, dy_raw_deps, &ts_dy_raw, nullptr,
     /*must_be_finite=*/false,
     /*formula=*/
     "Σ(dividend.cash_before_tax × share_raw[ev.v] for ev.v ∈ (D − 365d, D]) "

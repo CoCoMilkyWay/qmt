@@ -18,7 +18,7 @@ inline void ts_rev_raw(int a, const Axes &axes, const PitPool &pool,
                        const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec rev_raw_spec{
-    "rev_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_rev_raw, nullptr,
+    "rev_raw", "营业总收入TTM", Kind::Inter, Axis::TimeSeries, {}, &ts_rev_raw, nullptr,
     /*must_be_finite=*/false,
     /*formula=*/
     "ttm.total_operating_revenue_ttm (shift=0 latest visible); ≤ 0 → NaN",

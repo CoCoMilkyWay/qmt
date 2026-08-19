@@ -22,7 +22,7 @@ inline void ts_fmcap_raw(int a, const Axes &axes, const PitPool &pool,
 inline constexpr const FeatureSpec *fmcap_raw_deps[] = {&close_raw_spec};
 
 inline constexpr FeatureSpec fmcap_raw_spec{
-    "fmcap_raw", Kind::Inter, Axis::TimeSeries, fmcap_raw_deps, &ts_fmcap_raw,
+    "fmcap_raw", "流通市值", Kind::Inter, Axis::TimeSeries, fmcap_raw_deps, &ts_fmcap_raw,
     nullptr, /*must_be_finite=*/false,
     /*formula=*/"close_raw × cn_stock_shares.total_float_shares",
     /*assumption=*/"[元, 真流通市值]; 同 mcap_raw 真值原则"};

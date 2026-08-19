@@ -22,7 +22,7 @@ inline void ts_roe_raw(int a, const Axes &axes, const PitPool &pool,
                        const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec roe_raw_spec{
-    "roe_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_roe_raw, nullptr,
+    "roe_raw", "净资产收益率TTM", Kind::Inter, Axis::TimeSeries, {}, &ts_roe_raw, nullptr,
     /*must_be_finite=*/false,
     /*formula=*/
     "ttm.net_profit_to_parent_shareholders_ttm / "

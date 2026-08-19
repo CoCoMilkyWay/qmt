@@ -18,7 +18,7 @@ inline constexpr const FeatureSpec *cffoa_ttm12_deps[] = {
     &cffoa_raw_spec, &list_age_spec, &delist_age_spec};
 
 inline constexpr FeatureSpec cffoa_ttm12_spec{
-    "cffoa_ttm12", Kind::Factor, Axis::CrossSection, cffoa_ttm12_deps, nullptr,
+    "cffoa_ttm12", "现金流增速因子", Kind::Factor, Axis::CrossSection, cffoa_ttm12_deps, nullptr,
     &cs_cffoa_ttm12, /*must_be_finite=*/true,
     /*formula=*/"pct_rank(z(winsor_mad(cffoa_raw))) + 截面均值填充",
     /*assumption=*/

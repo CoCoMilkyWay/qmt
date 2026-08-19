@@ -21,7 +21,7 @@ inline void ts_ni_raw(int a, const Axes &axes, const PitPool &pool,
                       const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec ni_raw_spec{
-    "ni_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_ni_raw, nullptr,
+    "ni_raw", "归母净利润2年报均值", Kind::Inter, Axis::TimeSeries, {}, &ts_ni_raw, nullptr,
     /*must_be_finite=*/false,
     /*formula=*/
     "mean(latest 2 annuals.net_profit_to_parent_shareholders) if N ≥ 2 else "

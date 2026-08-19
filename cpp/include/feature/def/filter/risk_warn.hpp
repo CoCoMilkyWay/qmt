@@ -16,7 +16,7 @@ inline void ts_risk_warn(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec risk_warn_spec{
-    "risk_warn", Kind::Filter, Axis::TimeSeries, {}, &ts_risk_warn, nullptr,
+    "risk_warn", "风险预警", Kind::Filter, Axis::TimeSeries, {}, &ts_risk_warn, nullptr,
     /*must_be_finite=*/true,
     /*formula=*/
     "派生 4 态 (int8 → float; 0=正常, 1=ST, 2=*ST, 3=退市整理期): 历史日由 "

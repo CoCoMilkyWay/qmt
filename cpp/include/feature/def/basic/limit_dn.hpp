@@ -18,7 +18,7 @@ inline constexpr const FeatureSpec *limit_dn_deps[] = {&close_raw_spec,
                                                        &dn_lim_spec};
 
 inline constexpr FeatureSpec limit_dn_spec{
-    "limit_dn", Kind::Inter, Axis::TimeSeries, limit_dn_deps, &ts_limit_dn,
+    "limit_dn", "跌停标记", Kind::Inter, Axis::TimeSeries, limit_dn_deps, &ts_limit_dn,
     nullptr, /*must_be_finite=*/true,
     /*formula=*/"close_raw ≤ dn_lim + 1e-4",
     /*assumption=*/"[bool]; 策略跌停判定"};

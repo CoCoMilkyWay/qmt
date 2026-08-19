@@ -67,7 +67,8 @@ industry_l1_whitelist_mask(std::span<const std::string_view> wl) {
 }
 
 // pool_b = exchange ∈ wl ∧ list_sector ∈ wl ∧ industry_l1 ∈ wl
-//          ∧ 已上市 ∧ ¬susp ∧ ¬退市 ∧ (true if include_margin else ¬is_margin)
+//          ∧ 已上市 ∧ ¬susp ∧ ¬退市 ∧ margin_policy(is_margin):
+//            Exclude → ¬is_margin; Include → 不动; Only → is_margin
 //   exchange / list_sector 是 asset 静态 (全 D 同值, 启动期判一次);
 //   industry_l1 是时变 (per-D 读 T.ts_row(industry_l1_spec, a) → ID → mask 查白名单).
 //   industry_l1 ID 0 (未知) 不在 mask 任何位 → ¬ind_ok, 自然排除.
@@ -85,7 +86,7 @@ void ts_pool_b(int s, const StrategySpec &spec,
   bool ex_ok = in_whitelist(meta.exchange[a], spec.pool.exchange_wl);
   bool sec_ok = in_int_whitelist(meta.list_sector[a], spec.pool.list_sector_wl);
   bool asset_ok = ex_ok && sec_ok;
-  bool incl_margin = spec.pool.include_margin;
+  MarginPolicy mp = spec.pool.margin_policy;
 
   for (int d = 0; d < n_d; ++d) {
     bool ind_ok = false;
@@ -97,8 +98,11 @@ void ts_pool_b(int s, const StrategySpec &spec,
     bool b = asset_ok && ind_ok && is_finite(list_age_[d]) &&
              !(susp_[d] > 0.5f) &&
              !is_finite(delist_age_[d]);
-    if (!incl_margin)
-      b = b && !(is_marg_[d] > 0.5f);
+    bool marg = is_marg_[d] > 0.5f;
+    if (mp == MarginPolicy::Exclude)
+      b = b && !marg;
+    else if (mp == MarginPolicy::Only)
+      b = b && marg;
     out[d] = b ? 1.0f : 0.0f;
   }
 }

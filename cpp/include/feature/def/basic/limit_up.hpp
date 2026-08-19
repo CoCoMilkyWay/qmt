@@ -19,7 +19,7 @@ inline constexpr const FeatureSpec *limit_up_deps[] = {&close_raw_spec,
                                                        &up_lim_spec};
 
 inline constexpr FeatureSpec limit_up_spec{
-    "limit_up", Kind::Inter, Axis::TimeSeries, limit_up_deps, &ts_limit_up,
+    "limit_up", "涨停标记", Kind::Inter, Axis::TimeSeries, limit_up_deps, &ts_limit_up,
     nullptr, /*must_be_finite=*/true,
     /*formula=*/"close_raw ≥ up_lim − 1e-4",
     /*assumption=*/"[bool]; 策略涨停判定"};

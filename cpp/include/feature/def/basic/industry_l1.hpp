@@ -19,7 +19,7 @@ inline void ts_industry_l1(int a, const Axes &axes, const PitPool &pool,
                            const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec industry_l1_spec{
-    "industry_l1", Kind::Inter, Axis::TimeSeries, {}, &ts_industry_l1, nullptr,
+    "industry_l1", "一级行业", Kind::Inter, Axis::TimeSeries, {}, &ts_industry_l1, nullptr,
     /*must_be_finite=*/false,
     /*formula=*/
     "base = 最近一份月初 cn_stock_industry_component WHERE industry='sw2021' "

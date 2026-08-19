@@ -24,7 +24,7 @@ inline void ts_ps_raw(int a, const Axes &axes, const PitPool &pool,
 inline constexpr const FeatureSpec *ps_raw_deps[] = {&mcap_raw_spec};
 
 inline constexpr FeatureSpec ps_raw_spec{
-    "ps_raw", Kind::Inter, Axis::TimeSeries, ps_raw_deps, &ts_ps_raw, nullptr,
+    "ps_raw", "市销率TTM", Kind::Inter, Axis::TimeSeries, ps_raw_deps, &ts_ps_raw, nullptr,
     /*must_be_finite=*/false,
     /*formula=*/
     "mcap_raw / ttm.total_operating_revenue_ttm (shift=0 latest visible)",

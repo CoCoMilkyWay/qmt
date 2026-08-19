@@ -19,7 +19,7 @@ inline constexpr const FeatureSpec *dy_ttm12_deps[] = {
     &dy_raw_spec, &mcap_raw_spec, &industry_l1_spec, &list_age_spec, &delist_age_spec};
 
 inline constexpr FeatureSpec dy_ttm12_spec{
-    "dy_ttm12", Kind::Factor, Axis::CrossSection, dy_ttm12_deps, nullptr,
+    "dy_ttm12", "中性DY", Kind::Factor, Axis::CrossSection, dy_ttm12_deps, nullptr,
     &cs_dy_ttm12, /*must_be_finite=*/true,
     /*formula=*/
     "pct_rank(z(neutralize(winsorize_quantile(dy_raw)))) + 截面均值填充; "

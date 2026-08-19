@@ -14,7 +14,7 @@ inline void ts_is_margin(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec is_margin_spec{
-    "is_margin", Kind::Inter, Axis::TimeSeries, {}, &ts_is_margin, nullptr,
+    "is_margin", "两融标记", Kind::Inter, Axis::TimeSeries, {}, &ts_is_margin, nullptr,
     /*must_be_finite=*/true,
     /*formula=*/"1.0 if cn_stock_margin_trading_detail (D, A) 存在 else 0.0",
     /*assumption=*/"[bool]; 当日是否融资融券标的"};

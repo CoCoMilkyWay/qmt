@@ -23,6 +23,7 @@ namespace feature {
 // ============================================================================
 struct FeatureSpec {
   const char *name;
+  const char *cn_name; // 必填: 中文名 (registry_report.cpp 打印用; 不得为空)
   Kind kind;
   Axis axis;
   std::span<const FeatureSpec *const> deps; // 依赖节点地址; 空 = 仅依赖 Phase 1 输入
@@ -128,7 +129,7 @@ filter_axis(const std::array<const FeatureSpec *, N> &all, Axis ax) {
 template <std::size_t N>
 consteval bool all_documented(const std::array<const FeatureSpec *, N> &all) {
   for (const FeatureSpec *s : all)
-    if (s->formula[0] == '\0' || s->assumption[0] == '\0')
+    if (s->cn_name[0] == '\0' || s->formula[0] == '\0' || s->assumption[0] == '\0')
       return false;
   return true;
 }

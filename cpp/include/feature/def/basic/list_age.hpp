@@ -19,7 +19,7 @@ inline void ts_list_age(int a, const Axes &axes, const PitPool &pool,
                         const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec list_age_spec{
-    "list_age", Kind::Inter, Axis::TimeSeries, {}, &ts_list_age, nullptr,
+    "list_age", "上市龄", Kind::Inter, Axis::TimeSeries, {}, &ts_list_age, nullptr,
     /*must_be_finite=*/false,
     /*formula=*/"D − meta.list_date if D ≥ list_date else NaN",
     /*assumption=*/

@@ -173,10 +173,10 @@ POOL_FEATURE = "tradable"
 # 搜索权重的 factor 特征 (张量 F 枚举 CS factor 段, 名单见 meta.json factor_names;
 # 顺序即权重维度顺序). 挖到的权重可直接填回 config::STRATEGY_FACTOR_WEIGHTS.
 SEARCH_FACTOR_NAMES = [
-    "pb_ttm1",
-    "pe_ttm12",
-    "ps_ttm12",
-    "pcf_ttm12",
+    "bp_ttm3",
+    "ep_ttm12",
+    "sp_ttm12",
+    "cp_ttm12",
     "close",
     "fmcap",
     "mcap",

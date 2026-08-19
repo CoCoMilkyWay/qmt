@@ -20,7 +20,7 @@ inline void ts_pcf_raw(int a, const Axes &axes, const PitPool &pool,
 inline constexpr const FeatureSpec *pcf_raw_deps[] = {&mcap_raw_spec};
 
 inline constexpr FeatureSpec pcf_raw_spec{
-    "pcf_raw", Kind::Inter, Axis::TimeSeries, pcf_raw_deps, &ts_pcf_raw,
+    "pcf_raw", "市现率TTM", Kind::Inter, Axis::TimeSeries, pcf_raw_deps, &ts_pcf_raw,
     nullptr, /*must_be_finite=*/false,
     /*formula=*/"mcap_raw / ttm.net_cffoa_ttm (shift=0 latest visible)",
     /*assumption=*/

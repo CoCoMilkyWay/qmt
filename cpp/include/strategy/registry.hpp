@@ -12,7 +12,10 @@
 // ============================================================================
 
 #include "feature/graph.hpp"
-#include "strategy/def/small_cap.hpp"
+#include "strategy/def/low_pb_small_cap.hpp"
+#include "strategy/def/low_price_small_cap.hpp"
+#include "strategy/def/low_valuation_small_cap.hpp"
+#include "strategy/def/margin_small_cap.hpp"
 #include "strategy/strategy.hpp"
 
 #include <array>
@@ -20,8 +23,11 @@
 
 namespace strategy {
 
-inline constexpr std::array<const StrategySpec *, 1> STRATEGIES = {{
-    &def::small_cap,
+inline constexpr std::array<const StrategySpec *, 4> STRATEGIES = {{
+    &def::low_price_small_cap,
+    &def::low_valuation_small_cap,
+    &def::margin_small_cap,
+    &def::low_pb_small_cap,
 }};
 
 inline constexpr int N_STRATEGIES = static_cast<int>(STRATEGIES.size());

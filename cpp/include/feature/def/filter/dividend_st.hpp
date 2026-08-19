@@ -1,7 +1,6 @@
 #pragma once
 
 #include "feature/axis.hpp"
-#include "feature/def/detail.hpp"
 #include "feature/def/factor/ni_raw.hpp"
 #include "feature/def/factor/share_raw.hpp"
 #include "feature/graph.hpp"
@@ -24,7 +23,7 @@ inline constexpr const FeatureSpec *dividend_st_deps[] = {&share_raw_spec,
                                                            &ni_raw_spec};
 
 inline constexpr FeatureSpec dividend_st_spec{
-    "dividend_st", Kind::Filter, Axis::TimeSeries, dividend_st_deps,
+    "dividend_st", "分红预警", Kind::Filter, Axis::TimeSeries, dividend_st_deps,
     &ts_dividend_st, nullptr, /*must_be_finite=*/true,
     /*formula=*/
     "meta.list_sector == 1 ∧ ni_raw > 0 ∧ 3y_sum(dividend.cash_after_tax × "

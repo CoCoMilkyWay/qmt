@@ -20,7 +20,7 @@ inline constexpr const FeatureSpec *trading_st_deps[] = {&low_p_spec,
                                                           &low_mc_spec};
 
 inline constexpr FeatureSpec trading_st_spec{
-    "trading_st", Kind::Filter, Axis::TimeSeries, trading_st_deps,
+    "trading_st", "交易类退市预警", Kind::Filter, Axis::TimeSeries, trading_st_deps,
     &ts_trading_st, nullptr, /*must_be_finite=*/true,
     /*formula=*/"rolling_20D(low_p ∨ low_mc).all()",
     /*assumption=*/"—"};

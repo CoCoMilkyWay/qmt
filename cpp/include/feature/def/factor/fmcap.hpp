@@ -16,7 +16,7 @@ inline constexpr const FeatureSpec *fmcap_deps[] = {&fmcap_raw_spec, &list_age_s
                                                      &delist_age_spec};
 
 inline constexpr FeatureSpec fmcap_spec{
-    "fmcap", Kind::Factor, Axis::CrossSection, fmcap_deps, nullptr, &cs_fmcap,
+    "fmcap", "流通市值因子", Kind::Factor, Axis::CrossSection, fmcap_deps, nullptr, &cs_fmcap,
     /*must_be_finite=*/true,
     /*formula=*/"pct_rank(z(winsor_mad(1 / fmcap_raw))) + 截面均值填充",
     /*assumption=*/"—"};

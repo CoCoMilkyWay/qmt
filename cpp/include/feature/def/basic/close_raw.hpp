@@ -17,7 +17,7 @@ inline void ts_close_raw(int a, const Axes &axes, const PitPool &pool,
                          const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec close_raw_spec{
-    "close_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_close_raw, nullptr,
+    "close_raw", "收盘价", Kind::Inter, Axis::TimeSeries, {}, &ts_close_raw, nullptr,
     /*must_be_finite=*/false,
     /*formula=*/"cn_stock_real_bar1d.close (不复权真价)",
     /*assumption=*/

@@ -241,7 +241,7 @@ hybrid 适用判定: 该 itf 当日值在 T 当日开盘前**业务上已实际�
 namespace feature::def {
 inline void ts_<name>(...);          // 或 cs_<name>, 依 axis 而定
 inline constexpr FeatureSpec <name>_spec{
-    "<name>", Kind::Inter, Axis::TimeSeries,
+    "<name>", "<中文名>", Kind::Inter, Axis::TimeSeries,
     <name>_deps,           // std::span<const FeatureSpec*const>, 空则无依赖
     &ts_<name>, nullptr,   // TS 填 compute_ts, CS 填 compute_cs, 另一个 nullptr
     /*must_be_finite=*/false,
@@ -264,7 +264,7 @@ inline constexpr FeatureSpec <name>_spec{
 - **ttm12** (高季节性, 12 个月 ≡ 4 报告期): 取 `cn_stock_financial_ttm_shift.*_ttm` (shift=0) 或 mcap_raw / TTM 字段自算 (估值类, 支持负值).
 - **ttm1** (瞬时估值 / MRQ, 最新一期 snapshot): 取 `cn_stock_financial_balance_general_pit.*` (latest) 自算; 例 pb = mcap_raw / total_owner_equity.
 
-**依赖表格现场生成, 不在文档里维护副本**: `main.cpp` 在 `feature::build()` 之后调用 `feature::print_dependency_table()` (`config::FEATURE_TABLE_ENABLE` 门控), 运行期打印定宽表格 (kind / feature / 轴 / active / deps / formula / assumption, 每行截断到固定宽度). 表格覆盖**全部**已定义特征 (含未被任何策略引用的), 组内按 Kind (inter → filter → factor) 分桶、桶内拓扑序; `active` 列标记该节点是否在 `feature::ALL_NODES` (真正参与计算的可达闭包) 内. "全部已定义特征"清单本身也是自动生成、无需手动维护: `cpp/projects/main/CMakeLists.txt` 在 configure 期 glob `feature/def/{basic,factor,filter}/*.hpp`, 按约定 (文件名 == 节点名 == `FeatureSpec` 变量名前缀) 拼出 `#include` + `&<name>_spec` 列表, 生成到 `<build>/generated/feature/def/all.hpp` (`report.cpp` `#include "feature/def/all.hpp"` 拿到的就是这份生成文件); 它只给这张表用, 不被 `registry.hpp` 引用, 不影响可达性裁剪, 未激活的节点依然不触发计算/不占 `Tensor` 存储; 新增/删除 def 文件后重新 cmake configure 即自动同步. 表格下方再按策略打印两行 (`<策略名> filter: ...` / `<策略名> factor: ...`) 列出该策略实际使用的节点名. 想看当前全部特征的公式/假设, 直接跑一次 build 看 stdout, 或读对应 `def/**/<name>.hpp` 里的 `formula`/`assumption` 字段 (二者同源, 不可能不一致).
+**依赖表格现场生成, 不在文档里维护副本**: `main.cpp` 在 `feature::build()` 之后调用 `feature::print_dependency_table()` (`config::FEATURE_TABLE_ENABLE` 门控), 运行期打印定宽表格 (kind / feature / 中文名 / 轴 / active / deps / formula / assumption, 每行截断到固定宽度). 表格覆盖**全部**已定义特征 (含未被任何策略引用的), 组内按 Kind (inter → filter → factor) 分桶、桶内拓扑序; `active` 列标记该节点是否在 `feature::ALL_NODES` (真正参与计算的可达闭包) 内. "全部已定义特征"清单本身也是自动生成、无需手动维护: `cpp/projects/main/CMakeLists.txt` 在 configure 期 glob `feature/def/{basic,factor,filter}/*.hpp`, 按约定 (文件名 == 节点名 == `FeatureSpec` 变量名前缀) 拼出 `#include` + `&<name>_spec` 列表, 生成到 `<build>/generated/feature/def/all.hpp` (`report.cpp` `#include "feature/def/all.hpp"` 拿到的就是这份生成文件); 它只给这张表用, 不被 `registry.hpp` 引用, 不影响可达性裁剪, 未激活的节点依然不触发计算/不占 `Tensor` 存储; 新增/删除 def 文件后重新 cmake configure 即自动同步. 表格下方再按策略打印两行 (`<策略名> filter: ...` / `<策略名> factor: ...`) 列出该策略实际使用的节点名. 想看当前全部特征的公式/假设, 直接跑一次 build 看 stdout, 或读对应 `def/**/<name>.hpp` 里的 `formula`/`assumption` 字段 (二者同源, 不可能不一致).
 
 ## 构建流水线 (data → Tensor → 策略)
 
@@ -406,7 +406,10 @@ Phase 4 校验  (串行, 轻量)
 
 ```cpp
 inline constexpr std::array<const StrategySpec *, N> STRATEGIES = {{
-    &def::small_cap,
+    &def::low_price_small_cap,
+    &def::low_valuation_small_cap,
+    &def::margin_small_cap,
+    &def::low_pb_small_cap,
     // &def::<new_strategy>,
 }};
 ```

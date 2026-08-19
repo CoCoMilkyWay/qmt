@@ -16,7 +16,7 @@ inline void ts_low_p(int a, const Axes &axes, const PitPool &pool,
 inline constexpr const FeatureSpec *low_p_deps[] = {&close_raw_spec};
 
 inline constexpr FeatureSpec low_p_spec{
-    "low_p", Kind::Inter, Axis::TimeSeries, low_p_deps, &ts_low_p, nullptr,
+    "low_p", "低价标记", Kind::Inter, Axis::TimeSeries, low_p_deps, &ts_low_p, nullptr,
     /*must_be_finite=*/true,
     /*formula=*/"close_raw < 1.0",
     /*assumption=*/"[bool]"};

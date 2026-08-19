@@ -23,7 +23,7 @@ inline void ts_pb_raw(int a, const Axes &axes, const PitPool &pool,
 inline constexpr const FeatureSpec *pb_raw_deps[] = {&mcap_raw_spec};
 
 inline constexpr FeatureSpec pb_raw_spec{
-    "pb_raw", Kind::Inter, Axis::TimeSeries, pb_raw_deps, &ts_pb_raw, nullptr,
+    "pb_raw", "市净率MRQ", Kind::Inter, Axis::TimeSeries, pb_raw_deps, &ts_pb_raw, nullptr,
     /*must_be_finite=*/false,
     /*formula=*/
     "mcap_raw / balance.total_equity_to_parent_shareholders (取 latest "

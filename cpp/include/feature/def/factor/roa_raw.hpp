@@ -22,7 +22,7 @@ inline void ts_roa_raw(int a, const Axes &axes, const PitPool &pool,
                        const StockMeta &meta, Tensor &T);
 
 inline constexpr FeatureSpec roa_raw_spec{
-    "roa_raw", Kind::Inter, Axis::TimeSeries, {}, &ts_roa_raw, nullptr,
+    "roa_raw", "总资产收益率TTM", Kind::Inter, Axis::TimeSeries, {}, &ts_roa_raw, nullptr,
     /*must_be_finite=*/false,
     /*formula=*/"ttm.net_profit_ttm / avg5(balance.total_assets) × 100",
     /*assumption=*/
