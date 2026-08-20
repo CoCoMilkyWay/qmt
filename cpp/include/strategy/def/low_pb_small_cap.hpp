@@ -1,10 +1,9 @@
 #pragma once
 
-#include "feature/def/factor/bp_ttm3.hpp"
 #include "feature/def/factor/close.hpp"
-#include "feature/def/factor/fmcap.hpp"
-#include "feature/def/factor/mcap.hpp"
 #include "feature/def/factor/mcap_raw.hpp"
+#include "feature/def/factor/mr_bal.hpp"
+#include "feature/def/factor/ms_bal.hpp"
 #include "feature/def/filter/dividend_st.hpp"
 #include "feature/def/filter/new_list.hpp"
 #include "feature/def/filter/profit_st.hpp"
@@ -78,10 +77,9 @@ inline constexpr const feature::FeatureSpec *low_pb_small_cap_filters[] = {
 };
 
 inline constexpr FactorWeight low_pb_small_cap_weights[] = {
-    {&feature::def::mcap_spec, -10.0f},
-    {&feature::def::fmcap_spec, -10.0f},
-    {&feature::def::close_spec, -1.0f},
-    {&feature::def::bp_ttm3_spec, 4.0f},
+    {&feature::def::close_spec, -3.0f / 6},
+    {&feature::def::mr_bal_spec, -2.0f / 6},
+    {&feature::def::ms_bal_spec, 1.0f / 6},
 };
 
 inline constexpr StrategySpec low_pb_small_cap{

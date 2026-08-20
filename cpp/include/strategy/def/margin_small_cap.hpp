@@ -93,8 +93,8 @@ inline constexpr StrategySpec margin_small_cap{
             // margin_policy: Exclude=排除两融 / Include=含两融 / Only=仅两融
             //.margin_policy = MarginPolicy::Exclude,
             //.margin_policy = MarginPolicy::Include,
-            .margin_policy = MarginPolicy::Only, // 仅融资标的 (is_margin==1)
-                                                 // rank_key: 截面 universe 排名 key
+            .margin_policy = MarginPolicy::Include, // 仅融资标的 (is_margin==1)
+                                                    // rank_key: 截面 universe 排名 key
             .rank_key = &feature::def::mcap_raw_spec,
             // rank_asc: true=升序取前 N (小市值) / false=降序 (大市值)
             .rank_asc = true,

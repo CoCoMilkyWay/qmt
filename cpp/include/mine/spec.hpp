@@ -66,13 +66,17 @@ inline constexpr int MINE_N_FACTORS =
 //   点数 = Σ_j C(n,j)·C(M-1,j-1)·2^j, n = MINE_N_FACTORS:
 //     n=13: M=6 → 4.5e5 | M=8 → 6.1e6 | M=10 → 5.4e7
 //   单点开销 ≈ n_d_bt × (池内点积 + top-K 选择 + 内核走一天).
-inline constexpr int MINE_LATTICE_M = 8;
+inline constexpr int MINE_LATTICE_M = 6;
 
 // 进"持仓去重"的候选数 (按总分降序). 这是**算力预算**而非统计阈值: 去重是
 //   流式贪心, 单候选要现算逐日持仓 (≈5ms), 4096 个约 20s; 最终留下几个风格由
 //   重合度自然决定, 不设上限.
-//   其余口径 (252 日窗 / 21 日步 / S = b − 2·se / 档数 = universe_size / hold_n
-//   / 敏感性的噪声归一 / 去重线 0.5) 全部写死在 mine.cpp — 无旋钮, 跨次可比.
-inline constexpr int MINE_DEDUP_CAND = 4096;
+inline constexpr int MINE_DEDUP_CAND = 16384;
+
+// 去重线: 平均逐日持仓重合度 ≥ 此值 ⇒ 同一风格. 0.2 = "平均两成持仓相同即视为
+//   同款", 比原来的 0.5 更激进 (留下更多风格). 零假设线不可用: 400 池独立选 10
+//   只的期望重合 ≈ 0.25 只 (0.025), 所有真实候选都远高于它, 按零假设筛会一个
+//   不留. 注意: 改此值会让结果不可跨次比较.
+inline constexpr double MINE_DEDUP_OVERLAP = 0.1;
 
 } // namespace mine

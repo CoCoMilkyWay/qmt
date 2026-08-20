@@ -677,12 +677,20 @@ def view_ag_factors(strats) -> str:
 
 
 def view_factor_ic(s) -> go.Figure:
-    """单因子累积 IC + 聚合 score 累积 IC (cpp 已算好累积形态)."""
+    """单因子累积 IC + 聚合 score 累积 IC (cpp 已算好累积形态).
+
+    按策略 weights 符号翻转: 权重为负的因子 IC 取反, 使所有曲线呈
+    "与策略收益正相关"的向上形态 (展示因子在策略方向上的贡献);
+    权重为 0/未配置的因子保持原始 IC 方向.
+    """
     colors = px_colors(N_FACTOR)
+    w = s["spec"]["weights"]
     fig = go.Figure()
     for f in range(N_FACTOR):
         nm = FACTOR_NAMES[f]
         y = s["factor_ic_cum"][f]
+        if w.get(nm, 0.0) < 0.0:
+            y = -y
         fig.add_trace(go.Scatter(
             x=s["x"], y=y, mode="lines", name=nm,
             legendgroup=nm, showlegend=False, hoverinfo="skip",

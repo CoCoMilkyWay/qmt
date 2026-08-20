@@ -23,10 +23,10 @@ from py import mode_debug, mode_profile, mode_assert, mode_production
 APP_NAME = "main"
 
 # Build & Run modes (set ONLY ONE to True)
-ENABLE_ASSERT = True
+ENABLE_ASSERT = False
 ENABLE_DEBUG = False
 ENABLE_PROFILE = False
-ENABLE_PRODUCTION = False  # Auto-enabled if all others are False
+ENABLE_PRODUCTION = True  # Auto-enabled if all others are False
 
 # cpp 跑完后自动生成 plotly HTML 报告 (output/report.html) 并打开浏览器
 ENABLE_REPORT = True
@@ -40,6 +40,7 @@ def _cleanup_processes():
 def _cleanup_tmp():
     # 删除 data/ 下残留的 .tmp (上次中断的原子写半成品: parquet / pool bin)
     import glob
+
     for p in glob.glob("data/**/*.tmp", recursive=True):
         os.remove(p)
 

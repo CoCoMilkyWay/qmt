@@ -58,10 +58,10 @@ elseif(ASSERT_MODE)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -march=native")
 
 else()
-    message(STATUS "Build mode: PRODUCTION (-O2 -DNDEBUG)")
+    message(STATUS "Build mode: PRODUCTION (-O3 -DNDEBUG)")
     # NOTE: -ffast-math 不可加 — 代码全程靠 std::nanf("") 标记缺失值, 与 -ffinite-math-only 冲突会 SIGSEGV
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -DNDEBUG -march=native")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2 -DNDEBUG -march=native")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG -march=native")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -DNDEBUG -march=native")
 endif()
 
 add_compile_options(-fcolor-diagnostics -fansi-escape-codes -Wno-overriding-option)

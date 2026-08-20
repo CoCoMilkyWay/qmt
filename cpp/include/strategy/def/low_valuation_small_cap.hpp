@@ -1,10 +1,9 @@
 #pragma once
 
-#include "feature/def/factor/cp_ttm12.hpp"
+#include "feature/def/factor/close.hpp"
+#include "feature/def/factor/dy_ttm12.hpp"
 #include "feature/def/factor/fmcap.hpp"
 #include "feature/def/factor/mcap.hpp"
-#include "feature/def/factor/mcap_raw.hpp"
-#include "feature/def/factor/sp_ttm12.hpp"
 #include "feature/def/filter/dividend_st.hpp"
 #include "feature/def/filter/new_list.hpp"
 #include "feature/def/filter/profit_st.hpp"
@@ -28,9 +27,9 @@ inline constexpr std::array<std::string_view, 2> low_valuation_small_cap_exchang
 
 inline constexpr std::array<std::int8_t, 2> low_valuation_small_cap_list_sector_wl = {{
     1, // 主板
-    2, // 创业板
-       // 3, // 科创板
-       // 4, // 北交所
+       // 2, // 创业板
+       //  3, // 科创板
+       //  4, // 北交所
 }};
 
 // 申万 SW2021
@@ -78,10 +77,10 @@ inline constexpr const feature::FeatureSpec *low_valuation_small_cap_filters[] =
 };
 
 inline constexpr FactorWeight low_valuation_small_cap_weights[] = {
-    {&feature::def::mcap_spec, -1.0f},
-    {&feature::def::fmcap_spec, -1.0f},
-    {&feature::def::cp_ttm12_spec, 1.0f},
-    {&feature::def::sp_ttm12_spec, 1.0f},
+    {&feature::def::mcap_spec, -1.0f / 6},
+    {&feature::def::fmcap_spec, -2.0f / 6},
+    {&feature::def::close_spec, -2.0f / 6},
+    {&feature::def::dy_ttm12_spec, 1.0f / 6},
 };
 
 inline constexpr StrategySpec low_valuation_small_cap{

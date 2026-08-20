@@ -23,7 +23,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
-#include <limits>
+#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -40,6 +40,12 @@ namespace {
 using backtest::Engine;
 using backtest::MarketWindow;
 using backtest::NullRecorder;
+
+// ANSI 转义 (run.py → subprocess 继承 tty, 直显). 与 main.cpp 同名同值.
+constexpr const char *C_RESET = "\033[0m";
+constexpr const char *C_BOLD = "\033[1m";
+constexpr const char *C_GREEN = "\033[32m";
+constexpr const char *C_CYAN = "\033[36m";
 
 // ---- 编译期校验 (spec.hpp 填错直接编译失败) --------------------------------
 consteval bool validate_spec() {
@@ -67,7 +73,7 @@ constexpr int TIE_MARGIN = 16;
 // 每线程一次带走的权重数. 内层循环换成 "先日后权重" 后, 一个日块
 //   (cnt × F × 4B ≈ 100 KB) 在整批权重上复用 ⇒ DRAM 流量降到 1/BATCH.
 //   这是"几百万组合"能在分钟级跑完的关键 (纯算力反而不是瓶颈).
-constexpr int BATCH = 256;
+constexpr int BATCH = 1024;
 
 // ---- 滑窗分层参数 (写死 — 口径固定才可跨次/跨策略比较) ----------------------
 constexpr int LAYER_WINDOW = 252; // 窗口长 (交易日) ≈ 一年
@@ -89,10 +95,7 @@ struct alignas(16) HistCell {
 };
 static_assert(sizeof(HistCell) == 16);
 
-// 去重线: 平均逐日持仓重合度 ≥ 此值 ⇒ 同一风格 (自解释, 非调参 — "平均而言
-//   半数持仓相同"). 零假设线不可用: 400 池独立选 10 只的期望重合 ≈ 0.25 只,
-//   所有真实候选都远高于它, 按零假设筛会一个不留.
-constexpr double DEDUP_OVERLAP = 0.5;
+// 去重线见 spec.hpp::MINE_DEDUP_OVERLAP (可调).
 
 // 窗口左端: 与 backtest.cpp find_d(floor=false) 同口径 (≥ start 的最小索引).
 int lower_d(const feature::Axes &axes, std::string_view ymd) {
@@ -110,6 +113,49 @@ int lower_d(const feature::Axes &axes, std::string_view ymd) {
 int prefix_need(const strategy::StrategySpec &spec) {
   int n_exit = static_cast<int>(static_cast<float>(spec.hold_n) * spec.exit_ratio);
   return std::max(n_exit, 2 * spec.hold_n);
+}
+
+// 自适应单位格式化: >=1e6 用 M, >=1e3 用 k, 否则原样.
+void fmt_amt(char *buf, double v) {
+  if (v >= 1e6)
+    std::snprintf(buf, 24, "%.2fM", v / 1e6);
+  else if (v >= 1e3)
+    std::snprintf(buf, 24, "%.1fk", v / 1e3);
+  else
+    std::snprintf(buf, 24, "%.0f", v);
+}
+
+// 并行阶段进度条 — 各 worker 通过 done 原子领计数, 跨 step 边界时调用.
+//   用 \r 单行刷新 (不换行), 完成时 (cur>=total) 补一个换行. tag = 阶段标签.
+//   cur/total/速率用自适应单位 (M/k) 显示.
+constexpr std::int64_t PROGRESS_INTERVAL_NS = 200000000; // 200ms 刷新一次
+void print_progress(const char *tag, std::int64_t cur, std::int64_t total,
+                    std::chrono::high_resolution_clock::time_point t0) {
+  double el = std::chrono::duration<double>(
+                  std::chrono::high_resolution_clock::now() - t0)
+                  .count();
+  double rate = el > 0.0 ? static_cast<double>(cur) / el : 0.0;
+  double remain = rate > 0.0 ? static_cast<double>(total - cur) / rate : 0.0;
+  double pct = 100.0 * static_cast<double>(cur) / static_cast<double>(total);
+  constexpr int BAR = 30;
+  int filled = static_cast<int>(pct / 100.0 * static_cast<double>(BAR) + 0.5);
+  if (filled > BAR)
+    filled = BAR;
+  if (filled < 0)
+    filled = 0;
+  char bar[BAR + 1];
+  for (int i = 0; i < BAR; ++i)
+    bar[i] = (i < filled) ? '=' : ' ';
+  bar[BAR] = '\0';
+  char cb[24], tb[24], rb[24];
+  fmt_amt(cb, static_cast<double>(cur));
+  fmt_amt(tb, static_cast<double>(total));
+  fmt_amt(rb, rate);
+  std::printf("\r[mine] %s [%s] %5.1f%%  %s/%s  %s/s  已用 %.0fs  剩余 ~%.0fs",
+              tag, bar, pct, cb, tb, rb, el, remain);
+  if (cur >= total)
+    std::printf("\n");
+  std::fflush(stdout);
 }
 
 // ============================================================================
@@ -637,7 +683,8 @@ LayerScratch make_layer_scratch(const PrStore &pr, const LayerParams &lp,
 //   out_win 可空, 否则 [np][n_win][MINE_N_WINDOW_METRICS] = (S, b, R², 夏普).
 void run_layer_batch(const PrStore &pr, const LayerParams &lp,
                      std::span<const Plan> plans, LayerScratch &sc,
-                     float *out_sum, float *out_win) {
+                     float *out_sum, float *out_win,
+                     std::function<void(int)> prog = nullptr) {
   const int np = static_cast<int>(plans.size());
   const int nb = lp.n_bins;
   const int nw = lp.n_win;
@@ -811,6 +858,8 @@ void run_layer_batch(const PrStore &pr, const LayerParams &lp,
         }
       }
     }
+    if (prog)
+      prog(t);
   }
 
   // (8) 跨窗口摘要 (+ 可选 per-window 明细).
@@ -1137,8 +1186,7 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
       worst = std::max(worst, std::fabs(a - b) / b);
     }
     selfcheck_max_rel = static_cast<float>(worst);
-    std::printf("[mine] 自检: NAV 逐点最大相对偏差 %.3e | 年化 %.4f 夏普 %.3f\n",
-                worst, static_cast<double>(m0.v[0]), static_cast<double>(m0.v[1]));
+    std::printf("[mine] 自检: %s通过%s\n", C_GREEN, C_RESET);
     assert(worst < 1e-9 && "自检未过: 挖掘管线与 backtest::run 口径不一致");
   }
 
@@ -1148,9 +1196,12 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
     LayerScratch lsc = make_layer_scratch(pr, lp, 1);
     run_layer_batch(pr, lp, std::span<const Plan>(&p0, 1), lsc, base_pt,
                     nullptr);
-    std::printf("[mine] 基线: 梳子均值 %.4f IR %.2f | 夏普均值 %.2f IR %.2f\n",
-                static_cast<double>(base_pt[0]), static_cast<double>(base_pt[1]),
-                static_cast<double>(base_pt[6]), static_cast<double>(base_pt[7]));
+    std::printf("[mine] %s%.*s%s: %s梳子均值%s:%s%.4f%s %sIR%s:%s%.2f%s %s夏普均值%s:%s%.2f%s %sIR%s:%s%.2f%s\n",
+                C_BOLD, static_cast<int>(spec.name.size()), spec.name.data(), C_RESET,
+                C_CYAN, C_RESET, C_GREEN, static_cast<double>(base_pt[0]), C_RESET,
+                C_CYAN, C_RESET, C_GREEN, static_cast<double>(base_pt[1]), C_RESET,
+                C_CYAN, C_RESET, C_GREEN, static_cast<double>(base_pt[6]), C_RESET,
+                C_CYAN, C_RESET, C_GREEN, static_cast<double>(base_pt[7]), C_RESET);
   }
 
   const std::vector<std::int8_t> kgrid = build_lattice();
@@ -1172,9 +1223,11 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
                          static_cast<std::size_t>(MINE_N_POINT_METRICS));
   {
     std::atomic<std::int64_t> next{0};
-    std::atomic<std::int64_t> done{0};
+    std::atomic<std::int64_t> done{0}; // 已完成 (权重×日)
+    std::atomic<std::int64_t> last_ns{0};
     auto t_scan = std::chrono::high_resolution_clock::now();
-    const std::int64_t step = n_p / 100 + 1;
+    const std::int64_t total = static_cast<std::int64_t>(n_p); // 权重数 (核心数量)
+    const std::int64_t n_ret = static_cast<std::int64_t>(lp.n_ret);
 
     auto worker = [&]() {
       LayerScratch lsc = make_layer_scratch(pr, lp, BATCH);
@@ -1187,26 +1240,37 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
           lsc.plans[static_cast<std::size_t>(b)] =
               plan_from_k(kgrid.data() + (lo + b) * MINE_N_FACTORS);
         }
+        // 日级进度回调: 每完成一天调用一次, 但只在本地累加; 累满 16 天才做
+        //   一次原子 fetch_add + 时间检查, 避免每天一次原子访问拖累热循环.
+        //   BATCH 很大时一个 batch 要跑几十秒, 只在 batch 边界汇报会长时间空白.
+        int since = 0;
+        std::function<void(int)> prog = [&](int /*t*/) {
+          if (++since < 16)
+            return;
+          since = 0;
+          done.fetch_add(static_cast<std::int64_t>(np) * 16,
+                         std::memory_order_relaxed);
+          // done 累计 (权重×日), 折算回权重数 ÷n_ret 才与 total 同口径.
+          std::int64_t cur = done.load(std::memory_order_relaxed) / n_ret;
+          if (cur < total) {
+            auto now = std::chrono::high_resolution_clock::now();
+            std::int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  now - t_scan)
+                                  .count();
+            std::int64_t last = last_ns.load(std::memory_order_relaxed);
+            if (ns - last >= PROGRESS_INTERVAL_NS &&
+                last_ns.compare_exchange_strong(last, ns,
+                                                std::memory_order_relaxed))
+              print_progress("Phase 1 扫描", cur, total, t_scan);
+          }
+        };
         run_layer_batch(pr, lp,
                         std::span<const Plan>(lsc.plans.data(),
                                               static_cast<std::size_t>(np)),
                         lsc,
                         ptm.data() + static_cast<std::size_t>(lo) *
                                          static_cast<std::size_t>(MINE_N_POINT_METRICS),
-                        nullptr);
-
-        std::int64_t prev = done.fetch_add(np, std::memory_order_relaxed);
-        std::int64_t cur = prev + np;
-        if (prev / step != cur / step) {
-          std::chrono::duration<double> el =
-              std::chrono::high_resolution_clock::now() - t_scan;
-          double rate = static_cast<double>(cur) / el.count();
-          std::printf("[mine] 扫描 %5.1f%%  %.0f 权重/s  已用 %.0fs  剩余 ~%.0fs\n",
-                      100.0 * static_cast<double>(cur) / static_cast<double>(n_p),
-                      rate, el.count(),
-                      static_cast<double>(n_p - cur) / rate);
-          std::fflush(stdout);
-        }
+                        nullptr, prog);
       }
     };
     std::vector<std::thread> ths;
@@ -1215,12 +1279,13 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
       ths.emplace_back(worker);
     for (auto &th : ths)
       th.join();
+    print_progress("Phase 1 扫描", total, total, t_scan);
   }
 
   // ---- Phase 2: 三个截面分数 → 总分 (全格, 纯内存) ----
   //   col 0 = 梳子均值 → u1;  col 6 = 夏普均值 → u2;
   //   敏感性建在 u2 上 (关心的是"收益对权重扰动有多敏感");
-  //   u3 = pctrank(−敏感性);  总分 = u1·u2·u3.
+  //   u3 = pctrank(−敏感性);  总分 = u1·u2²·u3 (夏普项平方, 放大区分度).
   {
     misc::Timer t2("[mine] 截面评分 + 邻域敏感性");
     const std::size_t P = static_cast<std::size_t>(n_p);
@@ -1238,6 +1303,9 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
     //   不除掉它, 纯噪声下两端点 (含榜首) 会仅因身处边界而被多罚.
     {
       std::atomic<std::int64_t> next{0};
+      std::atomic<std::int64_t> done{0};
+      std::atomic<std::int64_t> last_ns{0};
+      auto t0 = std::chrono::high_resolution_clock::now();
       auto worker = [&]() {
         for (;;) {
           std::int64_t lo = next.fetch_add(8192, std::memory_order_relaxed);
@@ -1259,6 +1327,19 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
             u3[static_cast<std::size_t>(r)] = static_cast<float>(
                 sum / static_cast<double>(n_nb) / null);
           }
+          std::int64_t prev = done.fetch_add(hi - lo, std::memory_order_relaxed);
+          std::int64_t cur = prev + (hi - lo);
+          if (cur < n_p) {
+            auto now = std::chrono::high_resolution_clock::now();
+            std::int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  now - t0)
+                                  .count();
+            std::int64_t last = last_ns.load(std::memory_order_relaxed);
+            if (ns - last >= PROGRESS_INTERVAL_NS &&
+                last_ns.compare_exchange_strong(last, ns,
+                                                std::memory_order_relaxed))
+              print_progress("Phase 2 敏感性", cur, n_p, t0);
+          }
         }
       };
       std::vector<std::thread> ths;
@@ -1267,6 +1348,7 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
         ths.emplace_back(worker);
       for (auto &th : ths)
         th.join();
+      print_progress("Phase 2 敏感性", n_p, n_p, t0);
     }
     for (std::size_t i = 0; i < P; ++i)
       ptm[i * C + 12] = u3[i]; // 敏感性 (原始值, 有刻度)
@@ -1278,7 +1360,7 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
       ptm[i * C + 10] = u1[i];
       ptm[i * C + 11] = u2[i];
       ptm[i * C + 13] = u3[i];
-      ptm[i * C + 14] = u1[i] * u2[i] * u3[i];
+      ptm[i * C + 14] = u1[i] * u2[i] * u2[i] * u3[i];
     }
   }
 
@@ -1334,6 +1416,9 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
     constexpr int CH = 512;
     std::vector<std::int32_t> chunk(static_cast<std::size_t>(CH) * hsz);
     std::vector<std::int32_t> accepted; // [styles.size()][hsz]
+    auto t0 = std::chrono::high_resolution_clock::now();
+    auto last_t = t0;
+    std::int64_t processed = 0;
     for (std::int64_t base = 0; base < n_cand; base += CH) {
       const int nc = static_cast<int>(std::min<std::int64_t>(CH, n_cand - base));
       std::atomic<int> next{0};
@@ -1364,7 +1449,7 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
         bool dup = false;
         for (std::size_t s = 0; s < styles.size(); ++s) {
           if (holdings_overlap(h, accepted.data() + s * hsz, n_d, hn) >=
-              DEDUP_OVERLAP) {
+              MINE_DEDUP_OVERLAP) {
             dup = true; // 前面那个分更高, 留它
             break;
           }
@@ -1374,10 +1459,19 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
         styles.push_back(cand[static_cast<std::size_t>(base + b)]);
         accepted.insert(accepted.end(), h, h + hsz);
       }
+      processed += nc;
+      auto now = std::chrono::high_resolution_clock::now();
+      if (processed < n_cand &&
+          std::chrono::duration_cast<std::chrono::nanoseconds>(now - last_t)
+                  .count() >= PROGRESS_INTERVAL_NS) {
+        print_progress("Phase 3 去重", processed, n_cand, t0);
+        last_t = now;
+      }
     }
+    print_progress("Phase 3 去重", n_cand, n_cand, t0);
     std::printf("[mine] 去重: 总分前 %lld 个候选 ⇒ %zu 个风格 "
                 "(平均逐日重合 ≥ %.2f 视为同一风格)\n",
-                static_cast<long long>(n_cand), styles.size(), DEDUP_OVERLAP);
+                static_cast<long long>(n_cand), styles.size(), MINE_DEDUP_OVERLAP);
   }
 
   // ---- Phase 4: 最终名单真回测 + per-window 明细 ----
@@ -1390,6 +1484,9 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
   {
     misc::Timer t4("[mine] 最终名单真回测");
     std::atomic<std::int64_t> next{0};
+    std::atomic<std::int64_t> done{0};
+    std::atomic<std::int64_t> last_ns{0};
+    auto t0 = std::chrono::high_resolution_clock::now();
     auto worker = [&]() {
       std::vector<Engine> engs = make_engines(mk, spec);
       Scratch sc = make_scratch(pr, k_need);
@@ -1424,6 +1521,19 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
                    "Phase 4 重算与 Phase 1 不一致 — 非确定性?");
           }
         }
+        std::int64_t prev = done.fetch_add(np, std::memory_order_relaxed);
+        std::int64_t cur = prev + np;
+        if (cur < n_st) {
+          auto now = std::chrono::high_resolution_clock::now();
+          std::int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                now - t0)
+                                .count();
+          std::int64_t last = last_ns.load(std::memory_order_relaxed);
+          if (ns - last >= PROGRESS_INTERVAL_NS &&
+              last_ns.compare_exchange_strong(last, ns,
+                                              std::memory_order_relaxed))
+            print_progress("Phase 4 回测", cur, n_st, t0);
+        }
       }
     };
     std::vector<std::thread> ths;
@@ -1432,6 +1542,7 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
       ths.emplace_back(worker);
     for (auto &th : ths)
       th.join();
+    print_progress("Phase 4 回测", n_st, n_st, t0);
   }
 
   // ---- 落盘 (py/app/mine.py 直读) ----
@@ -1480,6 +1591,62 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
                        std::span<const float>(windet.data(), windet.size()),
                        std::span<const std::size_t>(shape, 3));
   }
+  // styles.json — 选中风格的可读清单 (权重 + 全格指标 + 回测指标), 供人直接看.
+  //   权重 w = k / M (与 cpp 挖掘端 static_cast<float>(k)/M 逐位对应).
+  {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    report::add_str(doc, root, "strategy", spec.name);
+    yyjson_mut_obj_add_int(doc, root, "lattice_m", MINE_LATTICE_M);
+    yyjson_mut_obj_add_int(doc, root, "n_styles", n_st);
+    std::vector<std::string> fnames, fcn;
+    fnames.reserve(static_cast<std::size_t>(MINE_N_FACTORS));
+    fcn.reserve(static_cast<std::size_t>(MINE_N_FACTORS));
+    for (int f = 0; f < MINE_N_FACTORS; ++f) {
+      fnames.emplace_back(MINE_FACTORS[f]->name);
+      fcn.emplace_back(MINE_FACTORS[f]->cn_name);
+    }
+    report::add_str_arr(doc, root, "factor_names", fnames);
+    report::add_str_arr(doc, root, "factor_cn_names", fcn);
+    report::add_sv_arr(doc, root, "point_metric_names",
+                       std::span<const std::string_view>(MINE_POINT_METRIC_NAMES,
+                                                         MINE_N_POINT_METRICS));
+    report::add_sv_arr(doc, root, "bt_metric_names",
+                       std::span<const std::string_view>(MINE_BT_METRIC_NAMES,
+                                                         MINE_N_BT_METRICS));
+
+    yyjson_mut_val *arr = report::add_arr(doc, root, "styles");
+    const std::size_t C = static_cast<std::size_t>(MINE_N_POINT_METRICS);
+    const double inv_m = 1.0 / static_cast<double>(MINE_LATTICE_M);
+    for (std::int64_t s = 0; s < n_st; ++s) {
+      yyjson_mut_val *o = yyjson_mut_arr_add_obj(doc, arr);
+      yyjson_mut_obj_add_int(doc, o, "rank", static_cast<std::int64_t>(s + 1));
+      yyjson_mut_obj_add_int(doc, o, "k_index", styles[static_cast<std::size_t>(s)]);
+      const std::int8_t *k =
+          kgrid.data() + styles[static_cast<std::size_t>(s)] * MINE_N_FACTORS;
+      yyjson_mut_val *wobj = report::add_obj(doc, o, "weights");
+      yyjson_mut_val *kobj = report::add_obj(doc, o, "k");
+      for (int f = 0; f < MINE_N_FACTORS; ++f) {
+        if (k[f] == 0)
+          continue;
+        yyjson_mut_obj_add_real(doc, wobj, MINE_FACTORS[f]->name,
+                                static_cast<double>(k[f]) * inv_m);
+        yyjson_mut_obj_add_int(doc, kobj, MINE_FACTORS[f]->name, k[f]);
+      }
+      yyjson_mut_val *pt = report::add_obj(doc, o, "point_metrics");
+      const float *pm = ptm.data() +
+                        styles[static_cast<std::size_t>(s)] * C;
+      for (int c = 0; c < MINE_N_POINT_METRICS; ++c)
+        report::add_f4(doc, pt, MINE_POINT_METRIC_NAMES[c].data(), pm[c]);
+      yyjson_mut_val *btm = report::add_obj(doc, o, "bt_metrics");
+      for (int c = 0; c < MINE_N_BT_METRICS; ++c)
+        report::add_f4(doc, btm, MINE_BT_METRIC_NAMES[c].data(),
+                       bt[static_cast<std::size_t>(s)].v[c]);
+    }
+    misc::atomic_write_json(out / "styles.json", doc);
+    yyjson_mut_doc_free(doc);
+  }
   {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -1490,7 +1657,7 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
     yyjson_mut_obj_add_int(doc, root, "n_points", n_p);
     yyjson_mut_obj_add_int(doc, root, "n_styles", n_st);
     yyjson_mut_obj_add_int(doc, root, "dedup_cand", MINE_DEDUP_CAND);
-    yyjson_mut_obj_add_real(doc, root, "dedup_overlap", DEDUP_OVERLAP);
+    yyjson_mut_obj_add_real(doc, root, "dedup_overlap", MINE_DEDUP_OVERLAP);
 
     std::vector<std::string> fnames, fcn;
     fnames.reserve(static_cast<std::size_t>(MINE_N_FACTORS));
@@ -1549,6 +1716,48 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
 
     misc::atomic_write_json(out / "meta.json", doc);
     yyjson_mut_doc_free(doc);
+  }
+
+  // ---- stdout 打印 top 风格 (权重 + 关键指标), 可直接粘回 strategy/def/<name>.hpp ----
+  {
+    constexpr int TOP_PRINT = 10;
+    const int n_show = static_cast<int>(
+        std::min<std::int64_t>(TOP_PRINT, n_st));
+    const std::size_t C = static_cast<std::size_t>(MINE_N_POINT_METRICS);
+    const double inv_m = 1.0 / static_cast<double>(MINE_LATTICE_M);
+    std::printf("\n[mine] top %d 风格 (按总分降序):\n", n_show);
+    // 表头: 中文2字=显示4列, 手动补空格对齐数据列宽 (3,6,5,5,5,8,6,8,6).
+    std::printf("  #    总分    分层   夏普   稳健     年化      夏普    回撤      换手  \n");
+    for (int s = 0; s < n_show; ++s) {
+      const float *pm = ptm.data() +
+                        styles[static_cast<std::size_t>(s)] * C;
+      const Metrics &m = bt[static_cast<std::size_t>(s)];
+      std::printf("  %3d  %6.3f  %5.2f  %5.2f  %5.2f  %7.2f%%  %6.2f  %7.2f%%  %6.1f\n",
+                  s + 1, pm[14], pm[10], pm[11], pm[13],
+                  static_cast<double>(m.v[0]) * 100.0,
+                  static_cast<double>(m.v[1]),
+                  static_cast<double>(m.v[3]) * 100.0,
+                  static_cast<double>(m.v[5]));
+    }
+    // top3 可粘贴权重
+    const int n_w = static_cast<int>(std::min<std::int64_t>(3, n_st));
+    for (int s = 0; s < n_w; ++s) {
+      const std::int8_t *k =
+          kgrid.data() + styles[static_cast<std::size_t>(s)] * MINE_N_FACTORS;
+      const float *pm = ptm.data() +
+                        styles[static_cast<std::size_t>(s)] * C;
+      std::printf("\n[mine] #%d  总分 %.3f  年化 %.2f%%  夏普 %.2f  — weights:\n",
+                  s + 1, pm[14],
+                  static_cast<double>(bt[static_cast<std::size_t>(s)].v[0]) * 100.0,
+                  static_cast<double>(bt[static_cast<std::size_t>(s)].v[1]));
+      for (int f = 0; f < MINE_N_FACTORS; ++f) {
+        if (k[f] == 0)
+          continue;
+        std::printf("    {&feature::def::%s_spec, %d.0f / %d},\n",
+                    MINE_FACTORS[f]->name, static_cast<int>(k[f]), MINE_LATTICE_M);
+      }
+    }
+    std::printf("\n[mine] 完整清单见 output/mine/styles.json\n");
   }
 
   std::chrono::duration<double> dur =
