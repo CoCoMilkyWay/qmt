@@ -1,16 +1,24 @@
 """
 因子权重挖掘 — 后处理
 
-计算全在 cpp (src/mine/mine.cpp): 继承 mine::MINE_STRATEGY 那个策略的
-pool / filters / hold_n / exit_ratio / 回测窗口, 只搜 weights; 每个权重方向都
-走 backtest/engine.hpp 的**同一个回测内核**, 所以这里读到的指标就是把该权重填回
-strategy/def/<name>.hpp 之后 cpp 会跑出来的指标 (cpp 侧启动时已用目标策略自己的
-weights 与 backtest::run 的 strategy_nav 逐点对账, 不过关直接 assert fail).
+计算全在 cpp (src/mine/mine.cpp): 继承 mine::MINE_STRATEGY 那个策略的全部配置,
+只搜 weights. 四段式:
+    Phase 1  全 lattice 一遍日循环: 滑窗分层 (梳子分 S = b − 2·se) + 顶档滑窗夏普.
+             252 日窗 / 21 日步; 档数 = universe_size / hold_n ⇒ 顶档就是策略
+             实际持有的那 hold_n 只.
+    Phase 2  三个截面分数: u1 = pctrank(梳子均值), u2 = pctrank(夏普均值),
+             u3 = pctrank(−敏感性); 敏感性 = 邻域 |Δu2| 均值 / 纯噪声期望
+             (1 = 与噪声无异, 0 = 平原, >1 = 真尖峰). 总分 = u1·u2·u3.
+    Phase 3  持仓去重: 总分降序流式贪心, 平均逐日持仓重合 ≥ 0.5 视为同一风格.
+    Phase 4  最终名单真回测 (backtest/engine.hpp 同一内核; cpp 自检与
+             strategy_nav 逐点对账, 不过关直接 assert fail ⇒ 挖出的权重填回
+             strategy/def/<name>.hpp 必然复现).
 
-本脚本只做三件事 (零重算):
-    1. 读 output/mine/{k_grid.npy, metrics.npy, meta.json}
-    2. 按 fitness() 排序取 top-N
-    3. 算邻域平原度 (抗过拟合) + 打印可直接粘回 cpp 的 weights
+本脚本只做三件事 (零重算 — 邻域敏感性/去重都已在 cpp 精确算完):
+    1. 读 output/mine/{k_grid, point_metrics, styles, bt_metrics, windows}.npy
+       + meta.json
+    2. 按 rank_key() 排序风格名单
+    3. 打印表格 + 可直接粘回 cpp 的 weights
 
 前置: cpp 侧 mine::MINE_ENABLE = true 跑一次 (见 cpp/include/mine/spec.hpp)
 
@@ -26,30 +34,33 @@ ROOT = Path(__file__).resolve().parents[2]
 MINE_DIR = ROOT / "output" / "mine"
 
 TOP_N = 40  # 打印条数
-PLATEAU_HOPS = 1  # 邻域半径 (跳数); 1 跳 = L1 距离 2 = "把一个单位从某因子挪到另一因子"
 
 
 # ============================================================================
-# fitness — 唯一需要动的地方.
+# rank_key — 唯一需要动的地方. 对**风格名单**排序 (真回测指标只有它们才有).
 #
-# m 是 dict[str, np.ndarray], key = meta.json::metric_names:
+# pt 是该风格的全格指标列 (meta::point_metric_names):
+#   梳子均值/IR/p10/胜率 · 斜率均值 · R2均值 · 夏普均值/IR/p10/胜率
+#   · 分层分 · 夏普分 · 敏感性 · 稳健分 · 总分
+# bt 是回测列 (meta::bt_metric_names):
 #   年化 / 夏普 / 波动率 / 最大回撤 (≤0) / NAV倍数 / 年换手率 / 创新高最长天数
-# 返回 [P] float 数组, 越大越好; -inf = 直接淘汰.
+# 返回 [S] float 数组, 越大越好; -inf = 直接淘汰.
 #
-# 默认口径故意保守 (夏普 + 硬约束), 真正的取舍留给使用者:
-#   例如加"年化与夏普的几何平均"、按换手罚分、要求最大回撤优于基线、
-#   或先用硬约束筛出一个可行域再按邻域平原度排序.
+# 默认就用 cpp 的总分 (u1·u2·u3) + 回测硬约束. 注意秩统计量对**绝对幅度**免疫,
+#   "微弱但极稳"的边缘也能拿高分 — 设定尺度的只有交易成本, 而成本只在真回测里
+#   出现. 若榜首全是微弱边缘, 用 pt["斜率均值"] (单位 = 年化价差) 加个下限.
+#   per-window 明细在 d["win"], 自定义加权 / 风格聚类都在这里做.
 # ============================================================================
 MAX_TURNOVER = 60.0  # 年换手率上限 (倍); 超过 = 交易成本假设不可信
 MAX_DRAWDOWN = -0.50  # 最大回撤下限; 更深 = 拿不住
 
 
-def fitness(m: dict[str, np.ndarray]) -> np.ndarray:
-    y = np.asarray(m["夏普"], dtype=np.float64).copy()
+def rank_key(pt: dict[str, np.ndarray], bt: dict[str, np.ndarray]) -> np.ndarray:
+    y = np.asarray(pt["总分"], dtype=np.float64).copy()
     bad = (
         ~np.isfinite(y)
-        | (m["年换手率"] > MAX_TURNOVER)
-        | (m["最大回撤"] < MAX_DRAWDOWN)
+        | (bt["年换手率"] > MAX_TURNOVER)
+        | (bt["最大回撤"] < MAX_DRAWDOWN)
     )
     y[bad] = -np.inf
     return y
@@ -61,81 +72,30 @@ def fitness(m: dict[str, np.ndarray]) -> np.ndarray:
 def load() -> dict:
     meta = json.loads((MINE_DIR / "meta.json").read_text())
     k_grid = np.load(MINE_DIR / "k_grid.npy")  # [P, n] int8
-    metrics = np.load(MINE_DIR / "metrics.npy")  # [P, m] float32
-    names = meta["metric_names"]
-    assert k_grid.shape[0] == metrics.shape[0] == meta["n_points"]
+    ptm = np.load(MINE_DIR / "point_metrics.npy")  # [P, c] f4 (全 lattice)
+    styles = np.load(MINE_DIR / "styles.npy")  # [S] int32, 总分降序
+    btm = np.load(MINE_DIR / "bt_metrics.npy")  # [S, m] f4
+    win = np.load(MINE_DIR / "windows.npy")  # [S, W, 4] f4
+    assert k_grid.shape[0] == ptm.shape[0] == meta["n_points"]
     assert k_grid.shape[1] == len(meta["factor_names"])
-    assert metrics.shape[1] == len(names)
+    assert ptm.shape[1] == len(meta["point_metric_names"])
+    assert styles.shape[0] == btm.shape[0] == win.shape[0] == meta["n_styles"]
+    assert btm.shape[1] == len(meta["bt_metric_names"])
+    assert win.shape[1] == meta["layer"]["n_windows"]
+    assert win.shape[2] == len(meta["window_metric_names"])
+    idx = styles.astype(np.int64)
     return {
         "meta": meta,
         "k": k_grid,
-        "m": {nm: metrics[:, i] for i, nm in enumerate(names)},
+        "styles": idx,
+        # 风格名单视图 (全格列按 styles 取行)
+        "pt": {nm: ptm[idx, i] for i, nm in enumerate(meta["point_metric_names"])},
+        "bt": {nm: btm[:, i] for i, nm in enumerate(meta["bt_metric_names"])},
+        "win": win,  # per-window (梳子分, 斜率, R2, 夏普) — 自定义加权/聚类用
         "factors": meta["factor_names"],
         "factor_cn": meta["factor_cn_names"],
         "M": meta["lattice_m"],
     }
-
-
-# ============================================================================
-# 邻域平原度
-#   lattice 上 k 的 1 跳邻居 = 把一个单位从坐标 i 挪到坐标 j (Σ|k| 不变):
-#     |k_i| 减 1 (朝 0 走), |k_j| 加 1 (背离 0 走; k_j = 0 时正负各一个)
-#   k → base-(2M+1) 的 int64 key, 排序后 searchsorted 定位 ⇒ 纯查表, 不重算回测.
-#   平原度 = 邻域内 fitness 的均值 / 中心 fitness (越接近 1 越平坦, 越小越像山尖).
-# ============================================================================
-def _keys(k: np.ndarray, m: int) -> np.ndarray:
-    base = 2 * m + 1
-    pw = (base ** np.arange(k.shape[1], dtype=np.int64)).astype(np.int64)
-    return ((k.astype(np.int64) + m) * pw).sum(axis=1)
-
-
-def _neighbors(k_center: np.ndarray, m: int) -> np.ndarray:
-    """[n_nbr, n] — 中心点的全部 1 跳邻居 (Σ|k| = M 不变)."""
-    n = k_center.size
-    out = []
-    for i in range(n):
-        if k_center[i] == 0:
-            continue
-        for j in range(n):
-            if j == i:
-                continue
-            steps = [1, -1] if k_center[j] == 0 else [np.sign(k_center[j])]
-            for s in steps:
-                nb = k_center.astype(np.int64).copy()
-                nb[i] -= np.sign(nb[i])
-                nb[j] += s
-                if np.abs(nb).max() > m:
-                    continue
-                out.append(nb)
-    return np.array(out, dtype=np.int64) if out else np.zeros((0, n), np.int64)
-
-
-def plateau(k: np.ndarray, y: np.ndarray, idx: np.ndarray, m: int):
-    keys = _keys(k, m)
-    order = np.argsort(keys)
-    ks = keys[order]
-    ratio = np.zeros(idx.size)
-    n_found = np.zeros(idx.size, dtype=np.int64)
-    for t, p in enumerate(idx):
-        nb = _neighbors(k[p], m)
-        for hop in range(PLATEAU_HOPS - 1):
-            grown = [nb] + [_neighbors(x, m) for x in nb]
-            nb = np.unique(np.vstack(grown), axis=0)
-        if nb.shape[0] == 0:
-            continue
-        nk = _keys(nb.astype(np.int8), m)
-        pos = np.searchsorted(ks, nk)
-        pos = np.clip(pos, 0, ks.size - 1)
-        hit = ks[pos] == nk
-        found = order[pos[hit]]
-        found = found[found != p]
-        n_found[t] = found.size
-        if found.size:
-            vals = y[found]
-            vals = vals[np.isfinite(vals)]
-            if vals.size and y[p] != 0:
-                ratio[t] = vals.mean() / y[p]
-    return ratio, n_found
 
 
 # ============================================================================
@@ -152,48 +112,65 @@ def cpp_weights(k_row: np.ndarray, factors: list[str], m: int) -> str:
     for i, kk in enumerate(k_row):
         if kk == 0:
             continue
-        lines.append(
-            f"    {{&feature::def::{factors[i]}_spec, {int(kk)}.0f / {m}}},")
+        lines.append(f"    {{&feature::def::{factors[i]}_spec, {int(kk)}.0f / {m}}},")
     return "\n".join(lines)
 
 
 def main():
     d = load()
-    meta, k, mm = d["meta"], d["k"], d["m"]
+    meta, k, styles = d["meta"], d["k"], d["styles"]
     m_lat = d["M"]
-    y = fitness(mm)
+    pt, bt = d["pt"], d["bt"]
+    y = rank_key(pt, bt)
 
     n_ok = int(np.isfinite(y).sum())
+    lc = meta["layer"]
     print(
         f"\n策略 {meta['strategy']} | 窗口 {meta['window']['start']}"
         f"..{meta['window']['end']} ({meta['window']['n_days']} 日)"
     )
     print(
         f"lattice M={m_lat}, 因子 {len(d['factors'])} 个, "
-        f"{meta['n_points']} 个权重方向, 通过硬约束 {n_ok} 个 "
-        f"({100.0 * n_ok / meta['n_points']:.1f}%)"
+        f"{meta['n_points']} 个权重方向; 分层 {lc['n_bins']} 档 "
+        f"× {lc['n_windows']} 窗 (窗 {lc['window_days']} 日 / 步 {lc['step_days']} 日)"
+    )
+    print(
+        f"去重: 总分前 {meta['dedup_cand']} ⇒ {meta['n_styles']} 个风格 "
+        f"(逐日重合 ≥ {meta['dedup_overlap']:.2f} 算同风格), 通过硬约束 {n_ok} 个"
     )
     print(f"cpp 自检 NAV 最大相对偏差 {meta['selfcheck']['nav_max_rel_diff']:.2e}")
-    assert n_ok > 0, "全部权重被硬约束淘汰 — 放宽 MAX_TURNOVER / MAX_DRAWDOWN"
+    assert n_ok > 0, "全部风格被硬约束淘汰 — 放宽 MAX_TURNOVER / MAX_DRAWDOWN"
+
+    bl = meta["baseline_metrics"]
+    print(f"\n基线 (策略当前 weights): {meta['baseline_weights']}")
+    print(
+        f"基线: 梳子均值 {bl['梳子均值']:.4f} ({bl['梳子均值分位']:.1%} 分位) | "
+        f"夏普均值 {bl['夏普均值']:.2f} ({bl['夏普均值分位']:.1%} 分位)"
+    )
 
     top = np.argsort(-y)[: min(TOP_N, n_ok)]
-    ratio, n_nbr = plateau(k, y, top, m_lat)
-
-    print(f"\n基线 (策略当前 weights): {meta['baseline_weights']}")
-    hdr = f"{'#':>3} {'fitness':>8} {'年化':>8} {'夏普':>7} {'回撤':>8} {'换手':>7} {'NAV':>7} {'平原':>6} {'邻居':>5}"
+    hdr = (
+        f"{'#':>3} {'总分':>6} {'分层':>5} {'夏普':>5} {'稳健':>5} {'敏感':>5} "
+        f"{'梳均值':>7} {'夏普均':>6} {'年化':>8} {'夏普':>6} {'回撤':>8} {'换手':>6}"
+    )
     print("\n" + hdr)
     print("-" * len(hdr))
     for t, p in enumerate(top):
         print(
-            f"{t + 1:>3} {y[p]:>8.3f} {mm['年化'][p]:>8.2%} {mm['夏普'][p]:>7.2f} "
-            f"{mm['最大回撤'][p]:>8.2%} {mm['年换手率'][p]:>7.1f} "
-            f"{mm['NAV倍数'][p]:>7.1f} {ratio[t]:>6.2f} {n_nbr[t]:>5}"
+            f"{t + 1:>3} {pt['总分'][p]:>6.3f} {pt['分层分'][p]:>5.2f} "
+            f"{pt['夏普分'][p]:>5.2f} {pt['稳健分'][p]:>5.2f} {pt['敏感性'][p]:>5.2f} "
+            f"{pt['梳子均值'][p]:>7.3f} {pt['夏普均值'][p]:>6.2f} "
+            f"{bt['年化'][p]:>8.2%} {bt['夏普'][p]:>6.2f} {bt['最大回撤'][p]:>8.2%} "
+            f"{bt['年换手率'][p]:>6.1f}"
         )
 
     print("\n" + "=" * 60)
     for t, p in enumerate(top[:3]):
-        print(f"# top{t + 1}  fitness={y[p]:.3f} 平原={ratio[t]:.2f}")
-        print(cpp_weights(k[p], d["factors"], m_lat))
+        print(
+            f"# top{t + 1}  总分={pt['总分'][p]:.3f} "
+            f"敏感={pt['敏感性'][p]:.2f} 年化={bt['年化'][p]:.2%}"
+        )
+        print(cpp_weights(k[styles[p]], d["factors"], m_lat))
         print()
 
 

@@ -20,10 +20,10 @@
 #include "feature/registry.hpp"
 #include "feature/report.hpp"
 #include "feature/tensor.hpp"
-#include "misc/date.hpp"
-#include "misc/fs.hpp"
 #include "mine/mine.hpp"
 #include "mine/spec.hpp"
+#include "misc/date.hpp"
+#include "misc/fs.hpp"
 #include "package/yyjson/yyjson.h"
 #include "report/aggregate.hpp"
 #include "report/json.hpp"
@@ -306,9 +306,10 @@ int main() {
   }
 
   // ---- Phase 4.5: 因子权重 lattice 挖掘 → output/mine/ (gate mine::MINE_ENABLE)
-  //   继承 mine::MINE_STRATEGY 那个策略的全部配置 (只搜 weights), 回测走
-  //   backtest/engine.hpp 同一份内核; 启动先拿该策略自己的 weights 与刚跑完的
-  //   strategy_nav 对账. 后处理见 py/app/mine.py.
+  //   继承 mine::MINE_STRATEGY 那个策略的全部配置 (只搜 weights):
+  //   全格滑窗分层 + 顶档滑窗夏普 → 三个截面分数相乘 → 持仓去重 → 最终名单真
+  //   回测 (走 backtest/engine.hpp 同一份内核; 启动先拿该策略自己的 weights 与
+  //   刚跑完的 strategy_nav 对账). 后处理见 py/app/mine.py.
   if (mine::MINE_ENABLE) {
     double mine_seconds = mine::run(axes, T, results);
     std::cout << C_DIM << "[mine] 总耗时 " << mine_seconds << "s" << C_RESET

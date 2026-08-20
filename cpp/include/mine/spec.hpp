@@ -68,4 +68,11 @@ inline constexpr int MINE_N_FACTORS =
 //   单点开销 ≈ n_d_bt × (池内点积 + top-K 选择 + 内核走一天).
 inline constexpr int MINE_LATTICE_M = 8;
 
+// 进"持仓去重"的候选数 (按总分降序). 这是**算力预算**而非统计阈值: 去重是
+//   流式贪心, 单候选要现算逐日持仓 (≈5ms), 4096 个约 20s; 最终留下几个风格由
+//   重合度自然决定, 不设上限.
+//   其余口径 (252 日窗 / 21 日步 / S = b − 2·se / 档数 = universe_size / hold_n
+//   / 敏感性的噪声归一 / 去重线 0.5) 全部写死在 mine.cpp — 无旋钮, 跨次可比.
+inline constexpr int MINE_DEDUP_CAND = 4096;
+
 } // namespace mine
