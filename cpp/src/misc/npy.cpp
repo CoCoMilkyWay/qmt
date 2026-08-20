@@ -92,4 +92,12 @@ void write_npy_i4(const fs::path &path, std::span<const std::int32_t> data,
   write_npy_raw(path, "<i4", data.data(), sizeof(std::int32_t), shape);
 }
 
+void write_npy_i1(const fs::path &path, std::span<const std::int8_t> data,
+                  std::span<const std::size_t> shape) {
+  std::size_t n = 1;
+  for (std::size_t s : shape) n *= s;
+  assert(n == data.size());
+  write_npy_raw(path, "|i1", data.data(), sizeof(std::int8_t), shape);
+}
+
 } // namespace misc

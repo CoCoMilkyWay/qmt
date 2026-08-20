@@ -134,7 +134,9 @@ set(SOURCES
     ../../src/feature/describe.cpp
     ../../src/feature/report.cpp
     ../../src/strategy/columns.cpp
+    ../../src/backtest/engine.cpp
     ../../src/backtest/backtest.cpp
+    ../../src/mine/mine.cpp
     ../../src/analysis/analysis.cpp
     ../../src/report/metrics.cpp
     ../../src/report/json.cpp
@@ -177,7 +179,10 @@ set(HEADERS
     ../../include/strategy/strategy.hpp
     ../../include/strategy/registry.hpp
     ../../include/strategy/columns.hpp
+    ../../include/backtest/engine.hpp
     ../../include/backtest/backtest.hpp
+    ../../include/mine/spec.hpp
+    ../../include/mine/mine.hpp
     ../../include/analysis/analysis.hpp
     ../../include/report/metrics.hpp
     ../../include/report/json.hpp

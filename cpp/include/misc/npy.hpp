@@ -23,4 +23,9 @@ void write_npy_i4(const std::filesystem::path &path,
                   std::span<const std::int32_t> data,
                   std::span<const std::size_t> shape);
 
+// int8 (小值域大数组: mine 的 lattice 坐标 k ∈ [-M, M]).
+void write_npy_i1(const std::filesystem::path &path,
+                  std::span<const std::int8_t> data,
+                  std::span<const std::size_t> shape);
+
 } // namespace misc

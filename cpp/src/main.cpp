@@ -22,6 +22,8 @@
 #include "feature/tensor.hpp"
 #include "misc/date.hpp"
 #include "misc/fs.hpp"
+#include "mine/mine.hpp"
+#include "mine/spec.hpp"
 #include "package/yyjson/yyjson.h"
 #include "report/aggregate.hpp"
 #include "report/json.hpp"
@@ -301,6 +303,16 @@ int main() {
     std::cout << "\n[strategy] " << spec.name << std::endl;
     results.push_back(backtest::run(axes, meta, T, name_timeline, spec, s));
     results.back().analysis_seconds = analysis::run(axes, T, spec, s);
+  }
+
+  // ---- Phase 4.5: 因子权重 lattice 挖掘 → output/mine/ (gate mine::MINE_ENABLE)
+  //   继承 mine::MINE_STRATEGY 那个策略的全部配置 (只搜 weights), 回测走
+  //   backtest/engine.hpp 同一份内核; 启动先拿该策略自己的 weights 与刚跑完的
+  //   strategy_nav 对账. 后处理见 py/app/mine.py.
+  if (mine::MINE_ENABLE) {
+    double mine_seconds = mine::run(axes, T, results);
+    std::cout << C_DIM << "[mine] 总耗时 " << mine_seconds << "s" << C_RESET
+              << std::endl;
   }
 
   // ---- Phase 5: 跨策略聚合 → output/aggregate/{*.npy, report.json} ----

@@ -1,15 +1,11 @@
 #include "backtest/backtest.hpp"
 
+#include "backtest/engine.hpp"
 #include "config.hpp"
 #include "feature/axis.hpp"
-#include "feature/def/basic/close_raw.hpp"
 #include "feature/def/basic/daily_return.hpp"
 #include "feature/def/basic/delist_age.hpp"
-#include "feature/def/basic/limit_dn.hpp"
-#include "feature/def/basic/limit_up.hpp"
-#include "feature/def/basic/susp.hpp"
 #include "feature/feature.hpp"
-#include "feature/graph.hpp"
 #include "feature/tensor.hpp"
 #include "misc/date.hpp"
 #include "misc/fs.hpp"
@@ -42,21 +38,11 @@ namespace fs = std::filesystem;
 
 namespace {
 
-using feature::FeatureSpec;
 using feature::is_finite;
 
 // ---- helpers ---------------------------------------------------------------
 
-// 读"契约 bool" feature: 必 finite + ∈ {0, 1}. 任一违背 → assert fail (定位污染源).
-//   适用: susp / limit_up / limit_dn 等 must_be_finite=true 的节点.
-//   raw / factor / daily_return 等可 NaN 列禁用此 helper.
-inline bool read_bool(const feature::Tensor &T, const FeatureSpec &f, int a, int d) {
-  float v = T.at(f, a, d);
-  assert(is_finite(v) && "backtest::read_bool: NaN — feature should be 0/1");
-  return v > 0.5f;
-}
-
-// 策略块契约 bool (pool): 同上, F 换扁平 slot.
+// 策略块契约 bool (pool): 必 finite + ∈ {0, 1}, F 换扁平 slot.
 inline bool strat_read_bool(const feature::Tensor &T, int slot, int a, int d) {
   float v = T.strat_at(slot, a, d);
   assert(is_finite(v) && "backtest::strat_read_bool: NaN — column should be 0/1");
@@ -223,11 +209,11 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
   int n_d_bt = bt_d_hi - bt_d_lo;
   int n_a = axes.n_a();
 
-  // ---- 状态 ----------------------------------------------------------------
-  std::unordered_map<int, double> holdings; // a → shares (float 仓位, 不取整)
-  double cash = ::config::BACKTEST_CAPITAL_BASE;
-  std::vector<float> last_close(static_cast<std::size_t>(n_a),
-                                std::nanf("")); // mark-to-market 兜底
+  // ---- 内核 ----------------------------------------------------------------
+  //   决策 + 现金/仓位/成本记账全在 Engine 里 (backtest/engine.hpp), 与 mine
+  //   共用同一份实现; 本函数只负责 "候选序怎么来" 与 "记录什么".
+  MarketWindow mk = load_market(axes, T, bt_d_lo, n_d_bt);
+  Engine eng(mk, spec.hold_n, spec.exit_ratio);
 
   // 每日输出
   std::vector<std::int32_t> dates_out(n_d_bt);
@@ -298,6 +284,7 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
   std::vector<std::string> fill_names;
   // 当日买入 fill 的下标 (权重要等 pv_end 算出来才能回填)
   std::vector<std::size_t> buy_fill_idx;
+  std::unordered_set<int> bought_today; // 当日正式买入 (watch_bought 标记用)
 
   // 关 trade 公用辅助 (强平 / 正常卖出 共用)
   auto close_trade = [&](int a, int d, const OpenRec &rec, float close_px) {
@@ -337,77 +324,56 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
   // pool benchmark NAV
   double pool_nav_d = ::config::BACKTEST_CAPITAL_BASE;
 
-  int hold_n = spec.hold_n;
+  // Recorder — 内核的三个成交钩子, 把明细落到上面那堆容器里 (挖掘路径用
+  //   NullRecorder, 这三段整体消失). 钩子拿窗口内 i, 全局 D 在此处加回.
+  auto rec = make_recorder(
+      // 退市强平: 与正常卖出一样关 trade record, 额外打 [WARN] —
+      //   触发说明上游 filter 未能在退市前卖出 (可能一直停牌 / 缺 ST 标记).
+      [&](int a, int i, float c, double sh) {
+        int d = bt_d_lo + i;
+        auto rec_it = open_recs.find(a);
+        assert(rec_it != open_recs.end() && "delisted holding without open record");
+        float open_px = rec_it->second.open_px;
+        float da = T.at(feature::def::delist_age_spec, a, d);
+        std::printf("[WARN] backtest d=%s 持仓 %s (%s) 已退市 "
+                    "(delist_age=%.0f), 持有 %d 交易日, "
+                    "开仓 %s@%.4f → 强平 @%.4f, 盈亏 %+.2f%% (%.2f 股)\n",
+                    axes.dates[static_cast<std::size_t>(d)].c_str(),
+                    axes.codes[static_cast<std::size_t>(a)].c_str(),
+                    meta.name[static_cast<std::size_t>(a)].c_str(),
+                    da, d - rec_it->second.open_d,
+                    axes.dates[static_cast<std::size_t>(rec_it->second.open_d)].c_str(),
+                    open_px, c,
+                    (open_px > 0.0f) ? (c / open_px - 1.0f) * 100.0f : 0.0f, sh);
+        close_trade(a, d, rec_it->second, c);
+        push_fill(a, d, -1, c, trade_ret(open_px, c));
+        open_recs.erase(rec_it);
+      },
+      [&](int a, int i, float c) {
+        int d = bt_d_lo + i;
+        auto it = open_recs.find(a);
+        assert(it != open_recs.end() && "sell without open record");
+        close_trade(a, d, it->second, c);
+        push_fill(a, d, -1, c, trade_ret(it->second.open_px, c));
+        open_recs.erase(it);
+      },
+      [&](int a, int i, float c) {
+        int d = bt_d_lo + i;
+        open_recs[a] = OpenRec{d, c};
+        push_fill(a, d, +1, c, std::nanf(""));
+        bought_today.insert(a);
+      });
 
   // ---- 主循环 --------------------------------------------------------------
   for (int i = 0; i < n_d_bt; ++i) {
     int d = bt_d_lo + i;
     dates_out[i] = d;
-    double turn_amt = 0.0; // 当日买卖额 (元); 满额换 1 成分股 卖+买 = 2*pv/HOLD_N
     buy_fill_idx.clear();
-    std::unordered_set<int> bought_today; // 当日正式买入 (watch_bought 标记用)
+    bought_today.clear(); // 当日正式买入 (watch_bought 标记用)
+    const float *close = mk.close_row(i);
+    const std::uint8_t *flag = mk.flag_row(i);
 
-    // (1) 更新 last_close 缓存 (T 的 close_raw 已 ffill, finite 保留)
-    for (int a = 0; a < n_a; ++a) {
-      float c = T.at(feature::def::close_raw_spec, a, d);
-      if (is_finite(c))
-        last_close[a] = c;
-    }
-
-    // (1.5) 持仓兜底: 已退市股 (delist_age finite) 强制按 last_close 平仓.
-    //   PIT 安全: feature 层已保证 delist_age 只在 D ≥ delist_date 写值, 否则 NaN.
-    //   触发说明 上游 filter 未能在退市前卖出该持仓 (可能因停牌一直卡住 / 数据源缺 ST 标记).
-    //   不 assert, 打印 [WARN] 后继续, 与 sell 逻辑一致地关闭 trade record.
-    for (auto it = holdings.begin(); it != holdings.end();) {
-      int a = it->first;
-      float da = T.at(feature::def::delist_age_spec, a, d);
-      if (!is_finite(da)) {
-        ++it;
-        continue;
-      }
-      assert(da >= 0.0f && "delist_age finite ⇒ ≥ 0 (PIT contract)");
-      float c = last_close[static_cast<std::size_t>(a)];
-      assert(is_finite(c) && "delisted holding has no last_close");
-
-      auto rec_it = open_recs.find(a);
-      assert(rec_it != open_recs.end() &&
-             "delisted holding without open record");
-      float open_px = rec_it->second.open_px;
-      int hold_days = d - rec_it->second.open_d; // 交易日数 (axes D 索引差)
-      float pnl_pct = (open_px > 0.0f)
-                          ? (c / open_px - 1.0f) * 100.0f
-                          : 0.0f;
-      std::printf("[WARN] backtest d=%s 持仓 %s (%s) 已退市 "
-                  "(delist_age=%.0f), 持有 %d 交易日, "
-                  "开仓 %s@%.4f → 强平 @%.4f, 盈亏 %+.2f%%\n",
-                  axes.dates[static_cast<std::size_t>(d)].c_str(),
-                  axes.codes[static_cast<std::size_t>(a)].c_str(),
-                  meta.name[static_cast<std::size_t>(a)].c_str(),
-                  da, hold_days,
-                  axes.dates[static_cast<std::size_t>(rec_it->second.open_d)].c_str(),
-                  open_px, c, pnl_pct);
-      double proceeds = it->second * static_cast<double>(c) *
-                        (1.0 - ::config::BACKTEST_SELL_COST);
-      turn_amt += it->second * static_cast<double>(c);
-      cash += proceeds;
-      close_trade(a, d, rec_it->second, c);
-      push_fill(a, d, -1, c, trade_ret(open_px, c));
-      open_recs.erase(rec_it);
-
-      it = holdings.erase(it);
-    }
-
-    // (2) 组合市值 (mark-to-market)
-    double mv_holdings = 0.0;
-    for (auto &kv : holdings) {
-      float c = last_close[static_cast<std::size_t>(kv.first)];
-      assert(is_finite(c) && "holding without close — bought before list_date?");
-      mv_holdings += kv.second * static_cast<double>(c);
-    }
-    double pv = cash + mv_holdings;
-    assert(pv > 0.0 && "portfolio value <= 0");
-
-    // (3) 候选 universe: 策略 rank 列直读 (rank ≥ 1 ⇔ pool ∧ finite(score);
+    // (1) 候选 universe: 策略 rank 列直读 (rank ≥ 1 ⇔ pool ∧ finite(score);
     //   排名已在 columns.cpp 固化, 回测与实盘选股读同一列).
     //   cands[r-1] = (score, a): rank 是 1..K 连续整数, 两遍扫描按位回填.
     std::vector<std::pair<float, int>> cands;
@@ -430,175 +396,10 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
                                                  a};
     }
 
-    int n_top = std::min(hold_n, static_cast<int>(cands.size()));
-    int n_top_exit =
-        std::min(static_cast<int>(static_cast<float>(hold_n) *
-                                  spec.exit_ratio),
-                 static_cast<int>(cands.size()));
-    if (n_top_exit > static_cast<int>(cands.size()))
-      n_top_exit = static_cast<int>(cands.size());
-
-    std::unordered_set<int> top_n_set, top_exit_set;
-    top_n_set.reserve(static_cast<std::size_t>(n_top));
-    top_exit_set.reserve(static_cast<std::size_t>(n_top_exit));
-    for (int k = 0; k < n_top; ++k)
-      top_n_set.insert(cands[k].second);
-    for (int k = 0; k < n_top_exit; ++k)
-      top_exit_set.insert(cands[k].second);
-
-    // (4) 决定 to_sell / to_buy ------------------------------------------------
-    // sell: holdings 中不在 top_exit, 且不被 limit_up/limit_dn 主动排除.
-    //       limit_up = 想留 (赌 T+1); limit_dn = 卖不出 (物理) — 二者都不卖.
-    std::vector<int> intended_sell, intended_buy;
-    intended_sell.reserve(holdings.size());
-    for (auto &kv : holdings) {
-      int a = kv.first;
-      if (top_exit_set.count(a))
-        continue;
-      if (read_bool(T, feature::def::limit_up_spec, a, d) || read_bool(T, feature::def::limit_dn_spec, a, d))
-        continue;
-      intended_sell.push_back(a);
-    }
-    // 决定空槽 — 仍持有 (not in to_sell) 占的槽
-    std::unordered_set<int> sold_set(intended_sell.begin(),
-                                     intended_sell.end());
-    int kept = 0;
-    for (auto &kv : holdings) {
-      if (!sold_set.count(kv.first))
-        ++kept;
-    }
-    int slots = hold_n - kept;
-    if (slots > 0) {
-      for (const auto &p : cands) {
-        if (slots <= 0)
-          break;
-        int a = p.second;
-        if (holdings.count(a) && !sold_set.count(a))
-          continue; // 已持仓且未卖
-        if (!top_n_set.count(a))
-          break; // 已超 top N 范围 (排序后)
-        if (read_bool(T, feature::def::limit_up_spec, a, d) || read_bool(T, feature::def::limit_dn_spec, a, d))
-          continue;
-        intended_buy.push_back(a);
-        --slots;
-      }
-    }
-
-    // (5) 执行: sell 受 susp 阻挡 — 停牌持仓订单失败.
-    int n_sell_ok = 0, n_buy_ok = 0;
-    int n_sell_intent = static_cast<int>(intended_sell.size());
-    int n_buy_intent = static_cast<int>(intended_buy.size());
-
-    for (int a : intended_sell) {
-      bool susp = read_bool(T, feature::def::susp_spec, a, d);
-      float c = last_close[static_cast<std::size_t>(a)];
-      if (susp || !is_finite(c))
-        continue; // 失败: 停牌或无价
-      double sh = holdings[a];
-      double proceeds = sh * static_cast<double>(c) *
-                        (1.0 - ::config::BACKTEST_SELL_COST);
-      turn_amt += sh * static_cast<double>(c);
-      cash += proceeds;
-      holdings.erase(a);
-      ++n_sell_ok;
-
-      auto it = open_recs.find(a);
-      assert(it != open_recs.end() && "sell without open record");
-      close_trade(a, d, it->second, c);
-      push_fill(a, d, -1, c, trade_ret(it->second.open_px, c));
-      open_recs.erase(it);
-    }
-
-    // buys: sells 后再平衡逻辑 (单一 target_per_slot 口径, 不设门槛 — 后续接大盘
-    //   择时只需在此处缩放 target_per_slot / 跳过整段, 不必再理会分散的门槛判断).
-    //   1. pv_after = cash + mv_kept (sells 后总组合市值; intended_buy 此时尚未执行).
-    //      target_per_slot = pv_after / HOLD_N (含费总支出, 持仓权重 ≈ 1/HOLD_N).
-    //   2. initial buy: 每个 intended_buy 至多花 target_per_slot, 不强行用完 cash.
-    //      原 intended_buy 已在 (4) 过滤 limit_up/dn; close 兜底.
-    //   3. 再平衡 = 现金清扫二合一: 现有持仓 (kept + 新 buy) 中 deficit (target -
-    //      当前市值) > 0 的, 按 deficit 降序逐个补到 target, 直到 cash 耗尽 —
-    //      不设门槛, 剩余 cash 当天全部再投出去, 逼近满仓. 跳过
-    //      susp/limit_up/limit_dn (买不进的槽位仓位留空属物理约束, 无法强制).
-    //      加仓不创建 trade record、不更新 open_recs、不计入 n_buy_ok/exec_pct;
-    //      换手按成交额计 (碎股再平衡不按 1 笔计).
-    {
-      double mv_kept = 0.0;
-      for (auto &kv : holdings) {
-        mv_kept += kv.second * static_cast<double>(last_close[static_cast<std::size_t>(kv.first)]);
-      }
-      double pv_after = cash + mv_kept;
-      double target_per_slot = pv_after / static_cast<double>(hold_n);
-
-      for (int a : intended_buy) {
-        if (cash <= 0.0)
-          break;
-        float c = last_close[static_cast<std::size_t>(a)];
-        if (!is_finite(c) || c <= 0.0f)
-          continue;
-        double cost_money = std::min(target_per_slot, cash);
-        double net = cost_money / (1.0 + ::config::BACKTEST_BUY_COST);
-        double sh = net / static_cast<double>(c);
-        if (sh <= 0.0)
-          continue;
-        cash -= cost_money;
-        turn_amt += cost_money;
-        holdings[a] = sh; // intended_buy ∉ holdings (见 (4))
-        open_recs[a] = OpenRec{d, c};
-        push_fill(a, d, +1, c, std::nanf(""));
-        bought_today.insert(a);
-        ++n_buy_ok;
-      }
-
-      if (cash > 0.0 && !holdings.empty()) {
-        struct Deficit {
-          double def;
-          int a;
-          float c;
-        };
-        std::vector<Deficit> defs;
-        defs.reserve(holdings.size());
-        for (auto &kv : holdings) {
-          int a = kv.first;
-          float c = last_close[static_cast<std::size_t>(a)];
-          if (!is_finite(c) || c <= 0.0f)
-            continue;
-          if (read_bool(T, feature::def::susp_spec, a, d) ||
-              read_bool(T, feature::def::limit_up_spec, a, d) ||
-              read_bool(T, feature::def::limit_dn_spec, a, d))
-            continue;
-          double cur_mv = kv.second * static_cast<double>(c);
-          double def = target_per_slot - cur_mv;
-          if (def <= 0.0)
-            continue;
-          defs.push_back({def, a, c});
-        }
-        std::sort(defs.begin(), defs.end(),
-                  [](const Deficit &x, const Deficit &y) {
-                    return x.def > y.def;
-                  });
-        for (const auto &dd : defs) {
-          if (cash <= 0.0)
-            break;
-          double cost_money = std::min(dd.def, cash);
-          double net = cost_money / (1.0 + ::config::BACKTEST_BUY_COST);
-          double sh_add = net / static_cast<double>(dd.c);
-          if (sh_add <= 0.0)
-            continue;
-          cash -= cost_money;
-          turn_amt += cost_money;
-          holdings[dd.a] += sh_add; // 加仓; open_recs 不动
-        }
-      }
-    }
-
-    // (6) 收尾: 当日终值 (执行后 mv) ----------------------------------------
-    double mv_end = 0.0;
-    for (auto &kv : holdings) {
-      mv_end += kv.second *
-                static_cast<double>(last_close[static_cast<std::size_t>(kv.first)]);
-    }
-    double pv_end = cash + mv_end;
-    strat_nav[i] = static_cast<float>(pv_end);
+    // (2) 内核走一天: 退市强平 → mark-to-market → 卖出/买入意向 → 执行 →
+    //   再平衡现金清扫 → 当日终值. 全部账目在 Engine 内, 与 mine 同一份代码.
+    eng.step(i, std::span<const std::pair<float, int>>(cands), rec);
+    strat_nav[i] = static_cast<float>(eng.pv_end);
 
     // pool 等权影子指数 (策略可买母集, filters 已前置到 pool).
     //   时点: D-1 close 按 mask[a, d-1] 等权 → 持有到 D close, 得 daily_return[a, d].
@@ -625,31 +426,32 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
     pool_nav[i] = static_cast<float>(pool_nav_d);
 
     // 持仓数 / 仓位 / 换手 / 停牌占比 / 可执行率
+    const std::vector<Pos> &holdings = eng.holdings;
     pos_count[i] = static_cast<std::int32_t>(holdings.size());
-    pos_pct[i] = static_cast<float>(mv_end / pv_end);
+    pos_pct[i] = static_cast<float>(eng.mv_end / eng.pv_end);
     // 双边换手: 买卖额 / 2 / 当日决策时点组合市值; 满额换 1 个成分股 = 1/HOLD_N
-    turnover[i] = static_cast<float>(turn_amt / (2.0 * pv));
+    turnover[i] = static_cast<float>(eng.turn_amt / (2.0 * eng.pv));
     int n_susp_h = 0;
-    for (auto &kv : holdings) {
-      if (read_bool(T, feature::def::susp_spec, kv.first, d))
+    for (const Pos &p : holdings) {
+      if ((flag[p.a] & MarketWindow::SUSP) != 0)
         ++n_susp_h;
     }
     susp_pct[i] = holdings.empty()
                       ? 0.0f
                       : static_cast<float>(n_susp_h) /
                             static_cast<float>(holdings.size());
-    int intent = n_sell_intent + n_buy_intent;
+    int intent = eng.n_sell_intent + eng.n_buy_intent;
     exec_pct[i] = (intent == 0)
                       ? 1.0f
-                      : static_cast<float>(n_sell_ok + n_buy_ok) /
+                      : static_cast<float>(eng.n_sell_ok + eng.n_buy_ok) /
                             static_cast<float>(intent);
 
     // CSR 持仓 (按 d 写一段; 段内权重降序 — 便于 py 直接显示)
     std::vector<std::pair<int, double>> sorted_hold; // (a, weight)
     sorted_hold.reserve(holdings.size());
-    for (auto &kv : holdings) {
-      double mv = kv.second * static_cast<double>(last_close[static_cast<std::size_t>(kv.first)]);
-      sorted_hold.emplace_back(kv.first, mv / pv_end);
+    for (const Pos &p : holdings) {
+      double mv = p.shares * static_cast<double>(close[p.a]);
+      sorted_hold.emplace_back(p.a, mv / eng.pv_end);
     }
     std::sort(sorted_hold.begin(), sorted_hold.end(),
               [](const auto &x, const auto &y) { return x.second > y.second; });
@@ -923,17 +725,17 @@ Result run(const feature::Axes &axes, const feature::StockMeta &meta,
 
     // 末日持仓表 — 段内已按权重降序 (主循环写 CSR 时排好)
     {
-      int d_last = bt_d_lo + n_d_bt - 1;
       std::size_t lo = static_cast<std::size_t>(hold_off[static_cast<std::size_t>(n_d_bt) - 1]);
       std::size_t hi = static_cast<std::size_t>(hold_off[static_cast<std::size_t>(n_d_bt)]);
-      (void)d_last; // 末日简称走 meta.json::names (全局 per-a, 同一口径)
+      // 末日简称走 meta.json::names (全局 per-a, 同一口径), 此处只要价格.
+      const float *close_last = mk.close_row(n_d_bt - 1);
       std::vector<std::int32_t> h_a, h_open_d;
       std::vector<float> h_open_px, h_last_px, h_w, h_ret;
       for (std::size_t k = lo; k < hi; ++k) {
         int a = static_cast<int>(hold_codes[k]);
         auto it = open_recs.find(a);
         assert(it != open_recs.end() && "末日持仓无开仓记录");
-        float last_px = last_close[static_cast<std::size_t>(a)];
+        float last_px = close_last[a];
         assert(is_finite(last_px) && "末日持仓无收盘价");
         h_a.push_back(static_cast<std::int32_t>(a));
         h_open_d.push_back(static_cast<std::int32_t>(it->second.open_d));

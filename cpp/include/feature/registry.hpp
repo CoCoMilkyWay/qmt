@@ -2,19 +2,23 @@
 
 // ============================================================================
 // 计算图挂载点 — 全自动: 无中心特征清单.
-//   计算图 (哪些节点真正参与计算, 以及计算顺序) 由此处从两类 "根" consteval
+//   计算图 (哪些节点真正参与计算, 以及计算顺序) 由此处从三类 "根" consteval
 //   沿 deps 反向可达性 + 拓扑排序推出 (见 graph.hpp):
 //     1) 框架自身固定需求 — backtest.cpp / analysis.cpp / strategy/columns.cpp
 //        直接读取的少量 raw TS 节点 (与具体策略无关, 任何策略配置下都需要).
 //     2) strategy::STRATEGIES[] 引用到的全部节点 (filters ∪ weights.f ∪
 //        pool.rank_key), 递归展开它们的 deps.
+//     3) mine::MINE_FACTORS — 权重挖掘的候选因子池 (mine/spec.hpp). 无条件计入,
+//        不受 mine::MINE_ENABLE 门控: 该开关只管"跑不跑 lattice 扫描", 候选因子
+//        本身要一直算/一直落张量 (关掉挖掘也能对账、也能随时开挖).
 //   新增 feature: 只需 1) def/{basic,factor,filter}/<name>.hpp 写 FeatureSpec
-//   2) 在策略 config 或某个已挂载节点的 deps 里引用它 (#include + 取地址).
+//   2) 在策略 config / mine 因子池 / 某个已挂载节点的 deps 里引用它.
 //   不在此可达闭包内的节点文件即使存在也不进入计算 (不触发计算, 不占 Tensor 存储).
 // ============================================================================
 
 #include "feature/framework_roots.hpp"
 #include "feature/graph.hpp"
+#include "mine/spec.hpp"
 #include "strategy/registry.hpp"
 
 #include <array>
@@ -51,12 +55,15 @@ consteval std::vector<const FeatureSpec *> all_roots_vec() {
       v.push_back(fw.f);
     v.push_back(s->pool.rank_key);
   }
+  for (const FeatureSpec *f : mine::MINE_FACTORS)
+    v.push_back(f);
   return v;
 }
 
 inline constexpr std::size_t N_ROOTS =
     sizeof(FRAMEWORK_ROOTS) / sizeof(FRAMEWORK_ROOTS[0]) +
-    count_strategy_roots();
+    count_strategy_roots() +
+    sizeof(mine::MINE_FACTORS) / sizeof(mine::MINE_FACTORS[0]);
 
 consteval std::array<const FeatureSpec *, N_ROOTS> all_roots() {
   std::vector<const FeatureSpec *> v = all_roots_vec();
