@@ -2,6 +2,7 @@
 
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace wxmd::str {
 
@@ -26,6 +27,16 @@ inline std::string replaced(std::string text, std::string_view from,
                             std::string_view to) {
   replace_all(text, from, to);
   return text;
+}
+
+// HTTP 头部字段名大小写不敏感，比对前统一降级。
+inline std::string lowered(const std::string &text) {
+  std::string out;
+  out.reserve(text.size());
+  for (char c : text) {
+    out += (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+  }
+  return out;
 }
 
 inline std::string trim(const std::string &text) {
@@ -79,6 +90,73 @@ inline std::string escape_html(const std::string &text) {
     default:
       out += c;
       break;
+    }
+  }
+  return out;
+}
+
+// URL query 里的 key / pass_ticket 是百分号编码的，取出来必须先还原，
+// 否则重新发请求时会被二次编码。
+inline std::string percent_decode(const std::string &text) {
+  const auto hex_value = [](char c) -> int {
+    if (c >= '0' && c <= '9') {
+      return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+      return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+      return c - 'A' + 10;
+    }
+    return -1;
+  };
+
+  std::string out;
+  out.reserve(text.size());
+  for (size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == '+') {
+      out += ' ';
+      continue;
+    }
+    if (text[i] == '%' && i + 2 < text.size()) {
+      const int high = hex_value(text[i + 1]);
+      const int low = hex_value(text[i + 2]);
+      if (high >= 0 && low >= 0) {
+        out += static_cast<char>(high * 16 + low);
+        i += 2;
+        continue;
+      }
+    }
+    out += text[i];
+  }
+  return out;
+}
+
+// 历史消息接口返回的 title / content_url 等字段仍带 HTML 实体，
+// 链接必须还原成 & 才能直接请求。
+inline std::string unescape_html(const std::string &text) {
+  static constexpr std::pair<std::string_view, char> kEntities[] = {
+      {"&amp;", '&'},  {"&lt;", '<'},   {"&gt;", '>'},
+      {"&quot;", '"'}, {"&#39;", '\''},
+  };
+
+  std::string out;
+  out.reserve(text.size());
+  for (size_t i = 0; i < text.size();) {
+    bool matched = false;
+    if (text[i] == '&') {
+      for (const auto &[entity, decoded] : kEntities) {
+        if (text.compare(i, entity.size(), entity) == 0) {
+          out += decoded;
+          i += entity.size();
+          matched = true;
+          break;
+        }
+      }
+    }
+    if (!matched) {
+      out += text[i];
+      ++i;
     }
   }
   return out;

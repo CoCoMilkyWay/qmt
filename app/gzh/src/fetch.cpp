@@ -36,22 +36,27 @@ SplitUrl split_url(const std::string &url) {
 
 } // namespace
 
-std::string fetch_article(const std::string &url) {
+std::string fetch_raw(const std::string &url, const std::string &cookie) {
   WXMD_ASSERT(url.rfind("https://mp.weixin.qq.com", 0) == 0 ||
                   url.rfind("http://mp.weixin.qq.com", 0) == 0,
-              "只支持 mp.weixin.qq.com 的文章链接: " + url);
+              "只支持 mp.weixin.qq.com 的链接: " + url);
 
   const SplitUrl parts = split_url(url);
+
+  httplib::Headers headers = {
+      {"User-Agent", kUserAgent},
+      {"Referer", "https://mp.weixin.qq.com/"},
+      {"Accept-Encoding", "identity"},
+  };
+  if (!cookie.empty()) {
+    headers.emplace("Cookie", cookie);
+  }
 
   httplib::Client client(parts.origin);
   client.set_follow_location(true);
   client.set_connection_timeout(kTimeoutSeconds, 0);
   client.set_read_timeout(kTimeoutSeconds, 0);
-  client.set_default_headers({
-      {"User-Agent", kUserAgent},
-      {"Referer", "https://mp.weixin.qq.com/"},
-      {"Accept-Encoding", "identity"},
-  });
+  client.set_default_headers(headers);
 
   httplib::Result response = client.Get(parts.target);
   WXMD_ASSERT(static_cast<bool>(response),
@@ -64,5 +69,7 @@ std::string fetch_article(const std::string &url) {
 
   return response->body;
 }
+
+std::string fetch_article(const std::string &url) { return fetch_raw(url, ""); }
 
 } // namespace wxmd

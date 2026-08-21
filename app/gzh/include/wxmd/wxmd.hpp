@@ -6,6 +6,7 @@
 #include "wxmd/fetch.hpp"    // IWYU pragma: export
 #include "wxmd/html.hpp"     // IWYU pragma: export
 #include "wxmd/markdown.hpp" // IWYU pragma: export
+#include "wxmd/profile.hpp"  // IWYU pragma: export
 #include "wxmd/renderer.hpp" // IWYU pragma: export
 
 namespace wxmd {

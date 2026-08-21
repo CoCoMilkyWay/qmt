@@ -1,4 +1,5 @@
-Motive: 公众号文章链接 → Markdown; 本机直连 `mp.weixin.qq.com`, 不走任何代理; 规则集从 `wechat-article-exporter` (TS) 全量移植, 输出与 turndown 逐字节一致; 依赖全部源码 vendored, 系统只需 OpenSSL.
+Motive: 公众号文章链接 → Markdown; 再往前一步, 临时接管系统代理抓一次微信凭证, 把整个号的历史文章列表拉下来.
+抓取本身由本机直连 `mp.weixin.qq.com`; 系统依赖只有 OpenSSL, 交互模式另需 `gsettings` 与 `certutil`.
 
 # 项目结构
 
@@ -76,23 +77,6 @@ gzh/
 | 3 求值 | `cgi.cpp`      | 脚本 → `cgiDataNew`        | 必须真 JS 引擎: 正文经 `JsDecode` 与 `\xNN` 双层转义, 正则还原不可靠                                                                 |
 | 4 渲染 | `renderer.cpp` | `cgiDataNew` → 规范化 HTML | 三种 `item_show_type` 各一套正文组装; 标题/元信息/原文链接统一结构                                                                   |
 | 5 转换 | `markdown.cpp` | HTML → Markdown            | turndown 规则集移植; 图片保留为 `![](cdn_url)` 不下载                                                                                |
-
-`--html` 停在第 4 级, 便于单独调试渲染层, 也是下面对照验证的接缝.
-
-## 对照验证
-
-移植保真度不靠肉眼: `tests/compare_turndown.py` 对每个样本先用 `wxmd --html` 取中间态 HTML (两边共用这一步), 再分别交给真 turndown 与 wxmd 转换, 逐字节 diff ⇒ 差异只可能来自第 5 级.
-
-**当前结果: 26 个真实文章样本全部逐字节一致**; 16 个不可用样本 (已删除/违规/无法查看/账号主页) 在断言处带原因终止.
-
-参考实现依赖 node, 不写进本仓库 (准备命令见 `tests/compare_turndown.py` 头部注释):
-
-```bash
-export PATH=/tmp/node-v22.14.0-linux-x64/bin:$PATH
-TD_MODULES=/tmp/tdref tests/compare_turndown.py
-```
-
-比较前只抹平两处已知且有意的差异: 参考实现把整份文档喂给 turndown, `<head>` 的缩进空白会变成开头一个空格 (wxmd 只从 `<body>` 建树, 故没有); 以及 wxmd 的 CLI 在末尾补了换行.
 
 ## 用法
 

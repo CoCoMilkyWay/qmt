@@ -2,6 +2,7 @@
 """编译并运行 wxmd。
 
 用法:
+    ./run.py                            启动代理，抓凭证后选公众号拉文章列表
     ./run.py <文章链接>                 抓取并输出 Markdown
     ./run.py -f samples/xxx.html        解析本地 HTML
     ./run.py --build                    只编译，不运行
@@ -66,7 +67,7 @@ def main():
 
     build(known.j)
 
-    if known.build or not passthrough:
+    if known.build:
         print(f"\n构建完成: {BINARY}", flush=True)
         return
 

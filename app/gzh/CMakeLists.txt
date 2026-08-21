@@ -50,6 +50,11 @@ add_library(wxmd STATIC
     src/renderer.cpp
     src/markdown.cpp
     src/fetch.cpp
+    src/profile.cpp
+    src/tlsca.cpp
+    src/proxy.cpp
+    src/capture.cpp
+    src/desktop.cpp
     src/wxmd.cpp)
 
 target_include_directories(wxmd PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
