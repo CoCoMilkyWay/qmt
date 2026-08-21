@@ -1,8 +1,9 @@
 #include "analysis/analysis.hpp"
 
-#include "config.hpp"
+#include "config_main.hpp"
 #include "feature/axis.hpp"
 #include "feature/def/basic/daily_return.hpp"
+#include "feature/feature.hpp"
 #include "feature/registry.hpp"
 #include "feature/tensor.hpp"
 #include "misc/affinity.hpp"
@@ -441,6 +442,74 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
     }
   }
 
+  // ---- 逐年因子分布 (KDE) 顺序后处理 ---------------------------------------
+  //   样本 = 该年内每日 pool 成员的该因子截面值 (全体, 不含 t+1 前瞻);
+  //   与 IC/turnover 那趟循环分开算, 逻辑简单优先 (非性能关键路径).
+  std::vector<int> years;
+  {
+    int prev_y = -1;
+    for (int i = 0; i < n_d_bt; ++i) {
+      int y = feature::year_of(axes.dates[static_cast<std::size_t>(bt_d_lo + i)]);
+      if (y != prev_y) {
+        years.push_back(y);
+        prev_y = y;
+      }
+    }
+  }
+  int n_year = static_cast<int>(years.size());
+  int n_grid = ::config::ANALYSIS_DIST_N_GRID;
+  std::vector<float> dist_grid(static_cast<std::size_t>(n_grid));
+  for (int g = 0; g < n_grid; ++g)
+    dist_grid[static_cast<std::size_t>(g)] =
+        static_cast<float>(g) / static_cast<float>(n_grid - 1); // [0,1]
+
+  std::vector<float> factor_dist_density(
+      static_cast<std::size_t>(n_factor) * static_cast<std::size_t>(n_year) *
+          static_cast<std::size_t>(n_grid),
+      std::nanf(""));
+  {
+    // samples[f][yi] — 该因子该年内所有 pool 成员截面值 (跨日拼接).
+    std::vector<std::vector<std::vector<float>>> samples(
+        static_cast<std::size_t>(n_factor),
+        std::vector<std::vector<float>>(static_cast<std::size_t>(n_year)));
+    std::vector<float> buf_pool_y(static_cast<std::size_t>(n_a));
+    std::vector<float> buf_factor_y(static_cast<std::size_t>(n_a));
+    int yi = 0;
+    for (int i = 0; i < n_d_bt; ++i) {
+      int d = bt_d_lo + i;
+      int y = feature::year_of(axes.dates[static_cast<std::size_t>(d)]);
+      while (years[static_cast<std::size_t>(yi)] != y)
+        ++yi;
+      T.strat_gather_cs_row(slot_pool, d, std::span<float>(buf_pool_y));
+      for (int f = 0; f < n_factor; ++f) {
+        T.gather_cs_row(*factors[static_cast<std::size_t>(f)], d,
+                        std::span<float>(buf_factor_y));
+        auto &dst = samples[static_cast<std::size_t>(f)][static_cast<std::size_t>(yi)];
+        for (int a = 0; a < n_a; ++a) {
+          if (!mask_bool(buf_pool_y[a]))
+            continue;
+          float v = buf_factor_y[a];
+          if (is_finite(v))
+            dst.push_back(v);
+        }
+      }
+    }
+    for (int f = 0; f < n_factor; ++f) {
+      for (int y = 0; y < n_year; ++y) {
+        std::vector<float> dens = report::gaussian_kde(
+            std::span<const float>(samples[static_cast<std::size_t>(f)]
+                                          [static_cast<std::size_t>(y)]),
+            std::span<const float>(dist_grid));
+        std::size_t off = (static_cast<std::size_t>(f) *
+                               static_cast<std::size_t>(n_year) +
+                           static_cast<std::size_t>(y)) *
+                          static_cast<std::size_t>(n_grid);
+        std::copy(dens.begin(), dens.end(),
+                  factor_dist_density.begin() + static_cast<std::ptrdiff_t>(off));
+      }
+    }
+  }
+
   // ---- 写盘 ----------------------------------------------------------------
   fs::path out =
       misc::git_root() / "output" / "strategy" / std::string(spec.name) / "analysis";
@@ -495,6 +564,26 @@ double run(const feature::Axes &axes, const feature::Tensor &T,
                        std::span<const float>(quantile_ret.data(),
                                               quantile_ret.size()),
                        std::span<const std::size_t>(shape, 2));
+  }
+  {
+    std::vector<std::int32_t> years_i4(years.begin(), years.end());
+    std::size_t shape1[1] = {static_cast<std::size_t>(n_year)};
+    misc::write_npy_i4(out / "factor_dist_years.npy",
+                       std::span<const std::int32_t>(years_i4.data(),
+                                                     years_i4.size()),
+                       std::span<const std::size_t>(shape1, 1));
+    std::size_t shapeg[1] = {static_cast<std::size_t>(n_grid)};
+    misc::write_npy_f4(out / "factor_dist_grid.npy",
+                       std::span<const float>(dist_grid.data(),
+                                              dist_grid.size()),
+                       std::span<const std::size_t>(shapeg, 1));
+    std::size_t shaped[3] = {static_cast<std::size_t>(n_factor),
+                             static_cast<std::size_t>(n_year),
+                             static_cast<std::size_t>(n_grid)};
+    misc::write_npy_f4(out / "factor_dist_density.npy",
+                       std::span<const float>(factor_dist_density.data(),
+                                              factor_dist_density.size()),
+                       std::span<const std::size_t>(shaped, 3));
   }
 
   // ---- 累积形态 (曾在 py 侧 cumprod / cumsum, 现下沉) ---------------------

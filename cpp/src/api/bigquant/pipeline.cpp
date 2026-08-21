@@ -2,7 +2,7 @@
 
 #include "api/bigquant/dai.hpp"
 #include "api/bigquant/spec.hpp"
-#include "config.hpp"
+#include "config_main.hpp"
 #include "misc/parquet.hpp"
 #include "misc/schedule.hpp"
 

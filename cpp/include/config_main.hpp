@@ -59,8 +59,8 @@ inline constexpr int PIPELINE_DEDUP_WINDOW_SECONDS = 60 * 60;
 //   cpp/include/strategy/def/<name>.hpp 每策略白名单 / filter / 因子权重 /
 //                                       回测窗口 (bt_start_date / hold_n / exit_ratio)
 //   cpp/include/strategy/registry.hpp   STRATEGIES[] 挂载表 + consteval 校验
-//   注: low_mc / revenue_st / dividend_st 仍硬编码 list_sector==1 (主板) 判定阈值,
-//       因为这些是业务规则 (板块特定阈值与适用范围), 非策略可调过滤.
+//   注: low_mc / revenue_st / dividend_st 仍硬编码 list_sector=="主板" (MAIN_BOARD)
+//       判定阈值, 因为这些是业务规则 (板块特定阈值与适用范围), 非策略可调过滤.
 //
 // F. 回测 (成本 + 资金; 券商账户属性, 全策略共享)
 //   BACKTEST_CAPITAL_BASE          初始资金 [元]
@@ -76,12 +76,14 @@ inline constexpr float BACKTEST_SELL_COST = 13e-4f;
 inline constexpr float BACKTEST_MIN_COST = 5.0f;
 
 // ============================================================================
-// G. 分析 (因子分层 + IC 移动平均)
+// G. 分析 (因子分层 + IC 移动平均 + 逐年分布)
 //   ANALYSIS_N_QUANTILES   分层桶数 (TAG 4 排名分析)
 //   ANALYSIS_IC_MA_WINDOW  因子 IC 移动平均窗口 (日)
+//   ANALYSIS_DIST_N_GRID   逐年因子分布 KDE 求值网格点数 (x ∈ [0,1], Factor 值域)
 // ============================================================================
 inline constexpr int ANALYSIS_N_QUANTILES = 10;
 inline constexpr int ANALYSIS_IC_MA_WINDOW = 250;
+inline constexpr int ANALYSIS_DIST_N_GRID = 128;
 
 // ============================================================================
 // H. Describe (phase 4 stats; 关闭则只输出 "all" 一行/feature)

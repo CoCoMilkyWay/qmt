@@ -20,7 +20,7 @@
     2. 按 rank_key() 排序风格名单
     3. 打印表格 + 可直接粘回 cpp 的 weights
 
-前置: cpp 侧 mine::MINE_ENABLE = true 跑一次 (见 cpp/include/mine/spec.hpp)
+前置: cpp 侧 mine::MINE_ENABLE = true 跑一次 (见 cpp/include/config_mine.hpp)
 
 用法: python py/app/mine.py
 """

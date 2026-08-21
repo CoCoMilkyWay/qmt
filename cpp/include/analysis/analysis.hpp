@@ -33,6 +33,11 @@ namespace analysis {
 //   - pool_nav_cum.npy       [n_d_bt] f4 (pool 累计净值, 起点 1.0)
 //   - factor_ic_cum.npy      [n_factor, n_d_bt] f4 (累积 IC 曲线)
 //   - score_ic_cum.npy       [n_d_bt] f4 (聚合 score 累积 IC 曲线)
+//   逐年因子分布 (用于"分布/漂移"观察; Factor 值域 [0,1], KDE 见 report::gaussian_kde):
+//   - factor_dist_years.npy   [n_year] i4 (自然年, 如 2017; 升序, 仅含 bt 窗口内出现的年)
+//   - factor_dist_grid.npy    [ANALYSIS_DIST_N_GRID] f4 (KDE 求值网格, x ∈ [0,1])
+//   - factor_dist_density.npy [n_factor, n_year, ANALYSIS_DIST_N_GRID] f4 (密度曲线;
+//                                样本 = 该年内每日 pool 成员的该因子截面值; 样本<2 → 全 NaN)
 //   - report.json            JSON 因子汇总表 (列式: 因子/当期IC/IC均值/平均IC/
 //                              IR/换手率/本策略权重) + 分层 CAGR (Q1..QQ + pool)
 //

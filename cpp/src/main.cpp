@@ -13,7 +13,8 @@
 #include "api/tushare/pipeline.hpp"
 #include "api/tushare/spec.hpp"
 #include "backtest/backtest.hpp"
-#include "config.hpp"
+#include "config_main.hpp"
+#include "config_mine.hpp"
 #include "feature/axis.hpp"
 #include "feature/build.hpp"
 #include "feature/describe.hpp"
@@ -21,7 +22,6 @@
 #include "feature/report.hpp"
 #include "feature/tensor.hpp"
 #include "mine/mine.hpp"
-#include "mine/spec.hpp"
 #include "misc/date.hpp"
 #include "misc/fs.hpp"
 #include "package/yyjson/yyjson.h"
@@ -74,7 +74,8 @@ const char *margin_policy_name(strategy::MarginPolicy p) {
 //     codes[]        axes A 轴 instrument
 //     names[]        per-a 末日简称 (与 codes 同序; 末日持仓 / 下单台显示用)
 //     industries[]   per-a "SW2021一级 -- 二级" (见 report/labels.hpp)
-//     factor_names[] Kind::Factor 全集 (analysis 的因子轴顺序)
+//     factor_names[]        Kind::Factor 全集 (英文, analysis 的因子轴顺序)
+//     factor_cn_names[]      对应中文名 (与 factor_names 同序)
 //     strategies[]   {name, hold_n, exit_ratio, start_date, filters[],
 //                     weights{}, pool{...}, timing{backtest_seconds,
 //                     analysis_seconds}}  ← pool 摘要供策略配置对比表
@@ -101,9 +102,11 @@ void write_meta(const feature::Axes &axes, const feature::Tensor &T,
                       report::load_industry_labels(axes));
 
   yyjson_mut_val *factor_arr = report::add_arr(doc, root, "factor_names");
+  yyjson_mut_val *factor_cn_arr = report::add_arr(doc, root, "factor_cn_names");
   for (const feature::FeatureSpec *f : feature::ALL_NODES) {
     if (f->kind == feature::Kind::Factor) {
       yyjson_mut_arr_add_str(doc, factor_arr, f->name);
+      yyjson_mut_arr_add_str(doc, factor_cn_arr, f->cn_name);
     }
   }
 
@@ -128,9 +131,7 @@ void write_meta(const feature::Axes &axes, const feature::Tensor &T,
     // pool 摘要 — 策略配置对比表 (四个策略到底差在哪) 的唯一数据源.
     yyjson_mut_val *pool = report::add_obj(doc, s, "pool");
     report::add_sv_arr(doc, pool, "exchange", spec->pool.exchange_wl);
-    yyjson_mut_val *sec = report::add_arr(doc, pool, "list_sector");
-    for (std::int8_t v : spec->pool.list_sector_wl)
-      yyjson_mut_arr_add_int(doc, sec, v);
+    report::add_sv_arr(doc, pool, "list_sector", spec->pool.list_sector_wl);
     report::add_sv_arr(doc, pool, "industry_l1", spec->pool.industry_l1_wl);
     yyjson_mut_obj_add_str(doc, pool, "margin_policy",
                            margin_policy_name(spec->pool.margin_policy));

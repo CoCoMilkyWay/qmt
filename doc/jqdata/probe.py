@@ -6,7 +6,7 @@ jqdata 接口能力实测 (走本地 jqbridge: py/jqbridge.py 子进程 + length
   2. 返回行数 / 列名是否与 README 字段表描述一致
   3. 单次 run_query 默认行数上限 (jqdatasdk 内部 RESULT_ROWS_LIMIT=5000)
 
-凭据从 cpp/include/config.hpp 解析 (避免硬编码), 与 cpp::jqdata::Bridge 一致.
+凭据从 cpp/include/config_main.hpp 解析 (避免硬编码), 与 cpp::jqdata::Bridge 一致.
 """
 
 import csv
@@ -20,16 +20,16 @@ import datetime as dt
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]   # qmt/
-CONFIG_HPP = REPO / "cpp" / "include" / "config.hpp"
+CONFIG_HPP = REPO / "cpp" / "include" / "config_main.hpp"
 BRIDGE_PY = REPO / "py" / "jqbridge.py"
 
 
 def parse_credentials():
-    """从 cpp/include/config.hpp 解析 JQDATA_MOB / JQDATA_PWD 字符串字面量."""
+    """从 cpp/include/config_main.hpp 解析 JQDATA_MOB / JQDATA_PWD 字符串字面量."""
     src = CONFIG_HPP.read_text(encoding="utf-8")
     def grab(name):
         m = re.search(rf'{name}\s*=\s*"([^"]*)"', src)
-        assert m, f"{name} not found in config.hpp"
+        assert m, f"{name} not found in config_main.hpp"
         return m.group(1)
     mob = grab("JQDATA_MOB")
     pwd = grab("JQDATA_PWD")

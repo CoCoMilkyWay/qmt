@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <numbers>
 
 namespace report {
 
@@ -329,6 +330,44 @@ float pearson(std::span<const float> x, std::span<const float> y) {
   if (vx <= 0.0 || vy <= 0.0)
     return std::nanf("");
   return static_cast<float>(cov / std::sqrt(vx * vy));
+}
+
+std::vector<float> gaussian_kde(std::span<const float> samples,
+                                std::span<const float> grid) {
+  std::vector<float> out(grid.size(), std::nanf(""));
+  std::vector<double> xs;
+  xs.reserve(samples.size());
+  double sum = 0.0, sumsq = 0.0;
+  for (float v : samples) {
+    if (!fin(v))
+      continue;
+    xs.push_back(static_cast<double>(v));
+    sum += v;
+    sumsq += static_cast<double>(v) * v;
+  }
+  int n = static_cast<int>(xs.size());
+  if (n < 2)
+    return out;
+  double mean = sum / n;
+  double var = sumsq / n - mean * mean; // population (ddof=0)
+  if (!(var > 0.0))
+    return out;
+  double sd = std::sqrt(var);
+  // Scott's rule (1D): h = std × n^(-1/5)
+  double h = sd * std::pow(static_cast<double>(n), -0.2);
+  if (!(h > 0.0))
+    return out;
+  double norm = 1.0 / (n * h * std::sqrt(2.0 * std::numbers::pi));
+  for (std::size_t g = 0; g < grid.size(); ++g) {
+    double x = grid[g];
+    double acc = 0.0;
+    for (double xi : xs) {
+      double z = (x - xi) / h;
+      acc += std::exp(-0.5 * z * z);
+    }
+    out[g] = static_cast<float>(acc * norm);
+  }
+  return out;
 }
 
 float nan_mean(std::span<const float> x) {

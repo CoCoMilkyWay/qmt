@@ -8,7 +8,7 @@
 #include <string_view>
 
 // ============================================================================
-// 因子权重挖掘 — 四段式. 配置见 mine/spec.hpp.
+// 因子权重挖掘 — 四段式. 配置见 config_mine.hpp.
 //
 // Phase 1 (全 lattice, 一遍日循环): 滑窗分层 + 滑窗夏普.
 //   每日池内按 score 升序等分 n_bins 档 (n_bins = universe_size / hold_n ⇒

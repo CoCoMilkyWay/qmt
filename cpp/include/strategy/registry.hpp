@@ -2,7 +2,12 @@
 
 // ============================================================================
 // 策略挂载表 — 唯一挂载点.
-//   新增策略: 1) strategy/def/<name>.hpp 写 spec  2) 此处 include + 挂一行.
+//   STRATEGIES[] 数组 + strategy/def/*.hpp 的 #include 由 CMake 自动扫描
+//   strategy/def/ 目录生成 (见 strategy/registry_generated.hpp). 每个策略文件
+//   用独立子 namespace (strategy::def::<文件名>) 隔离通用辅助变量名, 内部
+//   StrategySpec 固定叫 spec, CMake 生成引用 &def::<文件名>::spec. 新增策略
+//   只需写 strategy/def/<name>.hpp 一个文件 (子 namespace 名 = 文件名), 重新
+//   cmake configure 即自动挂载, 无需手动改其他文件.
 //   consteval 校验: 名字唯一非空 / filters 全 Kind::Filter / weights 全
 //   Kind::Factor 且 w != 0 / 参数域合法. 违规直接编译失败.
 //
@@ -12,23 +17,11 @@
 // ============================================================================
 
 #include "feature/graph.hpp"
-#include "strategy/def/low_pb_small_cap.hpp"
-#include "strategy/def/low_price_small_cap.hpp"
-#include "strategy/def/low_valuation_small_cap.hpp"
-#include "strategy/def/margin_small_cap.hpp"
-#include "strategy/strategy.hpp"
+#include "strategy/registry_generated.hpp" // STRATEGIES[] + def/*.hpp includes
 
-#include <array>
 #include <cstddef>
 
 namespace strategy {
-
-inline constexpr std::array<const StrategySpec *, 4> STRATEGIES = {{
-    &def::low_price_small_cap,
-    &def::low_valuation_small_cap,
-    &def::margin_small_cap,
-    &def::low_pb_small_cap,
-}};
 
 inline constexpr int N_STRATEGIES = static_cast<int>(STRATEGIES.size());
 inline constexpr int N_STRAT_SLOTS = N_STRATEGIES * SF_COUNT;

@@ -1,7 +1,7 @@
 #include "backtest/backtest.hpp"
 
 #include "backtest/engine.hpp"
-#include "config.hpp"
+#include "config_main.hpp"
 #include "feature/axis.hpp"
 #include "feature/def/basic/daily_return.hpp"
 #include "feature/def/basic/delist_age.hpp"

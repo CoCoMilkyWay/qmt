@@ -1,6 +1,6 @@
 #include "feature/axis.hpp"
 
-#include "config.hpp"
+#include "config_main.hpp"
 #include "misc/date.hpp"
 #include "misc/parquet.hpp"
 
@@ -120,7 +120,7 @@ StockMeta load_stock_meta(const Axes &ax) {
   m.name.assign(na, {});
   m.list_date.assign(na, {});
   m.delist_date.assign(na, {});
-  m.list_sector.assign(na, int8_t{0});
+  m.list_sector.assign(na, {});
   m.exchange.assign(na, {});
 
   misc::pq::TableView bi(
@@ -142,7 +142,8 @@ StockMeta load_stock_meta(const Axes &ax) {
     m.name[a] = std::string(name.str(i));
     m.list_date[a] = ymd_str(ld.yyyymmdd(i));
     m.delist_date[a] = ymd_str(dd.yyyymmdd(i));
-    m.list_sector[a] = static_cast<int8_t>(ls.i32(i, 0));
+    m.list_sector[a] = std::string(list_sector_name(
+        static_cast<std::int8_t>(ls.i32(i, 0))));
     m.exchange[a] = std::string(ex.str(i));
   }
 

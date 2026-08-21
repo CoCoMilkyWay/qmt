@@ -1,6 +1,6 @@
 #pragma once
 
-#include "config.hpp"
+#include "config_main.hpp"
 #include "feature/axis.hpp"
 #include "feature/feature.hpp"
 #include "feature/tensor.hpp"

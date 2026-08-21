@@ -94,6 +94,12 @@ float win_rate(std::span<const std::string> dates, std::span<const float> ret,
 // 两序列 Pearson (跳任一侧 NaN); 有效点 < 5 或任一方差 ≤ 0 → NaN.
 float pearson(std::span<const float> x, std::span<const float> y);
 
+// 高斯核密度估计 (Scott's rule 带宽 h = std × n^(-1/5), population std),
+//   在给定网格上逐点求值 (未做边界反射校正, 网格外自然衰减).
+//   samples 跳 NaN; 有效样本数 < 2 或方差 ≤ 0 → 全 NaN (前端留空 = 该期样本不足).
+std::vector<float> gaussian_kde(std::span<const float> samples,
+                                std::span<const float> grid);
+
 // 跳 NaN 的均值 / 求和 / population 标准差; 无有效点 → NaN (sum → 0).
 float nan_mean(std::span<const float> x);
 float nan_sum(std::span<const float> x);

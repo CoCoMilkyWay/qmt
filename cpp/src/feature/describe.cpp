@@ -1,6 +1,6 @@
 #include "feature/describe.hpp"
 
-#include "config.hpp"
+#include "config_main.hpp"
 #include "feature/registry.hpp"
 #include "misc/affinity.hpp"
 #include "misc/fs.hpp"

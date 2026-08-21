@@ -68,8 +68,9 @@ struct PoolSpec {
   // exchange 中文全称白名单 (匹配 _meta/cn_stock_basic_info::exchange):
   //   "上海证券交易所" / "深圳证券交易所" / "北京证券交易所"
   std::span<const std::string_view> exchange_wl;
-  // list_sector int8 编码白名单: 1=主板 / 2=创业板 / 3=科创板 / 4=北交所
-  std::span<const std::int8_t> list_sector_wl;
+  // list_sector 中文白名单 (匹配 StockMeta.list_sector, 与 exchange 同口径):
+  //   "主板" / "创业板" / "科创板" / "北交所"
+  std::span<const std::string_view> list_sector_wl;
   // 申万 SW2021 一级行业中文名白名单 (columns.cpp 启动期一次性转 ID mask;
   //   industry_l1 ID 0 = 未知, 永远不命中)
   std::span<const std::string_view> industry_l1_wl;

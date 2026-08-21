@@ -44,14 +44,6 @@ inline bool in_whitelist(std::string_view v,
   return false;
 }
 
-inline bool in_int_whitelist(std::int8_t v, std::span<const std::int8_t> wl) {
-  for (auto w : wl) {
-    if (v == w)
-      return true;
-  }
-  return false;
-}
-
 // industry_l1 ID 白名单 mask: spec 的中文 string_view 白名单转 array<bool, 32>,
 //   mask[id]=true 表该 SW2021 一级行业 ID 在白名单内. 每策略启动期构建一次.
 //   拼写不在 SW2021_L1_NAMES 内的名字 → id=0 被忽略 (industry_l1=0 = "未知"
@@ -85,7 +77,7 @@ void ts_pool_b(int s, const StrategySpec &spec,
   auto out = T.strat_ts_row(slot(s, SF::pool_b), a);
 
   bool ex_ok = in_whitelist(meta.exchange[a], spec.pool.exchange_wl);
-  bool sec_ok = in_int_whitelist(meta.list_sector[a], spec.pool.list_sector_wl);
+  bool sec_ok = in_whitelist(meta.list_sector[a], spec.pool.list_sector_wl);
   bool asset_ok = ex_ok && sec_ok;
   MarginPolicy mp = spec.pool.margin_policy;
 

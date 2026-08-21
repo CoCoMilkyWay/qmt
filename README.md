@@ -13,7 +13,8 @@ qmt/
 ├── cpp/                             # C++23 实现 (Clang/Linux, header-only boost + yyjson + arrow)
 │   ├── projects/main/               # CMake 构建 (DEBUG / PROFILE / ASSERT / PRODUCTION)
 │   ├── include/
-│   │   ├── config.hpp               # 全局常量 (BigQuant host/token, Tushare host/token, update 开关, 起始日, lookback, 去重窗口)
+│   │   ├── config_main.hpp          # 全局常量 (BigQuant host/token, Tushare host/token, update 开关, 起始日, lookback, 去重窗口)
+│   │   ├── config_mine.hpp          # 因子权重挖掘配置 (候选因子 / lattice 阶数 / 去重参数)
 │   │   ├── misc/                    # 通用工具 (date / fs / parquet / schedule / logging / npy / mmap / progress / timer / affinity)
 │   │   │                              # fs.hpp:      git_root / read_file_all / atomic_write / atomic_write_json
 │   │   │                              # parquet.hpp: 统一 parquet 存储层 — month_path / meta_path / list_month_files /
@@ -422,7 +423,7 @@ inline constexpr std::array<const StrategySpec *, N> STRATEGIES = {{
 - `pool`: `PoolSpec` — exchange/list_sector/行业白名单 + `rank_key` (排名用的共享节点, 如 `mcap_raw_spec`) + `rank_asc` + `universe_size` (`≤0` = 不按 `rank_key` 截断).
 - `filters`: `std::span<const FeatureSpec *const>`, 全部必须 `Kind::Filter` (registry consteval 校验).
 - `weights`: `std::span<const FactorWeight>` (`{f, w}`), `f` 必须 `Kind::Factor` 且 `w ≠ 0` (符号定义该因子的方向, 正负均可; `score` 分母按 `Σ|w|` 归一 ⇒ 只有权重的相对比例有意义, 不需凑 `Σw = 1`).
-- `bt_start_date` / `hold_n` / `exit_ratio`: per-策略回测参数 (成本 / `capital_base` 是券商账户属性, 留在 `config.hpp` 全策略共享).
+- `bt_start_date` / `hold_n` / `exit_ratio`: per-策略回测参数 (成本 / `capital_base` 是券商账户属性, 留在 `config_main.hpp` 全策略共享).
 
 每策略固定绑定 4 列 (`strategy::SF`), 存 `Tensor.strat_mats` (不占共享图 `mats`), 计算见 §构建流水线 Phase 2s/3s: `pool_b` (静态白名单母集) → `pool` (先砍 filters 再按 rank_key 截断) → `score` (因子在 pool 内重排分位后加权) → `rank` (pool 内降序排名, 0=不在母集). 回测/实盘选股/分析全部只读这 4 列, 不重复实现选股逻辑.
 

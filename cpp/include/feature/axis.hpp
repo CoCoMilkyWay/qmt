@@ -42,8 +42,8 @@ struct Axes {
 //   name        — instrument 当前简称 (诊断/日志用, 非 PIT — 历史改名走时变 feature)
 //   list_date   — YYYYMMDD; 空串 = 未上市 (理论不应出现)
 //   delist_date — YYYYMMDD; 空串 = 未退市
-//   list_sector — int8 板块编码 (源数据值): 1=主板 / 2=创业板 / 3=科创板 / 4=北交所
-//                 0 = 未知 (源数据为 null 或缺失). 内部 ID 即源数据值, 不再做中文映射.
+//   list_sector — 板块中文名 (与 exchange 同口径, 全程汉语, 源 int8 在此映射):
+//                 "主板" / "创业板" / "科创板" / "北交所"; "未知" = 源 null/缺失/越界.
 //   exchange    — 中文全称: "上海证券交易所" / "深圳证券交易所" / "北京证券交易所"
 //
 //   注: industry_l1 不再是 meta 静态 — 由 ts_industry_l1 inter feature 从
@@ -56,9 +56,19 @@ struct StockMeta {
   std::vector<std::string> name;
   std::vector<std::string> list_date;
   std::vector<std::string> delist_date;
-  std::vector<int8_t> list_sector;
+  std::vector<std::string> list_sector;
   std::vector<std::string> exchange;
 };
+
+// list_sector 源 int8 → 中文名 (axis.cpp 读取时调用; 内部计算判主板用 MAIN_BOARD).
+//   源值 0 = 未知 (null/缺失), 1=主板, 2=创业板, 3=科创板, 4=北交所.
+inline constexpr std::string_view LIST_SECTOR_NAMES[5] = {
+    "未知", "主板", "创业板", "科创板", "北交所"};
+inline constexpr std::string_view MAIN_BOARD = "主板";
+inline std::string_view list_sector_name(std::int8_t v) {
+  unsigned u = static_cast<unsigned>(static_cast<unsigned char>(v));
+  return u < 5 ? LIST_SECTOR_NAMES[u] : LIST_SECTOR_NAMES[0];
+}
 
 Axes load_axes();
 StockMeta load_stock_meta(const Axes &);

@@ -20,13 +20,13 @@ inline void ts_dividend_st(int a, const Axes &axes, const PitPool &pool,
                            const StockMeta &meta, Tensor &T);
 
 inline constexpr const FeatureSpec *dividend_st_deps[] = {&share_raw_spec,
-                                                           &ni_raw_spec};
+                                                          &ni_raw_spec};
 
 inline constexpr FeatureSpec dividend_st_spec{
     "dividend_st", "分红预警", Kind::Filter, Axis::TimeSeries, dividend_st_deps,
     &ts_dividend_st, nullptr, /*must_be_finite=*/true,
     /*formula=*/
-    "meta.list_sector == 1 ∧ ni_raw > 0 ∧ 3y_sum(dividend.cash_after_tax × "
+    "meta.list_sector == \"主板\" ∧ ni_raw > 0 ∧ 3y_sum(dividend.cash_after_tax × "
     "share_raw) < 0.30 × ni_raw ∧ 3y_sum < 5e7",
     /*assumption=*/
     "3y 窗口 = dividend.report_date.Y ∈ [Y-3, Y-1] (Y = "
@@ -49,7 +49,7 @@ inline void ts_dividend_st(int a, const Axes &axes, const PitPool &pool,
   auto ni_raw = T.ts_row(ni_raw_spec, a);
   std::fill(out.begin(), out.end(), 0.0f);
 
-  bool mb_a = (meta.list_sector[a] == 1); // 仅主板适用 (asset 静态, 1=主板)
+  bool mb_a = (meta.list_sector[a] == MAIN_BOARD); // 仅主板适用 (asset 静态)
   if (!mb_a)
     return;
 

@@ -1,6 +1,6 @@
 #include "feature/pit.hpp"
 
-#include "config.hpp"
+#include "config_main.hpp"
 #include "feature/axis.hpp"
 #include "feature/industry.hpp"
 #include "misc/affinity.hpp"

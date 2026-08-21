@@ -1,5 +1,5 @@
 #include "api/tushare/http.hpp"
-#include "config.hpp"
+#include "config_main.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>

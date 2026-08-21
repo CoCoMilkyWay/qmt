@@ -2,7 +2,7 @@
 
 #include "backtest/engine.hpp"
 #include "feature/cs.hpp"
-#include "mine/spec.hpp"
+#include "config_mine.hpp"
 #include "misc/affinity.hpp"
 #include "misc/fs.hpp"
 #include "misc/npy.hpp"

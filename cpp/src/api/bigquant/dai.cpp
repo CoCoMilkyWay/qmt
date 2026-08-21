@@ -1,6 +1,6 @@
 #include "api/bigquant/dai.hpp"
 
-#include "config.hpp"
+#include "config_main.hpp"
 #include "package/yyjson/yyjson.h"
 
 #include <arrow/buffer.h>

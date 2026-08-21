@@ -1422,7 +1422,7 @@ def f_ndy(csv, tdays):
 
 # ============================================================================
 # C++ 生产张量对账 (直读 output/tensor/*.npy, 与 Python 参考同指标并列)
-#   前置: cpp/include/config.hpp 里 TENSOR_DUMP_ENABLE=true, 且跑过 python run.py
+#   前置: cpp/include/config_main.hpp 里 TENSOR_DUMP_ENABLE=true, 且跑过 python run.py
 # ============================================================================
 
 # 果仁行 (T, inst) 该对张量的哪一天不是先验已知: C++ 各 feature CUTOFF 不同

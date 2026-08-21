@@ -3,7 +3,7 @@
 #include "api/tushare/http.hpp"
 #include "api/tushare/parse.hpp"
 #include "api/tushare/spec.hpp"
-#include "config.hpp"
+#include "config_main.hpp"
 #include "misc/date.hpp"
 #include "misc/parquet.hpp"
 #include "misc/schedule.hpp"

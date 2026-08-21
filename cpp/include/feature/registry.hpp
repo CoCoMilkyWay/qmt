@@ -8,7 +8,7 @@
 //        直接读取的少量 raw TS 节点 (与具体策略无关, 任何策略配置下都需要).
 //     2) strategy::STRATEGIES[] 引用到的全部节点 (filters ∪ weights.f ∪
 //        pool.rank_key), 递归展开它们的 deps.
-//     3) mine::MINE_FACTORS — 权重挖掘的候选因子池 (mine/spec.hpp). 无条件计入,
+//     3) mine::MINE_FACTORS — 权重挖掘的候选因子池 (config_mine.hpp). 无条件计入,
 //        不受 mine::MINE_ENABLE 门控: 该开关只管"跑不跑 lattice 扫描", 候选因子
 //        本身要一直算/一直落张量 (关掉挖掘也能对账、也能随时开挖).
 //   新增 feature: 只需 1) def/{basic,factor,filter}/<name>.hpp 写 FeatureSpec
@@ -18,7 +18,7 @@
 
 #include "feature/framework_roots.hpp"
 #include "feature/graph.hpp"
-#include "mine/spec.hpp"
+#include "config_mine.hpp"
 #include "strategy/registry.hpp"
 
 #include <array>
