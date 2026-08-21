@@ -8,17 +8,24 @@ gzh/
 ├── run.py                                  # 统一入口: cmake configure (静默) + build + 运行 build/wxmd
 │                                           #   未识别的参数原样透传给 wxmd; --build 只编译, --clean 清空 build/
 ├── CMakeLists.txt                          # 顶层构建: vendored 依赖 + libwxmd.a + wxmd CLI
-│                                           #   C++20; 系统依赖仅 OpenSSL (cpp-httplib 的 HTTPS 后端) + pthread
+│                                           #   C++20; 系统依赖仅 OpenSSL (cpp-httplib 的 HTTPS 后端 + 代理的 TLS 与签证书) + pthread
 ├── include/wxmd/                           # 公共头; 一层一个 header, 与 src/ 同名文件一一对应
 │   ├── wxmd.hpp                            # 顶层门面: Article {title/author/account/publish_time/link/markdown}
 │   │                                       #   + parse_article (本地 html) / fetch_and_parse (链接) / render_article_html
-│   ├── fetch.hpp                           # fetch_article(url) → 原始 html
+│   ├── fetch.hpp                           # fetch_raw(url, cookie) → 响应体; fetch_article(url) → 原始 html
 │   ├── html.hpp                            # ArticleStatus {Success/Deleted/Exception/Error} + validate_html / extract_cgi_script
 │   ├── cgi.hpp                             # eval_cgi(script) → nlohmann::json (即 window.cgiDataNew)
 │   ├── renderer.hpp                        # render_html(cgi) → 规范化 HTML; extract_title / extract_link
 │   ├── markdown.hpp                        # to_markdown(html) → Markdown
 │   ├── dom.hpp                             # lexbor RAII 封装 (Document/query/text_content/attr) + MdNode 可变树
+│   ├── profile.hpp                         # Credential {biz/uin/key/pass_ticket/cookie} + ProfileEntry/Page/List
+│   │                                       #   fetch_profile_page/list (历史消息翻页) / fetch_account_name / load_credential
+│   ├── proxy.hpp                           # MitmProxy: 只对 mitm_hosts 做中间人, 其余盲转发; Exchange {url/cookie/set_cookies}
+│   ├── tlsca.hpp                           # CertAuthority: 自签 CA 落盘复用, 按域名现签叶子证书 (CertPair)
+│   ├── capture.hpp                         # 把 Exchange 认成 CapturedAccount; CredentialStore 按 __biz 去重
+│   ├── desktop.hpp                         # 桌面集成: 系统代理读写/备份还原 + CA 装进 NSS 库 (全项目唯一知道 GNOME+NSS 的地方)
 │   └── assert.hpp                          # WXMD_ASSERT: Release 下同样生效 — 本项目以「尽早失败」替代错误处理
+│                                           #   另有 warn(): 非致命但不符预期的情况不 silent, 喊一声
 ├── src/                                    # 实现; 五级流水线 fetch → html → cgi → renderer → markdown (见下节)
 │   ├── fetch.cpp                           # cpp-httplib + OpenSSL; 伪装微信内置浏览器 UA, Accept-Encoding: identity
 │   │                                       #   (不请求压缩 ⇒ 不必链 zlib); 只接受 mp.weixin.qq.com 域名
@@ -37,10 +44,23 @@ gzh/
 │   │                                       #   并移除 style·script·noscript·link·meta·title 与 __bottom-bar__
 │   ├── dom.cpp                             # lexbor 侧全部实现; build_tree 把 lexbor DOM 抽成 MdNode 轻量树 —
 │   │                                       #   turndown 要频繁改写文本与删节点, 在自有树上做远比改 lexbor DOM 简单
+│   ├── profile.cpp                         # mp/profile_ext?action=getmsg 翻页; general_msg_list 是嵌套 JSON 字符串,
+│   │                                       #   一条群发可含多篇 (multi_app_msg_item_list); 按链接去重, 整页重复即判到底
+│   ├── proxy.cpp                           # 裸 socket + OpenSSL 手写 CONNECT 代理: 目标域名解 TLS 抠 url/Cookie/Set-Cookie,
+│   │                                       #   其余域名两个 fd 对拷. 只宣告 ALPN http/1.1 (不解 HTTP/2 分帧),
+│   │                                       #   把请求改成 Connection: close ⇒ 响应体读到对端关闭为止, 省掉全部分帧逻辑;
+│   │                                       #   只监听 127.0.0.1; 原系统代理非空时作为父代理续上, 其它流量走向不变
+│   ├── tlsca.cpp                           # OpenSSL 手搓 CA 与叶子证书 (SAN/EKU/AKID 齐全, 叶子 397 天), 叶子共用一把私钥
+│   ├── capture.cpp                         # 从 url 的 query 里取 __biz/uin/key/pass_ticket (百分号解码), 四者齐全才算凭证;
+│   │                                       #   Cookie 优先取请求头的, 响应 Set-Cookie 只是兜底
+│   ├── desktop.cpp                         # gsettings 读写 org.gnome.system.proxy (socks 清空, 否则会被优先选中);
+│   │                                       #   接管前把原值存 ~/.wxmd/proxy-backup.json; certutil 把 CA 写进 ~/.pki/nssdb
 │   ├── wxmd.cpp                            # 串流水线; load_cgi 里做状态断言, 不可用文章在此带原因终止
-│   └── strutil.hpp                         # 内部字符串工具 (replace_all / trim / strip_whitespace / escape_html)
+│   └── strutil.hpp                         # 内部字符串工具 (replace_all / trim / lowered / percent_decode / unescape_html …)
 ├── cli/
-│   └── main.cpp                            # CLI: <链接> | -f <本地 html> | -o <输出> | --meta 附元信息 | --html 只输出中间态 HTML
+│   └── main.cpp                            # CLI: 无参数进交互模式 (代理→选号→拉列表); <链接> | -f <本地 html> 走单篇
+│                                           #   -o <输出> | --meta 附元信息 | --html 只输出中间态 HTML | --uninstall 卸载
+│                                           #   接管系统代理后所有退出路径 (atexit / 信号 / 断言 abort) 都汇到 restore_now
 ├── packages/                               # 依赖全部以源码 vendored, 随本项目一起 cmake 编译, 不装系统包
 │   ├── lexbor/                             # HTML5 解析 + CSS 选择器 (3.1.0); 目标 lexbor_static
 │   │                                       #   已裁剪: 只留 source/ + cmake 配置, 去掉 examples/test/utils/benchmarks/wasm
@@ -70,21 +90,55 @@ gzh/
 
 `src/wxmd.cpp` 里的 `parse_article` 串起全部五级, 每级一个源文件、一个头文件, 互不反向依赖:
 
-| 级     | 文件           | 输入 → 输出                | 关键点                                                                                                                               |
-| ------ | -------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| 1 抓取 | `fetch.cpp`    | url → 原始 html            | 本机 IP 直连, 无代理. 文章正文页是公开 URL, 不需要登录态; 上游那套公共代理只为解决浏览器 CORS 与集中抓取的风控, 本地单篇抓取都用不上 |
-| 2 定位 | `html.cpp`     | html → 状态 + cgi 脚本     | 先判文章是否可用 (已删除/违规/风控), 再取出带 `h5only` 的那段 `<script>`                                                             |
-| 3 求值 | `cgi.cpp`      | 脚本 → `cgiDataNew`        | 必须真 JS 引擎: 正文经 `JsDecode` 与 `\xNN` 双层转义, 正则还原不可靠                                                                 |
-| 4 渲染 | `renderer.cpp` | `cgiDataNew` → 规范化 HTML | 三种 `item_show_type` 各一套正文组装; 标题/元信息/原文链接统一结构                                                                   |
-| 5 转换 | `markdown.cpp` | HTML → Markdown            | turndown 规则集移植; 图片保留为 `![](cdn_url)` 不下载                                                                                |
+| 级     | 文件           | 输入 → 输出                | 关键点                                                                                                                                                                                   |
+| ------ | -------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 抓取 | `fetch.cpp`    | url → 原始 html            | 本机 IP 直连, 无代理. 文章正文页是公开 URL, 不需要登录态; 上游那套公共代理只为解决浏览器 CORS 与集中抓取的风控, 本地单篇抓取都用不上. 底层 `fetch_raw` 也供 `profile.cpp` 带 cookie 复用 |
+| 2 定位 | `html.cpp`     | html → 状态 + cgi 脚本     | 先判文章是否可用 (已删除/违规/风控), 再取出带 `h5only` 的那段 `<script>`                                                                                                                 |
+| 3 求值 | `cgi.cpp`      | 脚本 → `cgiDataNew`        | 必须真 JS 引擎: 正文经 `JsDecode` 与 `\xNN` 双层转义, 正则还原不可靠                                                                                                                     |
+| 4 渲染 | `renderer.cpp` | `cgiDataNew` → 规范化 HTML | 三种 `item_show_type` 各一套正文组装; 标题/元信息/原文链接统一结构                                                                                                                       |
+| 5 转换 | `markdown.cpp` | HTML → Markdown            | turndown 规则集移植; 图片保留为 `![](cdn_url)` 不下载                                                                                                                                    |
+
+## 交互模式: 抓凭证 → 拉整号列表
+
+单篇文章页是公开 URL, 直连即可; 但**历史消息列表** (`mp/profile_ext`) 必须带微信客户端侧的
+`key` / `pass_ticket`, 这两个值只在微信内打开文章时才下发, 分钟级过期 (按上游取 25 分钟),
+程序无法自行续签 —— 所以只能抓一次包拿到, 拿到后立刻把环境还回去.
+
+无参数运行 `wxmd` 即走这条路:
+
+| 步  | 做什么                                                                                     | 在哪                           |
+| --- | ------------------------------------------------------------------------------------------ | ------------------------------ |
+| 1   | 检查 `gsettings` / `certutil`, 缺 certutil 就报出本机发行版对应的安装命令并等确认          | `cli/main.cpp` + `desktop.cpp` |
+| 2   | 起 MITM 代理: 端口传 0 交内核分配, 只监听回环; 原有系统代理接为父代理, 其它流量走向不变    | `proxy.cpp`                    |
+| 3   | 自签 CA 装进 `~/.pki/nssdb` (只写当前用户, 不动系统证书), 微信 webview 从那里取信任        | `tlsca.cpp` + `desktop.cpp`    |
+| 4   | 接管系统代理, 等你在微信里打开该号任意一篇文章; 只对 `mp.weixin.qq.com` 解 TLS, 其余盲转发 | `desktop.cpp` + `proxy.cpp`    |
+| 5   | 从 URL query 里认出 `__biz/uin/key/pass_ticket`, 按 `__biz` 去重, 再回抓文章页解析公众号名 | `capture.cpp` + `profile.cpp`  |
+| 6   | 选中一个号后**立刻还原系统代理并停代理**, 之后翻页是我们自己直连                           | `cli/main.cpp`                 |
+| 7   | 按页拉 `profile_ext`, 每页落盘一次 (key 可能中途过期触发断言, 已拿到的部分不至于丢)        | `profile.cpp`                  |
+
+环境改动只有两处, 且都可回退:
+
+- 系统代理: 接管前把原值存 `~/.wxmd/proxy-backup.json`. 正常收尾、`atexit`、
+  `SIGINT/TERM/HUP/QUIT/ABRT/SEGV` 都汇到同一个还原入口; 被 `kill -9` 也没关系 ——
+  下次启动无条件读这份备份自愈. (本项目断言遍地, 只挂 `SIGINT` 兜不住 `abort()`.)
+- CA 信任: 只在用户 NSS 库里加一条 `wxmd local CA`. `--uninstall` 一次性还原代理、
+  摘掉这条信任并删掉 `~/.wxmd`.
+
+页数、每页条数、请求间隔这些参数写死在 `cli/main.cpp` 顶部的常量里, 没做成命令行开关:
+日常用不到, 改了要重编译, 正好逼着想清楚再改.
 
 ## 用法
 
 ```bash
-./run.py "https://mp.weixin.qq.com/s?__biz=..."      # 抓取并输出 Markdown
+./run.py                                             # 交互模式: 抓凭证后选号拉文章列表
+./run.py --meta -o links.txt                         # 交互模式并把「时间+标题+链接」写文件
+./run.py "https://mp.weixin.qq.com/s?__biz=..."      # 抓取单篇并输出 Markdown
 ./run.py -f tests/samples/普通图文/c01.html          # 离线解析本地 HTML
 ./run.py "<url>" --meta -o out.md                    # 附元信息并写文件
 ./run.py --html -f <file>                            # 只看中间态 HTML
+./run.py --uninstall                                 # 还原系统代理、移除 CA 与 ~/.wxmd
 ./run.py --build                                     # 只编译
 ./run.py --clean                                     # 清空 build/ 后重新编译
 ```
+
+交互模式下抓不到凭证就重启一次微信: 它只在启动时读代理和证书.

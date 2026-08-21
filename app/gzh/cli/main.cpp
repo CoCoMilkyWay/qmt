@@ -422,10 +422,12 @@ int run_interactive(const std::string &output_path, bool with_meta) {
       chosen.cred, 0, kPageSize, kArticleLimit, kIntervalMs, on_page);
   std::cerr << "\n"; // 收尾：让刷新行定格，后续输出另起一行。
 
-  // 屏幕上给人看的是文章标题；链接是给后台用的，只写文件、不刷屏。
+  // 屏幕上给人看的是发布时间 + 文章标题；链接是给后台用的，只写文件、不刷屏。
   for (size_t i = 0; i < list.entries.size(); ++i) {
     const wxmd::ProfileEntry &entry = list.entries[i];
-    std::cout << "  " << (i + 1) << ". "
+    const std::string when =
+        entry.datetime > 0 ? format_time(entry.datetime) : "??";
+    std::cout << "  " << (i + 1) << ". [" << when << "] "
               << (entry.title.empty() ? "(无标题)" : entry.title) << "\n";
   }
   std::cerr << "共 " << list.entries.size() << " 篇";
