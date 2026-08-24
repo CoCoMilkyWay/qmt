@@ -1,7 +1,9 @@
 #include "wxmd/fetch.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 
 #include <httplib.h>
@@ -21,6 +23,12 @@ constexpr const char *kUserAgent =
     "MiniProgramEnv/Mac MacWechat/WECHAT/WeChatBrowser XWEB/1191";
 
 constexpr int kTimeoutSeconds = 30;
+
+// 连接级失败（没拿到 HTTP 响应）的重试。微信图片 CDN 偶发抖动/限流，
+// 直接断言会把整轮 sync 拖死在一张图上，不值得。拿到响应之后的状态码
+// 仍是真实信号，不重试——404 就是图没了，重试也没用。
+constexpr int kMaxAttempts = 4;
+constexpr int kRetryBaseMs = 1000;
 
 struct SplitUrl {
   std::string origin; // scheme://host[:port]
@@ -74,10 +82,19 @@ Response get(const std::string &url, const std::string &cookie) {
   client.set_read_timeout(kTimeoutSeconds, 0);
   client.set_default_headers(headers);
 
-  httplib::Result response = client.Get(parts.target);
+  httplib::Result response;
+  for (int attempt = 1;; ++attempt) {
+    response = client.Get(parts.target);
+    if (static_cast<bool>(response) || attempt >= kMaxAttempts) {
+      break;
+    }
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(kRetryBaseMs << (attempt - 1)));
+  }
   WXMD_ASSERT(static_cast<bool>(response),
-              "请求失败: " + httplib::to_string(response.error()) + " (" + url +
-                  ")");
+              "请求失败 (重试 " + std::to_string(kMaxAttempts) +
+                  " 次后仍连不上): " + httplib::to_string(response.error()) +
+                  " (" + url + ")");
   WXMD_ASSERT(response->status == 200,
               "HTTP 状态异常: " + std::to_string(response->status) + " (" +
                   url + ")");
