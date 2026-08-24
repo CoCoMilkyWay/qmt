@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""果仁论坛爬虫入口。
+"""聚宽社区帖子同步入口。
 
 用法:
-    ./run.py                            增量更新 store/ (默认爬 知识共享 + 精华)
-    ./run.py --tag share elite          指定栏目 (share/usage/other/elite/all/...)
+    ./run.py                            增量更新 store/ (默认爬 文章 cate=3)
+    ./run.py --cate 3 10                指定栏目 (3=文章/10=问答/13=公告/14=精华/16=精选)
     ./run.py --deep                     强制翻完整个列表对账 (补漏)
     ./run.py --max-pages 3              只翻前 3 页列表 (调试)
     ./run.py --limit 5                  只下 5 篇 (调试)
     ./run.py --delay 0.5                加大请求间隔
-    ./run.py --store ~/guoren-data      换缓存根目录
+    ./run.py --store ~/jq-data          换缓存根目录
 
 随时 Ctrl-C / kill 都安全: 每篇文章独立原子提交, 下次运行从队列接着下。
 已入库的帖子视为终态, 不会重抓。
@@ -25,13 +25,14 @@ from src.sync import run
 
 
 def main():
-    ap = argparse.ArgumentParser(description="爬取果仁论坛全部帖子为 .md")
+    ap = argparse.ArgumentParser(description="同步聚宽社区帖子为 .md")
     ap.add_argument("--store", default=os.path.join(ROOT, "store"))
     ap.add_argument(
-        "--tag",
+        "--cate",
         nargs="+",
-        default=["share", "elite"],
-        help="栏目 (share/usage/other/elite/all/...), 默认 知识共享+精华",
+        type=int,
+        default=[3],
+        help="栏目 cate (3=文章/10=问答/13=公告/14=精华/16=精选), 默认 文章",
     )
     ap.add_argument("--delay", type=float, default=0.3, help="请求间隔秒")
     ap.add_argument("--max-pages", type=int, default=None, help="只翻前 N 页 (调试)")
@@ -41,7 +42,7 @@ def main():
     try:
         run(
             args.store,
-            tags=args.tag,
+            cates=args.cate,
             delay=args.delay,
             max_pages=args.max_pages,
             limit=args.limit,

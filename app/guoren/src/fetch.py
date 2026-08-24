@@ -17,6 +17,9 @@ UA = (
 )
 BASE = "https://guorn.com"
 TIMEOUT = 30
+# 瞬时故障 (网络抖动 / 5xx / 429) 重试次数; 404/403 是永久缺失, 不重试。
+RETRIES = 3
+BACKOFF = 1.5
 
 
 class Client:
@@ -32,17 +35,40 @@ class Client:
             time.sleep(self.delay - dt)
         self._last = time.time()
 
-    def _get(self, path, missing_ok=False):
-        self._pace()
+    def _get(self, path, missing_ok=False, soft=False):
+        """发一个 GET。瞬时故障重试 RETRIES 次。
+
+        missing_ok: 404/403 视作永久缺失, 返回 None (不重试)。
+        soft:        重试耗尽后仍失败时返回 None, 而不是断言炸掉 — 图片下载用,
+                     一张图抓不到不能让整篇文章卡住。
+        """
         url = path if path.startswith("http") else BASE + path
-        r = self.s.get(url, timeout=TIMEOUT)
-        if missing_ok and r.status_code in (403, 404):
+        last = None
+        for attempt in range(RETRIES + 1):
+            self._pace()
+            try:
+                r = self.s.get(url, timeout=TIMEOUT)
+            except requests.RequestException as e:
+                last = e
+                if attempt < RETRIES:
+                    time.sleep(BACKOFF ** attempt)
+                continue
+            if r.status_code in (403, 404) and missing_ok:
+                return None
+            if r.status_code == 200:
+                return r
+            last = f"HTTP {r.status_code}"
+            if attempt < RETRIES and (r.status_code >= 500 or r.status_code == 429):
+                time.sleep(BACKOFF ** attempt)
+                continue
+            break
+        if soft:
             return None
-        assert r.status_code == 200, f"GET {url} -> {r.status_code}"
-        return r
+        assert False, f"GET {url} 失败 ({last}), 重试 {RETRIES} 次仍不行"
 
     def _json(self, path):
-        j = self._get(path).json()
+        r = self._get(path)
+        j = r.json()
         assert j.get("status") == "ok", f"{path} -> {j.get('status')}"
         return j["data"]
 
@@ -61,5 +87,8 @@ class Client:
         return self._json(f"/forum/comment/list?pid={pid}&page={page}")
 
     def asset(self, path):
-        r = self._get(path)
+        """抓图片。死链或重试耗尽都返回 None, 由调用方保留原 URL, 不卡流水线。"""
+        r = self._get(path, missing_ok=True, soft=True)
+        if r is None:
+            return None, ""
         return r.content, r.headers.get("Content-Type", "")

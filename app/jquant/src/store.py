@@ -1,11 +1,11 @@
 """本地缓存落盘。一个 store 根目录下: index.jsonl + pending.jsonl + 逐篇原子提交。
 
-布局 (对齐 gzh 的 dated 风格):
+布局:
     store/
     ├── index.jsonl          已入库, 一行一篇; 追加这一行是提交的分界点
     ├── pending.jsonl        已发现未入库的队列, 追加式 (发现一页写一页)
-    ├── state.json           {deep_done, total_count} — 是否已完整翻过一遍列表
-    ├── <date>_<title>_<pid>/
+    ├── state.json           {<cate>: {deep_done, deep_page, total_count}} — 每栏目独立进度
+    ├── <date>_<title>_<postId>/
     │   ├── article.md
     │   └── assets/NNN.ext
     └── .staging/            正在下的那篇; 开局无条件清掉
@@ -16,6 +16,9 @@
       开局按「盘上有目录但 index 里没有」识别并删掉, 重新下一遍。
     - pending 只追加不覆盖: 发现一页立刻落盘, kill 最多丢当前这一页;
       已入库的行由 compact_pending 事后清掉, 期间读队列时按 index 过滤。
+
+entry 统一用 {pid, title, create_time, ...} 这几个键 (在 sync 里从聚宽原始字段归一化),
+所以本模块与具体平台的字段名解耦。
 """
 
 import json
@@ -42,7 +45,6 @@ def _entry_dir(entry):
 
 
 def _pid_of_dir(name):
-    """目录名末段就是 pid (pid 形如 p.123.456, 不含下划线, 反推是安全的)。"""
     parts = name.rsplit("_", 1)
     return parts[1] if len(parts) == 2 else None
 
@@ -88,7 +90,6 @@ class Store:
         self._pending = [
             r for r in _read_jsonl(self.pending_path) if r["pid"] not in self.index
         ]
-        # 队列里同一 pid 只留一份: 上一趟被 kill 可能让同一页重复追加过
         self._pending_pids = set()
         deduped = []
         for r in self._pending:
@@ -107,7 +108,6 @@ class Store:
         os.makedirs(self.staging, exist_ok=True)
 
     def _gc_orphans(self):
-        """删掉「盘上有目录但 index 里没有」的孤儿 — rename 成功而 index 行未落盘的残留。"""
         n = 0
         for name in os.listdir(self.root):
             path = os.path.join(self.root, name)
@@ -124,12 +124,13 @@ class Store:
     def has(self, pid):
         return pid in self.index
 
+    def seen(self, pid):
+        return pid in self.index or pid in self._pending_pids
+
     def seen_pids(self):
-        """已入库 + 已发现待下 = 所有见过的 pid, 用于判断列表是否已翻齐。"""
         return set(self.index) | self._pending_pids
 
     def add_pending(self, rows):
-        """追加新发现的帖子到队列, 发现一页就落盘一页。返回真正新增的条数。"""
         fresh = [
             r
             for r in rows
@@ -151,27 +152,32 @@ class Store:
         return [r for r in self._pending if r["pid"] not in self.index]
 
     def compact_pending(self):
-        """把已入库的行从队列文件里剔掉。纯优化, 中途 kill 也不影响正确性。"""
         rows = self.pending()
         self._pending = rows
         self._pending_pids = {r["pid"] for r in rows}
         _write_jsonl(self.pending_path, rows)
 
-    def state(self):
-        if not os.path.exists(self.state_path):
-            return {"deep_done": False, "total_count": 0}
-        with open(self.state_path, encoding="utf-8") as f:
-            return json.load(f)
+    def state(self, tag):
+        all_tags = self._all_state()
+        return all_tags.get(tag, {"deep_done": False, "total_count": 0})
 
-    def set_state(self, **kw):
-        st = self.state()
+    def set_state(self, tag, **kw):
+        all_tags = self._all_state()
+        st = all_tags.get(tag, {})
         st.update(kw)
+        all_tags[tag] = st
         tmp = self.state_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(st, f, ensure_ascii=False, indent=2)
+            json.dump(all_tags, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, self.state_path)
+
+    def _all_state(self):
+        if not os.path.exists(self.state_path):
+            return {}
+        with open(self.state_path, encoding="utf-8") as f:
+            return json.load(f)
 
     def commit(self, entry, markdown, assets):
         pid = entry["pid"]
@@ -179,8 +185,6 @@ class Store:
         assert entry.get("status"), f"入库必带状态 {pid}"
 
         final_dir = os.path.join(self.root, _entry_dir(entry))
-        # pid 不在 index 却已有目录 = 上一趟卡在 rename 与 index 追加之间的残留。
-        # 开局的 _gc_orphans 已扫过一遍, 这里兜住同一趟内重试的情况。
         if os.path.exists(final_dir):
             shutil.rmtree(final_dir)
 
@@ -205,6 +209,6 @@ class Store:
         os.replace(stage, final_dir)
         _fsync_dir(self.root)
         entry = dict(entry, dir=os.path.basename(final_dir))
-        _append_line(self.index_path, entry)  # 这一行落盘才算入库
+        _append_line(self.index_path, entry)
         self.index[pid] = entry
         self._pending_pids.discard(pid)
