@@ -16,6 +16,9 @@ struct ValidateResult {
   std::string message; // Success 时为 comment_id，Exception 时为异常原因
 };
 
+// 状态的名字，进断言消息与缓存索引。
+std::string status_text(ArticleStatus status);
+
 // 校验文章 html 是否抓取成功，并提取 comment_id。
 ValidateResult validate_html(const std::string &html);
 

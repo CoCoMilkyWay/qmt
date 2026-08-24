@@ -1,31 +1,18 @@
 #include "wxmd/capture.hpp"
 
 #include <algorithm>
-#include <chrono>
+#include <filesystem>
+#include <utility>
 
+#include <nlohmann/json.hpp>
+
+#include "wxmd/assert.hpp"
+
+#include "fsutil.hpp"
 #include "strutil.hpp"
 
 namespace wxmd {
 namespace {
-
-std::string query_param(const std::string &url, const std::string &name) {
-  const size_t query_begin = url.find('?');
-  if (query_begin == std::string::npos) {
-    return {};
-  }
-
-  const std::string needle = name + "=";
-  size_t at = query_begin + 1;
-  while (at < url.size()) {
-    const size_t end = std::min(url.find('&', at), url.size());
-    if (url.compare(at, needle.size(), needle) == 0) {
-      return str::percent_decode(
-          url.substr(at + needle.size(), end - at - needle.size()));
-    }
-    at = end + 1;
-  }
-  return {};
-}
 
 // Set-Cookie 原文形如 "name=value; Path=/; HttpOnly"，只取最前面的键值对。
 std::string cookie_pair(const std::string &set_cookie) {
@@ -38,69 +25,101 @@ std::string cookie_pair(const std::string &set_cookie) {
   return head;
 }
 
+nlohmann::json account_json(const Account &account) {
+  return {
+      {"biz", account.biz},
+      {"nickname", account.nickname},
+      {"uin", account.uin},
+      {"key", account.key},
+      {"pass_ticket", account.pass_ticket},
+      {"cookie", account.cookie},
+      {"source_url", account.source_url},
+      {"captured_ms", account.captured_ms},
+  };
+}
+
+Account parse_account(const nlohmann::json &item) {
+  Account account;
+  account.biz = item.value("biz", std::string());
+  account.nickname = item.value("nickname", std::string());
+  account.uin = item.value("uin", std::string());
+  account.key = item.value("key", std::string());
+  account.pass_ticket = item.value("pass_ticket", std::string());
+  account.cookie = item.value("cookie", std::string());
+  account.source_url = item.value("source_url", std::string());
+  account.captured_ms = item.value("captured_ms", int64_t{0});
+  return account;
+}
+
 } // namespace
 
-int64_t now_ms() {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-             std::chrono::system_clock::now().time_since_epoch())
-      .count();
-}
-
-bool CapturedAccount::valid_at(int64_t at_ms) const {
-  return remaining_seconds(at_ms) > 0;
-}
-
-int CapturedAccount::remaining_seconds(int64_t at_ms) const {
-  const int64_t deadline = timestamp_ms + kCredentialLiveMinutes * 60 * 1000;
-  const int64_t left = (deadline - at_ms) / 1000;
-  return left > 0 ? static_cast<int>(left) : 0;
-}
-
-bool parse_exchange(const Exchange &exchange, CapturedAccount &out) {
-  Credential cred;
-  cred.biz = query_param(exchange.url, "__biz");
-  cred.uin = query_param(exchange.url, "uin");
-  cred.key = query_param(exchange.url, "key");
-  cred.pass_ticket = query_param(exchange.url, "pass_ticket");
+bool parse_exchange(const Exchange &exchange, Account &out) {
+  Account account;
+  account.biz = str::query_param(exchange.url, "__biz");
+  account.uin = str::query_param(exchange.url, "uin");
+  account.key = str::query_param(exchange.url, "key");
+  account.pass_ticket = str::query_param(exchange.url, "pass_ticket");
 
   // 微信自己的页内跳转经常不带 key，这类请求没有凭证价值。
-  if (cred.biz.empty() || cred.uin.empty() || cred.key.empty() ||
-      cred.pass_ticket.empty()) {
+  if (account.biz.empty() || !account.has_credential()) {
     return false;
   }
 
   // 请求里的 Cookie 比这一次响应的 Set-Cookie 更稳：会话 cookie 早就种下了，
   // 不一定每次打开文章都会重新下发 wap_sid2。
-  std::string cookie = exchange.cookie;
-  if (cookie.empty()) {
+  account.cookie = exchange.cookie;
+  if (account.cookie.empty()) {
     for (const std::string &set_cookie : exchange.set_cookies) {
       const std::string pair = cookie_pair(set_cookie);
       if (pair.empty() || pair.find("EXPIRED") != std::string::npos) {
         continue;
       }
-      if (!cookie.empty()) {
-        cookie += "; ";
+      if (!account.cookie.empty()) {
+        account.cookie += "; ";
       }
-      cookie += pair;
+      account.cookie += pair;
     }
   }
 
-  cred.cookie = cookie;
-  out.cred = cred;
-  out.url = exchange.url;
-  out.nickname.clear();
-  out.timestamp_ms = now_ms();
+  account.source_url = exchange.url;
+  account.captured_ms = now_ms();
+  out = std::move(account);
   return true;
 }
 
-bool CredentialStore::offer(const CapturedAccount &account) {
+Credentials::Credentials(std::string path) : path_(std::move(path)) {
+  const std::string text = fsu::read_file(path_);
+  if (text.empty()) {
+    return;
+  }
+
+  const nlohmann::json root = nlohmann::json::parse(text, nullptr, false);
+  WXMD_ASSERT(root.is_array(), "凭证文件不是 JSON 数组: " + path_);
+
+  for (const nlohmann::json &item : root) {
+    Account account = parse_account(item);
+    // 过期的读回来也没用，直接丢掉，省得后面处处再判一次。
+    if (account.credential_seconds() > 0) {
+      items_.push_back(std::move(account));
+    }
+  }
+}
+
+std::vector<Account> Credentials::snapshot() const {
+  const std::lock_guard<std::mutex> guard(mutex_);
+  return items_;
+}
+
+bool Credentials::offer(const Account &account) {
   const std::lock_guard<std::mutex> guard(mutex_);
 
-  for (CapturedAccount &existing : items_) {
-    if (existing.cred.biz == account.cred.biz) {
+  for (Account &existing : items_) {
+    if (existing.biz == account.biz) {
       const std::string kept = existing.nickname;
       existing = account;
-      existing.nickname = kept; // 名字解析过就不必再解析
+      if (existing.nickname.empty()) {
+        existing.nickname = kept; // 名字解析过就不必再解析
+      }
       return false;
     }
   }
@@ -108,20 +127,43 @@ bool CredentialStore::offer(const CapturedAccount &account) {
   return true;
 }
 
-std::vector<CapturedAccount> CredentialStore::snapshot() const {
+void Credentials::set_nickname(const std::string &biz,
+                               const std::string &nickname) {
   const std::lock_guard<std::mutex> guard(mutex_);
-  return items_;
-}
-
-void CredentialStore::set_nickname(const std::string &biz,
-                                   const std::string &nickname) {
-  const std::lock_guard<std::mutex> guard(mutex_);
-  for (CapturedAccount &existing : items_) {
-    if (existing.cred.biz == biz) {
+  for (Account &existing : items_) {
+    if (existing.biz == biz) {
       existing.nickname = nickname;
       return;
     }
   }
+}
+
+bool Credentials::fill(Account &account) const {
+  const std::lock_guard<std::mutex> guard(mutex_);
+
+  const auto found = std::find_if(
+      items_.begin(), items_.end(),
+      [&account](const Account &item) { return item.biz == account.biz; });
+  if (found == items_.end()) {
+    return false;
+  }
+
+  const std::string nickname =
+      account.nickname.empty() ? found->nickname : account.nickname;
+  account = *found;
+  account.nickname = nickname;
+  return true;
+}
+
+void Credentials::save() const {
+  const std::lock_guard<std::mutex> guard(mutex_);
+
+  nlohmann::json root = nlohmann::json::array();
+  for (const Account &account : items_) {
+    root.push_back(account_json(account));
+  }
+  fsu::mkdirs(std::filesystem::path(path_).parent_path().string());
+  fsu::write_atomic(path_, root.dump(2) + "\n", 0600);
 }
 
 } // namespace wxmd

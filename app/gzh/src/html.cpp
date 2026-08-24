@@ -48,6 +48,20 @@ std::string extract_comment_id(const std::string &html) {
 
 } // namespace
 
+std::string status_text(ArticleStatus status) {
+  switch (status) {
+  case ArticleStatus::Success:
+    return "Success";
+  case ArticleStatus::Deleted:
+    return "Deleted";
+  case ArticleStatus::Exception:
+    return "Exception";
+  case ArticleStatus::Error:
+    return "Error";
+  }
+  return "Unknown";
+}
+
 ValidateResult validate_html(const std::string &html) {
   dom::Document doc(html);
 

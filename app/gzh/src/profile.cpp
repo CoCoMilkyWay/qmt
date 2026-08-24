@@ -1,8 +1,7 @@
 #include "wxmd/profile.hpp"
 
 #include <chrono>
-#include <fstream>
-#include <sstream>
+#include <cstdio>
 #include <thread>
 #include <unordered_set>
 
@@ -18,6 +17,18 @@ namespace wxmd {
 namespace {
 
 constexpr const char *kEndpoint = "https://mp.weixin.qq.com/mp/profile_ext";
+
+// 每页条数与翻页间隔。没做成命令行开关：日常用不到，太大容易撞风控，
+// 改了要重编译，正好逼着想清楚再改。
+constexpr int kPageSize = 20;
+constexpr int kIntervalMs = 1000;
+
+// 一页历史消息。翻页逻辑之外没人关心这些字段，所以不出这个文件。
+struct Page {
+  std::vector<Entry> entries;
+  bool can_continue = false;
+  int next_offset = 0;
+};
 
 // 响应体不是 JSON 时（key 失效会返回风控页），截一段原文放进断言消息里。
 std::string head_of(const std::string &text) {
@@ -56,8 +67,23 @@ std::string absolute_link(std::string link) {
   return link;
 }
 
+// 文章身份：mid + idx。这两个值直接就是「第几次群发的第几篇」，跨轮次不变；
+// sn 只是兜底，正常链接不会走到那一支。
+std::string article_id(const std::string &link) {
+  const std::string mid = str::query_param(link, "mid");
+  const std::string idx = str::query_param(link, "idx");
+  if (!mid.empty() && !idx.empty()) {
+    return mid + "_" + idx;
+  }
+
+  const std::string sn = str::query_param(link, "sn");
+  WXMD_ASSERT(!sn.empty(),
+              "链接里既没有 mid+idx 也没有 sn，认不出这是哪篇文章: " + link);
+  return "sn" + sn;
+}
+
 void collect_item(const nlohmann::json &item, int64_t datetime,
-                  std::vector<ProfileEntry> &out) {
+                  std::vector<Entry> &out) {
   const std::string link =
       str::unescape_html(item.value("content_url", std::string()));
 
@@ -66,45 +92,40 @@ void collect_item(const nlohmann::json &item, int64_t datetime,
     return;
   }
 
-  ProfileEntry entry;
-  entry.title = str::unescape_html(item.value("title", std::string()));
-  entry.author = str::unescape_html(item.value("author", std::string()));
-  entry.digest = str::unescape_html(item.value("digest", std::string()));
-  entry.link = absolute_link(link);
+  Entry entry;
+  entry.id = article_id(link);
   entry.datetime = datetime;
-  entry.item_show_type = item.value("item_show_type", 0);
+  entry.title = str::unescape_html(item.value("title", std::string()));
+  entry.link = absolute_link(link);
   out.push_back(std::move(entry));
 }
 
-} // namespace
-
-std::string fetch_profile_raw(const Credential &cred, int offset, int count) {
-  WXMD_ASSERT(!cred.biz.empty(), "凭证缺少 biz");
-  WXMD_ASSERT(!cred.uin.empty(), "凭证缺少 uin");
-  WXMD_ASSERT(!cred.key.empty(), "凭证缺少 key");
-  WXMD_ASSERT(!cred.pass_ticket.empty(), "凭证缺少 pass_ticket");
+std::string request(const Account &account, int offset, int count) {
+  WXMD_ASSERT(!account.biz.empty(), "凭证缺少 biz");
+  WXMD_ASSERT(account.has_credential(),
+              "凭证不全（uin / key / pass_ticket 缺一不可）: " + account.biz);
   WXMD_ASSERT(offset >= 0, "offset 不能为负");
   WXMD_ASSERT(count > 0, "count 必须为正");
 
   const httplib::Params params = {
       {"action", "getmsg"},
-      {"__biz", cred.biz},
+      {"__biz", account.biz},
       {"offset", std::to_string(offset)},
       {"count", std::to_string(count)},
-      {"uin", cred.uin},
-      {"key", cred.key},
-      {"pass_ticket", cred.pass_ticket},
+      {"uin", account.uin},
+      {"key", account.key},
+      {"pass_ticket", account.pass_ticket},
       {"f", "json"},
       {"is_ok", "1"},
       {"scene", "124"},
   };
 
   return fetch_raw(httplib::append_query_params(kEndpoint, params),
-                   cred.cookie);
+                   account.cookie);
 }
 
-ProfilePage fetch_profile_page(const Credential &cred, int offset, int count) {
-  const std::string body = fetch_profile_raw(cred, offset, count);
+Page fetch_page(const Account &account, int offset) {
+  const std::string body = request(account, offset, kPageSize);
   const nlohmann::json root = parse_json(body, "profile_ext 响应");
 
   const int ret = root.value("ret", -1);
@@ -112,10 +133,9 @@ ProfilePage fetch_profile_page(const Credential &cred, int offset, int count) {
                             " errmsg=" + root.value("errmsg", std::string()) +
                             "（key / pass_ticket 多半已过期，需要重新抓包）");
 
-  ProfilePage page;
+  Page page;
   page.can_continue = root.value("can_msg_continue", 0) != 0;
   page.next_offset = root.value("next_offset", 0);
-  page.msg_count = root.value("msg_count", 0);
 
   const std::string list_text = root.value("general_msg_list", std::string());
   WXMD_ASSERT(!list_text.empty(), "响应里没有 general_msg_list");
@@ -145,71 +165,76 @@ ProfilePage fetch_profile_page(const Credential &cred, int offset, int count) {
   return page;
 }
 
-ProfileList fetch_profile_list(const Credential &cred, int offset, int count,
-                               int limit, int interval_ms,
-                               const PageCallback &on_page) {
-  WXMD_ASSERT(interval_ms >= 0, "interval 不能为负");
+} // namespace
 
-  ProfileList result;
-  result.next_offset = offset;
-  int cursor = offset;
+bool probe_credential(const Account &account) {
+  const std::string body = request(account, 0, 1);
+  const nlohmann::json root = nlohmann::json::parse(body, nullptr, false);
+  return !root.is_discarded() && root.value("ret", -1) == 0;
+}
 
-  // 按链接去重：多图文群发里第一篇同时出现在 app_msg_ext_info 和
+std::vector<Entry>
+fetch_new_entries(const Account &account, int64_t since,
+                  const std::function<bool(const std::string &id)> &known) {
+  std::vector<Entry> out;
+
+  // 按文章 id 去重：多图文群发里第一篇同时出现在 app_msg_ext_info 和
   // multi_app_msg_item_list，不去重会把每组首篇数两遍；微信偶尔也会在翻页里
-  // 重复吐同一批文章。去重后计数才是真实的「不同文章数」。
+  // 重复吐同一批文章。
   std::unordered_set<std::string> seen;
 
-  for (bool first = true;; first = false) {
-    if (!first && interval_ms > 0) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
-    }
+  for (int cursor = 0;;) {
+    Page page = fetch_page(account, cursor);
 
-    ProfilePage page = fetch_profile_page(cred, cursor, count);
-    const size_t raw = page.entries.size();
+    bool crossed = false; // 本页出现了早于水位线的文章
+    size_t filtered = 0;  // 被水位线或「已入库」挡掉的篇数
+    size_t fresh = 0;
 
-    std::vector<ProfileEntry> fresh;
-    for (ProfileEntry &entry : page.entries) {
-      if (seen.insert(entry.link).second) {
-        fresh.push_back(std::move(entry));
+    for (Entry &entry : page.entries) {
+      if (since > 0 && entry.datetime < since) {
+        crossed = true;
+        ++filtered;
+        continue;
+      }
+      if (known && known(entry.id)) {
+        ++filtered;
+        continue;
+      }
+      if (seen.insert(entry.id).second) {
+        out.push_back(std::move(entry));
+        ++fresh;
       }
     }
-    page.entries = std::move(fresh);
+    std::fprintf(stderr, "\r  发现 %zu 篇新文章（offset %d）  ", out.size(),
+                 cursor);
 
-    result.entries.insert(result.entries.end(), page.entries.begin(),
-                          page.entries.end());
-    result.next_offset = page.next_offset;
-    result.can_continue = page.can_continue;
-
-    if (on_page) {
-      on_page(page, cursor);
+    // 撞上水位线：倒序意味着后面只会更早，没有再翻的必要。
+    if (crossed) {
+      break;
     }
-
-    // 这页确实吐了文章、但全是见过的 → 微信在原地打转，别陪它死循环。
-    if (raw > 0 && page.entries.empty()) {
-      warn("本页 " + std::to_string(raw) +
+    // 这页确实吐了文章、既没被水位线挡掉、又全是本轮见过的
+    // → 微信在原地打转，别陪它死循环。
+    if (!page.entries.empty() && fresh == 0 && filtered == 0) {
+      warn("本页 " + std::to_string(page.entries.size()) +
            " 篇全是重复文章，判定已到历史末尾，停止翻页。");
       break;
     }
     if (!page.can_continue) {
       break;
     }
-    if (limit > 0 && static_cast<int>(result.entries.size()) >= limit) {
-      break;
-    }
     WXMD_ASSERT(page.next_offset > cursor,
                 "next_offset 没有前进（" + std::to_string(cursor) + " → " +
                     std::to_string(page.next_offset) + "），翻页会死循环");
     cursor = page.next_offset;
+    std::this_thread::sleep_for(std::chrono::milliseconds(kIntervalMs));
   }
 
-  if (limit > 0 && static_cast<int>(result.entries.size()) > limit) {
-    result.entries.resize(limit);
-  }
-  return result;
+  std::fprintf(stderr, "\r%40s\r", "");
+  return out;
 }
 
 std::string fetch_account_name(const std::string &article_url) {
-  const std::string html = fetch_raw(article_url, std::string());
+  const std::string html = fetch_raw(article_url);
 
   // 从 from 起，取第一个引号（单/双）包起来的字符串并做 HTML
   // 反转义；没有返回空。
@@ -266,25 +291,6 @@ std::string fetch_account_name(const std::string &article_url) {
        "微信页面结构可能又变了：" +
        article_url);
   return {};
-}
-
-Credential load_credential(const std::string &path) {
-  std::ifstream input(path, std::ios::binary);
-  WXMD_ASSERT(input.is_open(), "无法打开凭证文件: " + path);
-
-  std::ostringstream buffer;
-  buffer << input.rdbuf();
-
-  const nlohmann::json root = parse_json(buffer.str(), "凭证文件 " + path);
-  WXMD_ASSERT(root.is_object(), "凭证文件应当是一个 JSON 对象: " + path);
-
-  Credential cred;
-  cred.biz = root.value("biz", std::string());
-  cred.uin = root.value("uin", std::string());
-  cred.key = root.value("key", std::string());
-  cred.pass_ticket = root.value("pass_ticket", std::string());
-  cred.cookie = root.value("cookie", std::string());
-  return cred;
 }
 
 } // namespace wxmd

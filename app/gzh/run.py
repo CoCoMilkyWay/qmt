@@ -2,13 +2,14 @@
 """编译并运行 wxmd。
 
 用法:
-    ./run.py                            启动代理，抓凭证后选公众号拉文章列表
+    ./run.py                            增量同步 store/，结束后可选加新公众号
+    ./run.py --add                      直接进抓包环节加号 / 刷新凭证
     ./run.py <文章链接>                 抓取并输出 Markdown
     ./run.py -f samples/xxx.html        解析本地 HTML
     ./run.py --build                    只编译，不运行
     ./run.py --clean                    清空构建目录后重新编译
 
-透传给 wxmd 的参数原样传入，例如 -o out.md / --meta。
+透传给 wxmd 的参数原样传入，例如 --store 目录 / --html。
 """
 
 import argparse

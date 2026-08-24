@@ -5,62 +5,28 @@
 #include <string>
 #include <vector>
 
+#include "wxmd/model.hpp"
+
 namespace wxmd {
 
-// 微信客户端侧凭证：在微信内打开公众号历史消息页时抓包得到。
-// key / pass_ticket 时效很短（分钟级），过期后必须重新抓包，程序无法自行续签。
-struct Credential {
-  std::string biz; // __biz
-  std::string uin;
-  std::string key;
-  std::string pass_ticket;
-  std::string cookie; // 可为空
-};
+// 历史消息列表（mp/profile_ext）是整个流程里唯一需要凭证的一段，也是唯一
+// 「不能中断续跑」的一段——所以这一层只对外提供一个「整趟翻完」的入口。
 
-// 历史消息列表里的一篇文章。
-struct ProfileEntry {
-  std::string title;
-  std::string author;
-  std::string digest;
-  std::string link; // content_url，已做 HTML 反转义，可直接喂给 fetch_article
-  int64_t datetime = 0; // 发布时间，unix 秒
-  int item_show_type = 0;
-};
+// 凭证还能不能用。只探一条，不解析列表。过期在增量流程里是常态而不是 bug
+// （分钟级失效且无法续签），所以这里返回状态而不是断言。
+bool probe_credential(const Account &account);
 
-struct ProfilePage {
-  std::vector<ProfileEntry> entries;
-  bool can_continue = false;
-  int next_offset = 0;
-  int msg_count = 0; // 本页消息条数；一条消息可能含多篇文章
-};
+// 增量发现：从最新一页往回翻，撞上水位线就停（since 为 0 则拉全量）。
+// 历史消息严格按群发时间倒序，所以本页一出现早于 since 的文章就可以收工。
+// 但一次群发的多篇共享同一个发布时间，单看时间会把同批里还没入库的几篇一起
+// 挡掉，所以再用 known 逐条问一句「这篇是不是已经入库了」。
+// 翻页进度直接打在 stderr：全量第一趟可能几十页、每页间隔一秒，不能闷着不响。
+std::vector<Entry>
+fetch_new_entries(const Account &account, int64_t since,
+                  const std::function<bool(const std::string &id)> &known);
 
-struct ProfileList {
-  std::vector<ProfileEntry> entries;
-  int next_offset = 0;       // 断点续传：下次从这里接着拉
-  bool can_continue = false; // 为真说明是被 limit 截断的，还没拉完
-};
-
-// 拉取一页历史消息的原始响应体，不做任何解析。
-// key 失效时微信返回的是风控页而非 JSON，用它可以直接看到原文。
-std::string fetch_profile_raw(const Credential &cred, int offset, int count);
-
-// 拉取并解析一页。
-ProfilePage fetch_profile_page(const Credential &cred, int offset, int count);
-
-// 从 offset 起反复翻页，直到没有更多或取满 limit（limit <= 0 表示不限）。
-// interval_ms 是两次请求之间的间隔，用来避让风控。
-// on_page 每翻完一页调用一次：key 可能在翻页途中过期而中止，
-// 调用方据此把已拿到的部分随时落盘，不至于前功尽弃。
-using PageCallback = std::function<void(const ProfilePage &page, int offset)>;
-ProfileList fetch_profile_list(const Credential &cred, int offset, int count,
-                               int limit, int interval_ms,
-                               const PageCallback &on_page = {});
-
-// 从 JSON 文件读取凭证。字段：biz / uin / key / pass_ticket / cookie(可选)。
-Credential load_credential(const std::string &path);
-
-// 打开一篇文章，从页内的 `var nickname = ...` 取出公众号名称。
-// 名称只是展示用的可选信息：解析不到就返回空串，由调用方回退显示 __biz，
+// 打开一篇文章，从页内的 `var nickname` / `nick_name` 取出公众号名称。
+// 名称只是展示用的可选信息：解析不到就返回空串，由调用方退回显示 __biz，
 // 不因页面结构变动而中断捕获。
 std::string fetch_account_name(const std::string &article_url);
 

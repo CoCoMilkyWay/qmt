@@ -1,31 +1,17 @@
 #include "wxmd/wxmd.hpp"
 
 #include "wxmd/assert.hpp"
+#include "wxmd/cgi.hpp"
+#include "wxmd/html.hpp"
+#include "wxmd/markdown.hpp"
+#include "wxmd/renderer.hpp"
 
 namespace wxmd {
 namespace {
 
-std::string field(const nlohmann::json &obj, const std::string &key) {
-  if (!obj.is_object() || !obj.contains(key) || !obj[key].is_string()) {
-    return {};
-  }
-  return obj[key].get<std::string>();
-}
-
-std::string status_text(ArticleStatus status) {
-  switch (status) {
-  case ArticleStatus::Success:
-    return "Success";
-  case ArticleStatus::Deleted:
-    return "Deleted";
-  case ArticleStatus::Exception:
-    return "Exception";
-  case ArticleStatus::Error:
-    return "Error";
-  }
-  return "Unknown";
-}
-
+// 前三级：抓下来的 html → 状态判定 → cgiDataNew。
+// 不可用的文章（已删除 / 违规 / 风控）在这里带原因终止——同步流程要的是墓碑，
+// 所以它在调用本函数之前就自己 validate_html 过一遍了。
 nlohmann::json load_cgi(const std::string &raw_html) {
   WXMD_ASSERT(!raw_html.empty(), "文章 HTML 为空");
 
@@ -43,21 +29,13 @@ std::string render_article_html(const std::string &raw_html) {
   return render_html(load_cgi(raw_html));
 }
 
-Article parse_article(const std::string &raw_html) {
-  const nlohmann::json cgi = load_cgi(raw_html);
-
-  Article article;
-  article.title = extract_title(cgi);
-  article.author = field(cgi, "author");
-  article.account = field(cgi, "nick_name");
-  article.publish_time = field(cgi, "create_time");
-  article.link = extract_link(cgi);
-  article.markdown = to_markdown(render_html(cgi));
-  return article;
-}
-
-Article fetch_and_parse(const std::string &url) {
-  return parse_article(fetch_article(url));
+std::string render_article_markdown(const std::string &raw_html,
+                                    const AssetHook &on_asset) {
+  std::string html = render_html(load_cgi(raw_html));
+  if (on_asset) {
+    html = localize_images(html, on_asset);
+  }
+  return to_markdown(html);
 }
 
 } // namespace wxmd

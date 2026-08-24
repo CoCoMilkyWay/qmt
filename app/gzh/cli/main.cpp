@@ -1,52 +1,50 @@
-#include <cassert>
-#include <cctype>
-#include <cstdint>
-#include <cstdio>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <sstream>
 #include <string>
-#include <unistd.h>
 #include <vector>
 
 #include <poll.h>
-
-#include <csignal>
+#include <unistd.h>
 
 #include "wxmd/assert.hpp"
 #include "wxmd/capture.hpp"
 #include "wxmd/desktop.hpp"
+#include "wxmd/fetch.hpp"
+#include "wxmd/profile.hpp"
 #include "wxmd/proxy.hpp"
+#include "wxmd/store.hpp"
+#include "wxmd/sync.hpp"
 #include "wxmd/wxmd.hpp"
+
+#include "fsutil.hpp"
+#include "strutil.hpp"
 
 namespace {
 
-// ------------------------------------------------------- 编译期参数（调参用）
-// 这些没有做成命令行开关：日常用不到，改了要重编译，正好逼着想清楚再改。
 // kProxyPort 传 0：监听端口交给内核分配，避开占用与多实例并发冲突；
 // 实际端口在 start() 后用 proxy.port() 取回，再写进系统代理设置。
 constexpr int kProxyPort = 0;
 constexpr const char *kTargetHost = "mp.weixin.qq.com";
+constexpr int kRefreshMs = 1000; // 捕获列表的刷新间隔
 
-constexpr int kPageSize = 20;     // 每页条数，太大容易触发风控
-constexpr int kIntervalMs = 1000; // 两次请求间隔
-constexpr int kArticleLimit = 0;  // 最多取多少篇，0 为不限
-constexpr int kRefreshMs = 1000;  // 捕获列表刷新间隔
+// 默认缓存根目录，相对当前工作目录（run.py always cd 到项目根）。
+constexpr const char *kDefaultStore = "store";
 
 void print_usage() {
   std::cout
       << "用法:\n"
-         "  wxmd                       启动代理，抓凭证后选公众号拉文章列表\n"
+         "  wxmd                       增量同步本地缓存；结束后可选加新公众号\n"
          "  wxmd <文章链接>            抓取单篇并输出 Markdown\n"
-         "  wxmd -f <本地 html>        解析本地 HTML（离线回归）\n"
+         "  wxmd -f <本地 html>        解析本地 HTML（离线）\n"
          "\n"
-         "可选:\n"
-         "  -o <输出文件>              写入文件，默认写到标准输出\n"
-         "  --meta                     附加元信息\n"
+         "同步:\n"
+         "  --store <目录>             缓存根目录，默认 ./store\n"
+         "  --add                      跳过询问，直接进抓包环节加号/刷新凭证\n"
+         "\n"
+         "单篇:\n"
          "  --html                     输出中间态 HTML，不转 Markdown\n"
          "\n"
          "维护:\n"
@@ -54,52 +52,10 @@ void print_usage() {
          "~/.wxmd\n";
 }
 
-std::string read_file(const std::string &path) {
-  std::ifstream input(path, std::ios::binary);
-  WXMD_ASSERT(input.is_open(), "无法打开文件: " + path);
-
-  std::ostringstream buffer;
-  buffer << input.rdbuf();
-  return buffer.str();
-}
-
-void write_file(const std::string &path, const std::string &content) {
-  std::ofstream output(path, std::ios::binary | std::ios::trunc);
-  WXMD_ASSERT(output.is_open(), "无法写入文件: " + path);
-  output << content;
-}
-
-// 输出路径为空时走标准输出，否则落盘并在 stderr 报一行。
-void emit(const std::string &path, const std::string &content) {
-  if (path.empty()) {
-    std::cout << content;
-    return;
-  }
-  write_file(path, content);
-  std::cerr << "已写入: " << path << " (" << content.size() << " 字节)\n";
-}
-
-std::string trim(const std::string &text) {
-  size_t begin = 0;
-  size_t end = text.size();
-  while (begin < end && std::isspace(static_cast<unsigned char>(text[begin]))) {
-    ++begin;
-  }
-  while (end > begin &&
-         std::isspace(static_cast<unsigned char>(text[end - 1]))) {
-    --end;
-  }
-  return text.substr(begin, end - begin);
-}
-
-std::string format_time(int64_t unix_seconds) {
-  const std::time_t raw = static_cast<std::time_t>(unix_seconds);
-  std::tm parts{};
-  localtime_r(&raw, &parts);
-
-  char buffer[32];
-  std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &parts);
-  return buffer;
+std::string wxmd_dir() {
+  const char *home = std::getenv("HOME");
+  WXMD_ASSERT(home != nullptr, "读不到 HOME 环境变量");
+  return std::string(home) + "/.wxmd";
 }
 
 // ------------------------------------------------------------------ 前置检查
@@ -113,7 +69,7 @@ bool confirm(const std::string &question, bool default_yes) {
   if (!std::getline(std::cin, line)) {
     return false;
   }
-  line = trim(line);
+  line = wxmd::str::trim(line);
   if (line.empty()) {
     return default_yes;
   }
@@ -147,8 +103,8 @@ bool ensure_certutil() {
   }
 
   std::cout << "\n";
-  int rc = std::system(command.c_str());
-  assert(rc == 0);
+  const int rc = std::system(command.c_str());
+  WXMD_ASSERT(rc == 0, "安装命令失败: " + command);
 
   if (!wxmd::has_command("certutil")) {
     std::cout << "\n安装后仍找不到 certutil，请手工确认后重跑。\n";
@@ -158,17 +114,7 @@ bool ensure_certutil() {
   return true;
 }
 
-// ---------------------------------------------------------------- 交互模式
-void print_setup_guide(const wxmd::MitmProxy &proxy) {
-  std::cout << "\n就绪。在微信里打开目标公众号的任意一篇文章即可。\n";
-  if (wxmd::process_running("wechat")) {
-    std::cout << "（抓不到就重启一次微信：它只在启动时读代理和证书）\n";
-  }
-  std::cout << "回车选最新捕获，输入序号选其它，q 退出。\n"
-            << "----\n";
-  (void)proxy;
-}
-
+// ------------------------------------------------------------ 系统代理的还原
 // 接管系统代理后，任何退出路径都必须把它还回去，否则整台机器的流量就断在
 // 我们的死端口上。restore_now 是唯一的还原入口：正常收尾、信号、断言 abort
 // 都汇到这里；靠 g_restore_armed 保证幂等，重复调用是安全的。
@@ -188,8 +134,8 @@ void restore_now() {
 // 断言失败走的是 abort()→SIGABRT，段错误是 SIGSEGV，关终端是 SIGHUP——
 // 本项目「尽早失败」下断言遍地，光挂 SIGINT/SIGTERM 兜不住。这里把这些致命
 // 信号全接住：先喊清楚是哪个信号（别再靠猜），还原环境，再恢复默认处理并重抛，
-// 保留正确的退出码与
-// core。（即便还原因状态损坏没跑成，下次启动的无条件自愈也兜底。）
+// 保留正确的退出码与 core。（即便还原因状态损坏没跑成，下次启动的无条件自愈
+// 也兜底。）
 extern "C" void on_signal(int sig) {
   // 信号处理器里只能用 async-signal-safe 调用，故用裸 write 直接喊。
   const char *note = nullptr;
@@ -230,47 +176,61 @@ void arm_restore_signals() {
   }
 }
 
-void print_accounts(const std::vector<wxmd::CapturedAccount> &accounts) {
+// -------------------------------------------------------------- 抓包收凭证
+// 一趟收多个号是刻意的：凭证按号绑定，但 25 分钟的窗口是共享的——在微信里连
+// 点几下，之后所有号的增量都在同一个窗口里做完，不必反复接管系统代理。
+
+// 这一趟新抓到的号。按捕获时刻筛：表里那些上次留下的、还没过期的凭证不算，
+// 它们在这次启动时就已经同步过一轮了。
+std::vector<wxmd::Account> captured_since(const wxmd::Credentials &creds,
+                                          int64_t since_ms) {
+  std::vector<wxmd::Account> out;
+  for (wxmd::Account &account : creds.snapshot()) {
+    if (account.captured_ms >= since_ms) {
+      out.push_back(std::move(account));
+    }
+  }
+  return out;
+}
+
+void print_accounts(const std::vector<wxmd::Account> &accounts) {
   if (accounts.empty()) {
     std::cout << "[等待捕获] 还没抓到凭证\r" << std::flush;
     return;
   }
 
-  const int64_t now = wxmd::now_ms();
   std::cout << "\n已捕获 " << accounts.size() << " 个公众号:\n";
   for (size_t i = 0; i < accounts.size(); ++i) {
-    const wxmd::CapturedAccount &item = accounts[i];
-    const int left = item.remaining_seconds(now);
-    std::cout << "  [" << (i + 1) << "] "
-              << (item.nickname.empty() ? item.cred.biz : item.nickname)
-              << "  剩余 " << (left / 60) << "分" << (left % 60) << "秒"
+    const int left = accounts[i].credential_seconds();
+    std::cout << "  [" << (i + 1) << "] " << accounts[i].label() << "  剩余 "
+              << (left / 60) << "分" << (left % 60) << "秒"
               << (left == 0 ? "  (已过期，重新打开一篇文章)" : "") << "\n";
   }
   std::cout << "> " << std::flush;
 }
 
 // 名字要联网解析，放在主循环里做，别拖住代理线程。
-void resolve_pending_names(wxmd::CredentialStore &store,
-                           const std::vector<wxmd::CapturedAccount> &accounts) {
-  for (const wxmd::CapturedAccount &item : accounts) {
-    if (!item.nickname.empty()) {
+void resolve_names(wxmd::Credentials &creds,
+                   const std::vector<wxmd::Account> &accounts) {
+  for (const wxmd::Account &account : accounts) {
+    if (!account.nickname.empty()) {
       continue;
     }
     // 名字写在文章页的 var nickname 里；历史消息页没有这个字段，跳过。
-    if (item.url.find("/s?") == std::string::npos &&
-        item.url.find("/s/") == std::string::npos) {
-      wxmd::warn("公众号 " + item.cred.biz + " 的凭证来自非文章页（" +
-                 item.url +
+    if (account.source_url.find("/s?") == std::string::npos &&
+        account.source_url.find("/s/") == std::string::npos) {
+      wxmd::warn("公众号 " + account.biz + " 的凭证来自非文章页（" +
+                 account.source_url +
                  "），页内没有名字，列表只能先显示 __biz；"
                  "在微信里打开该号任意一篇文章即可解析出名字。");
       continue;
     }
-    const std::string name = wxmd::fetch_account_name(item.url);
+    const std::string name = wxmd::fetch_account_name(account.source_url);
     if (name.empty()) {
-      wxmd::warn("从文章页解析公众号名字失败（" + item.url +
-                 "），列表暂显示 __biz " + item.cred.biz);
+      wxmd::warn("从文章页解析公众号名字失败（" + account.source_url +
+                 "），列表暂显示 __biz " + account.biz);
     }
-    store.set_nickname(item.cred.biz, name);
+    creds.set_nickname(account.biz, name);
   }
 }
 
@@ -293,15 +253,16 @@ bool read_line_timeout(std::string &line, int timeout_ms) {
   return true;
 }
 
-// 返回选中的凭证；用户主动退出则返回 false。
-bool select_account(wxmd::CredentialStore &store, wxmd::CapturedAccount &out) {
+// 边刷列表边等回车；用户放弃则返回空。
+std::vector<wxmd::Account> select_accounts(wxmd::Credentials &creds,
+                                           int64_t since_ms) {
   size_t known = 0;
 
   for (;;) {
-    std::vector<wxmd::CapturedAccount> accounts = store.snapshot();
+    std::vector<wxmd::Account> accounts = captured_since(creds, since_ms);
     if (accounts.size() != known) {
-      resolve_pending_names(store, accounts);
-      accounts = store.snapshot();
+      resolve_names(creds, accounts);
+      accounts = captured_since(creds, since_ms);
       known = accounts.size();
       print_accounts(accounts);
     }
@@ -311,60 +272,54 @@ bool select_account(wxmd::CredentialStore &store, wxmd::CapturedAccount &out) {
       continue;
     }
 
-    line = trim(line);
+    line = wxmd::str::trim(line);
     if (line == "q") {
-      return false;
+      return {};
     }
     if (accounts.empty()) {
       std::cout << "还没抓到凭证，先在微信里打开一篇文章\n> " << std::flush;
       continue;
     }
 
-    const size_t choice =
-        line.empty()
-            ? accounts.size()
-            : static_cast<size_t>(std::strtoul(line.c_str(), nullptr, 10));
-    if (choice < 1 || choice > accounts.size()) {
-      std::cout << "序号超出范围\n> " << std::flush;
-      continue;
+    std::vector<wxmd::Account> valid;
+    for (wxmd::Account &account : accounts) {
+      if (account.credential_seconds() > 0) {
+        valid.push_back(std::move(account));
+        continue;
+      }
+      wxmd::warn("凭证已过期，跳过: " + account.label());
     }
-
-    out = accounts[choice - 1];
-    WXMD_ASSERT(out.valid_at(wxmd::now_ms()),
-                "该凭证已过期，请在微信里重新打开一篇文章");
-    return true;
+    WXMD_ASSERT(!valid.empty(),
+                "捕获到的凭证全部已过期，请在微信里重新打开文章");
+    return valid;
   }
 }
 
-int run_interactive(const std::string &output_path, bool with_meta) {
-  const char *home = std::getenv("HOME");
-  WXMD_ASSERT(home != nullptr, "读不到 HOME 环境变量，无法决定 CA 存放位置");
-
+// 起代理收一轮凭证，收完立刻把系统代理还回去。收下的凭证一并进 creds。
+// 之后的翻页与抓正文都是我们自己直连，不再需要接管环境。
+std::vector<wxmd::Account> capture_session(wxmd::Credentials &creds) {
   WXMD_ASSERT(wxmd::has_command("gsettings"),
               "找不到 gsettings，本工具靠它临时接管系统代理；"
               "非 GNOME 桌面暂不支持");
   if (!ensure_certutil()) {
-    return 1;
+    return {};
   }
 
-  const std::string base = std::string(home) + "/.wxmd";
+  const std::string base = wxmd_dir();
   const std::string backup = base + "/proxy-backup.json";
 
-  // 上次异常退出留下的代理残留，已在 main()
-  // 入口无条件自愈过，这里直接读当前值。
-  // 原有的系统代理成为我们的上游，用户其它流量的走向保持不变。
+  // 上次异常退出留下的代理残留，已在 main() 入口无条件自愈过，这里直接读当前
+  // 值。原有的系统代理成为我们的上游，用户其它流量的走向保持不变。
   const wxmd::SystemProxy saved = wxmd::read_system_proxy();
   const bool chain = saved.mode == "manual" && !saved.https.host.empty();
 
-  wxmd::CredentialStore store;
   wxmd::MitmProxy proxy(kProxyPort, {kTargetHost}, base,
                         chain ? saved.https.host : std::string(),
                         chain ? saved.https.port : 0);
-
-  proxy.set_handler([&store](const wxmd::Exchange &exchange) {
-    wxmd::CapturedAccount account;
+  proxy.set_handler([&creds](const wxmd::Exchange &exchange) {
+    wxmd::Account account;
     if (wxmd::parse_exchange(exchange, account)) {
-      store.offer(account);
+      creds.offer(account);
     }
   });
   proxy.start();
@@ -377,78 +332,69 @@ int run_interactive(const std::string &output_path, bool with_meta) {
   g_restore_armed = 1;
   std::atexit(restore_now); // 任何 return/exit 路径的兜底还原。
   arm_restore_signals();
+
+  const int64_t session_start = wxmd::now_ms();
   wxmd::take_over_system_proxy(proxy.port());
 
-  print_setup_guide(proxy);
+  std::cout
+      << "\n就绪。在微信里打开想同步的公众号的任意一篇文章即可。\n"
+         "想同步几个号就逐个点开，凭证会一起收下（每个号 25 分钟有效）。\n";
+  if (wxmd::process_running("wechat")) {
+    std::cout << "（抓不到就重启一次微信：它只在启动时读代理和证书）\n";
+  }
+  std::cout << "回车收下已捕获的全部，q 放弃。\n"
+            << "----\n";
 
-  wxmd::CapturedAccount chosen;
-  const bool picked = select_account(store, chosen);
-
-  if (picked) {
-    std::cerr << "\n已选择，正在断开代理…\n";
+  std::vector<wxmd::Account> picked = select_accounts(creds, session_start);
+  if (!picked.empty()) {
+    std::cerr << "\n已收下 " << picked.size() << " 个号的凭证，正在断开代理…\n";
   }
 
-  // 抓完就把系统代理还回去：后面拉列表是我们自己直连，不再需要接管。
   restore_now();
   proxy.stop();
+  return picked;
+}
 
-  if (!picked) {
+// ------------------------------------------------------------------ 两种模式
+
+// 主 flow：先维护已有的号，再问要不要加新的。
+int run_sync(const std::string &root, bool force_add) {
+  wxmd::Credentials creds(wxmd_dir() + "/credentials.json");
+
+  std::vector<wxmd::Account> known = wxmd::list_accounts(root);
+  std::cout << "缓存目录: " << root << "（已有 " << known.size()
+            << " 个公众号）\n";
+  for (wxmd::Account &account : known) {
+    creds.fill(account);
+    wxmd::sync_account(root, account);
+  }
+
+  if (!force_add) {
+    std::cout << "\n";
+    if (!confirm("要起代理加新公众号 / 刷新失效的凭证吗?", known.empty())) {
+      return 0;
+    }
+  }
+
+  const std::vector<wxmd::Account> fresh = capture_session(creds);
+  if (fresh.empty()) {
     return 0;
   }
+  // 新凭证覆盖同号的旧凭证，其余保留：同一个 25 分钟窗口内重跑还能用。
+  creds.save();
 
-  const std::string name =
-      chosen.nickname.empty() ? chosen.cred.biz : chosen.nickname;
-  std::cout << "\n开始拉取: " << name << "\n";
-
-  std::string out;
-  size_t total = 0;
-  const auto on_page = [&](const wxmd::ProfilePage &page, int offset) {
-    for (const wxmd::ProfileEntry &entry : page.entries) {
-      if (with_meta) {
-        out += format_time(entry.datetime) + "\t" + entry.title + "\t";
-      }
-      out += entry.link + "\n";
-    }
-    total += page.entries.size();
-    std::cerr << "\r已抓取 " << total << " 篇（offset " << offset << "）      "
-              << std::flush;
-    // 每页落盘：key 可能中途过期触发断言，已拿到的部分不至于丢。
-    if (!output_path.empty() && !out.empty()) {
-      write_file(output_path, out);
-    }
-  };
-
-  const wxmd::ProfileList list = wxmd::fetch_profile_list(
-      chosen.cred, 0, kPageSize, kArticleLimit, kIntervalMs, on_page);
-  std::cerr << "\n"; // 收尾：让刷新行定格，后续输出另起一行。
-
-  // 屏幕上给人看的是发布时间 + 文章标题；链接是给后台用的，只写文件、不刷屏。
-  for (size_t i = 0; i < list.entries.size(); ++i) {
-    const wxmd::ProfileEntry &entry = list.entries[i];
-    const std::string when =
-        entry.datetime > 0 ? format_time(entry.datetime) : "??";
-    std::cout << "  " << (i + 1) << ". [" << when << "] "
-              << (entry.title.empty() ? "(无标题)" : entry.title) << "\n";
-  }
-  std::cerr << "共 " << list.entries.size() << " 篇";
-  if (output_path.empty()) {
-    std::cerr << "（链接未保存，需要就加 -o 文件名）\n";
-  } else {
-    std::cerr << "，链接已写入 " << output_path << "\n";
+  for (const wxmd::Account &account : fresh) {
+    wxmd::sync_account(root, account);
   }
   return 0;
 }
 
 // 一键卸载：还原可能残留的系统代理，摘掉 NSS 里的 CA 信任，删掉 ~/.wxmd。
-// 走完之后机器回到用本工具之前的干净状态。
+// 走完之后机器回到用本工具之前的干净状态（不动 store/）。
 int run_uninstall() {
-  const char *home = std::getenv("HOME");
-  WXMD_ASSERT(home != nullptr, "读不到 HOME 环境变量");
+  const std::string base = wxmd_dir();
 
-  const std::string base = std::string(home) + "/.wxmd";
-  const std::string backup = base + "/proxy-backup.json";
-
-  if (wxmd::restore_proxy_backup(backup)) {
+  if (wxmd::restore_proxy_backup(base + "/proxy-backup.json")) {
     std::cout << "已还原残留的系统代理设置。\n";
   }
   wxmd::uninstall_ca_from_nssdb();
@@ -456,19 +402,17 @@ int run_uninstall() {
 
   std::error_code ec;
   std::filesystem::remove_all(base, ec);
-  std::cout << "已删除 " << base << "（CA 证书 / 私钥 / 备份）。清理完成。\n";
+  std::cout << "已删除 " << base << "（CA 证书 / 私钥 / 凭证 / 备份）。\n";
   return 0;
 }
 
 } // namespace
 
 int main(int argc, char **argv) {
-  // 忽略 SIGPIPE：往对端已关闭的 socket
-  // 写会触发它，默认动作是静默杀掉整个进程。 我们的明文转发用了
-  // MSG_NOSIGNAL，但 OpenSSL 的 SSL_write 底层 write 不带它，
-  // 微信随时会掐断连接、stop() 也会主动
-  // shutdown，必须全局忽略，让写操作只是返回
-  // 错误由各自的循环处理，而不是把进程带走。
+  // 忽略 SIGPIPE：往对端已关闭的 socket 写会触发它，默认动作是静默杀掉整个
+  // 进程。我们的明文转发用了 MSG_NOSIGNAL，但 OpenSSL 的 SSL_write 底层 write
+  // 不带它，微信随时会掐断连接、stop() 也会主动 shutdown，必须全局忽略，让写
+  // 操作只是返回错误由各自的循环处理，而不是把进程带走。
   std::signal(SIGPIPE, SIG_IGN);
 
   // 无论这次跑哪种模式：上次若被强杀/崩溃，系统代理可能还指着我们的死端口。
@@ -483,9 +427,9 @@ int main(int argc, char **argv) {
 
   std::string source;
   bool from_file = false;
-  bool with_meta = false;
   bool html_only = false;
-  std::string output_path;
+  bool force_add = false;
+  std::string store_root = kDefaultStore;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -503,13 +447,13 @@ int main(int argc, char **argv) {
       source = argv[++i];
       continue;
     }
-    if (arg == "-o") {
-      WXMD_ASSERT(i + 1 < argc, "-o 后缺少输出路径");
-      output_path = argv[++i];
+    if (arg == "--store") {
+      WXMD_ASSERT(i + 1 < argc, "--store 后缺少目录");
+      store_root = argv[++i];
       continue;
     }
-    if (arg == "--meta") {
-      with_meta = true;
+    if (arg == "--add") {
+      force_add = true;
       continue;
     }
     if (arg == "--html") {
@@ -520,30 +464,20 @@ int main(int argc, char **argv) {
   }
 
   if (source.empty()) {
-    return run_interactive(output_path, with_meta);
+    // 同步模式的产物就是缓存目录本身，--html 在这里没有落点。
+    if (html_only) {
+      wxmd::warn("--html 只对单篇有效，同步模式下已忽略");
+    }
+    return run_sync(store_root, force_add);
   }
 
-  const std::string raw_html =
-      from_file ? read_file(source) : wxmd::fetch_article(source);
+  // 单篇：不入缓存，Markdown 直接打到标准输出（要落盘就重定向）。
+  const std::string raw =
+      from_file ? wxmd::fsu::read_file(source) : wxmd::fetch_raw(source);
+  WXMD_ASSERT(!raw.empty(), "读不到内容: " + source);
 
-  if (html_only) {
-    emit(output_path, wxmd::render_article_html(raw_html));
-    return 0;
-  }
-
-  const wxmd::Article article = wxmd::parse_article(raw_html);
-
-  std::string out;
-  if (with_meta) {
-    out += "# " + article.title + "\n\n";
-    out += "- 公众号: " + article.account + "\n";
-    out += "- 作者: " + article.author + "\n";
-    out += "- 发布时间: " + article.publish_time + "\n";
-    out += "- 原文: " + article.link + "\n\n---\n\n";
-  }
-  out += article.markdown;
-  out += "\n";
-
-  emit(output_path, out);
+  std::cout << (html_only ? wxmd::render_article_html(raw)
+                          : wxmd::render_article_markdown(raw))
+            << "\n";
   return 0;
 }

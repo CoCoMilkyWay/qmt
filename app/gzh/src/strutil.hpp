@@ -132,6 +132,30 @@ inline std::string percent_decode(const std::string &text) {
   return out;
 }
 
+// 取 URL query 里某个参数的值（已百分号解码），没有返回空串。
+inline std::string query_param(const std::string &url,
+                               const std::string &name) {
+  const size_t query_begin = url.find('?');
+  if (query_begin == std::string::npos) {
+    return {};
+  }
+
+  const std::string needle = name + "=";
+  size_t pos = query_begin + 1;
+  while (pos < url.size()) {
+    size_t end = url.find_first_of("&#", pos);
+    if (end == std::string::npos) {
+      end = url.size();
+    }
+    if (url.compare(pos, needle.size(), needle) == 0) {
+      return percent_decode(
+          url.substr(pos + needle.size(), end - pos - needle.size()));
+    }
+    pos = end + 1;
+  }
+  return {};
+}
+
 // 历史消息接口返回的 title / content_url 等字段仍带 HTML 实体，
 // 链接必须还原成 & 才能直接请求。
 inline std::string unescape_html(const std::string &text) {

@@ -55,6 +55,9 @@ add_library(wxmd STATIC
     src/proxy.cpp
     src/capture.cpp
     src/desktop.cpp
+    src/assets.cpp
+    src/store.cpp
+    src/sync.cpp
     src/wxmd.cpp)
 
 target_include_directories(wxmd PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -63,6 +66,8 @@ target_link_libraries(wxmd
     PRIVATE lexbor_static qjs Threads::Threads)
 
 # ----------------------------------------------------------------------- cli
+# CLI 也用 src/ 下那两个内部头（trim / read_file），不必再抄一遍。
 add_executable(wxmd_cli cli/main.cpp)
+target_include_directories(wxmd_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(wxmd_cli PRIVATE wxmd)
 set_target_properties(wxmd_cli PROPERTIES OUTPUT_NAME wxmd)

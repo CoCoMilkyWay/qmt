@@ -82,31 +82,31 @@ std::string render_pay_subscribe(const nlohmann::json &cgi) {
 
 // 图片分享正文里的「图N」锚点缺少 href，补上以便跳转到对应图片。
 std::string link_image_refs(const std::string &html) {
-    static const std::regex pattern(
-        R"RX((<a class="wx_img_refer_link" data-seq="(\d+)" data-refer="图\2" style="[^"]*">)(\s*图\2\s*)(</a>))RX");
+  static const std::regex pattern(
+      R"RX((<a class="wx_img_refer_link" data-seq="(\d+)" data-refer="图\2" style="[^"]*">)(\s*图\2\s*)(</a>))RX");
 
-    std::string out;
-    auto begin = std::sregex_iterator(html.begin(), html.end(), pattern);
-    auto end = std::sregex_iterator();
+  std::string out;
+  auto begin = std::sregex_iterator(html.begin(), html.end(), pattern);
+  auto end = std::sregex_iterator();
 
-    size_t last = 0;
-    for (auto it = begin; it != end; ++it) {
-      const std::smatch &match = *it;
-      out.append(html, last, static_cast<size_t>(match.position()) - last);
+  size_t last = 0;
+  for (auto it = begin; it != end; ++it) {
+    const std::smatch &match = *it;
+    out.append(html, last, static_cast<size_t>(match.position()) - last);
 
-      std::string open_tag = match[1].str();
-      const std::string seq = match[2].str();
-      WXMD_ASSERT(!open_tag.empty() && open_tag.back() == '>',
-                  "图片锚点开标签格式异常");
-      open_tag.pop_back();
-      open_tag += " href=\"#图" + seq + "\">";
+    std::string open_tag = match[1].str();
+    const std::string seq = match[2].str();
+    WXMD_ASSERT(!open_tag.empty() && open_tag.back() == '>',
+                "图片锚点开标签格式异常");
+    open_tag.pop_back();
+    open_tag += " href=\"#图" + seq + "\">";
 
-      out += open_tag + match[3].str() + match[4].str();
-      last = static_cast<size_t>(match.position()) +
-             static_cast<size_t>(match.length());
-    }
-    out.append(html, last, std::string::npos);
-    return out;
+    out += open_tag + match[3].str() + match[4].str();
+    last = static_cast<size_t>(match.position()) +
+           static_cast<size_t>(match.length());
+  }
+  out.append(html, last, std::string::npos);
+  return out;
 }
 
 // 图片分享(8)
@@ -226,8 +226,7 @@ std::string render_content(const nlohmann::json &cgi) {
   }
 }
 
-} // namespace
-
+// 标题：图文与图片分享直接用 title，文本分享没有标题就从正文截一段。
 std::string extract_title(const nlohmann::json &cgi) {
   const int show_type = int_field(cgi, "item_show_type");
 
@@ -270,9 +269,12 @@ std::string extract_title(const nlohmann::json &cgi) {
   WXMD_ASSERT(false, "未知的 item_show_type: " + std::to_string(show_type));
 }
 
+// cgi 里的 link 带 &amp; 实体，还原为 &。
 std::string extract_link(const nlohmann::json &cgi) {
   return str::replaced(field(cgi, "link"), "&amp;", "&");
 }
+
+} // namespace
 
 std::string render_html(const nlohmann::json &cgi) {
   WXMD_ASSERT(cgi.is_object(), "cgiDataNew 不是对象");
