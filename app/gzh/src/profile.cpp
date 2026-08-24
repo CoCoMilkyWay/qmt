@@ -170,7 +170,12 @@ Page fetch_page(const Account &account, int offset) {
 bool probe_credential(const Account &account) {
   const std::string body = request(account, 0, 1);
   const nlohmann::json root = nlohmann::json::parse(body, nullptr, false);
-  return !root.is_discarded() && root.value("ret", -1) == 0;
+  const bool ok = !root.is_discarded() && root.value("ret", -1) == 0;
+  if (!ok) {
+    // 失败时把响应原文喊出来：ret/errmsg 或风控页都看得见，否则没法 debug。
+    warn("probe_credential 被拒，profile_ext 响应开头：" + head_of(body));
+  }
+  return ok;
 }
 
 std::vector<Entry>
