@@ -28,6 +28,7 @@
 #include "wxmd/assert.hpp"
 #include "wxmd/tlsca.hpp"
 
+#include "fsutil.hpp"
 #include "strutil.hpp"
 
 namespace wxmd {
@@ -321,6 +322,36 @@ void splice_both_ways(int left, int right) {
   }
 }
 
+// 把一次往返的请求/响应原文落盘。dump_dir 非空时由 run_mitm 调用。
+// 文件名 = 毫秒时间戳_序号.http，序号用原子计数器保证多线程不撞。
+void write_dump(const std::string &dump_dir, const std::string &req,
+                const std::string &resp) {
+  if (dump_dir.empty() || (req.empty() && resp.empty())) {
+    return;
+  }
+  static std::atomic<long long> counter{0};
+  const long long seq = counter.fetch_add(1);
+  const auto now = std::chrono::system_clock::now();
+  const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           now.time_since_epoch())
+                           .count();
+
+  std::string dir = dump_dir;
+  if (dir.empty() || dir.back() != '/') {
+    dir += '/';
+  }
+  fsu::mkdirs(dir);
+  const std::string path =
+      dir + std::to_string(ms) + "_" + std::to_string(seq) + ".http";
+
+  std::ofstream out(path, std::ios::binary);
+  if (!out.is_open()) {
+    warn("dump 写不进去: " + path);
+    return;
+  }
+  out << "==== REQUEST ====\r\n" << req << "\r\n==== RESPONSE ====\r\n" << resp;
+}
+
 // ---------------------------------------------------------------------- TLS
 int alpn_select(SSL *, const unsigned char **out, unsigned char *out_length,
                 const unsigned char *in, unsigned int in_length, void *) {
@@ -385,6 +416,7 @@ struct MitmProxy::Impl {
   int parent_port = 0;
   CertAuthority ca;
   std::function<void(const Exchange &)> handler;
+  std::string dump_dir; // 非空则对所有域名 MITM 并落盘每次往返
 
   int listen_fd = -1;
   std::atomic<bool> running{false};
@@ -445,9 +477,13 @@ void MitmProxy::Impl::run_mitm(int client_fd, const std::string &host,
     SslStream downstream(client_ssl);
     SslStream upstream(server_ssl);
 
+    std::string req_dump;
+    std::string resp_dump;
     std::string headers;
     std::string overflow;
     if (read_headers(downstream, headers, overflow)) {
+      req_dump = headers;
+      req_dump += overflow;
       const std::string url = "https://" + host + request_path(headers);
 
       if (write_all(upstream, force_connection_close(headers)) &&
@@ -470,12 +506,15 @@ void MitmProxy::Impl::run_mitm(int client_fd, const std::string &host,
               !write_all(upstream, buffer, static_cast<size_t>(count))) {
             break;
           }
+          req_dump.append(buffer, static_cast<size_t>(count));
           remaining -= count;
         }
 
         std::string response;
         std::string response_overflow;
         if (read_headers(upstream, response, response_overflow)) {
+          resp_dump = response;
+          resp_dump += response_overflow;
           if (handler) {
             Exchange exchange;
             exchange.url = url;
@@ -493,11 +532,13 @@ void MitmProxy::Impl::run_mitm(int client_fd, const std::string &host,
                   !write_all(downstream, buffer, static_cast<size_t>(count))) {
                 break;
               }
+              resp_dump.append(buffer, static_cast<size_t>(count));
             }
           }
         }
       }
     }
+    write_dump(dump_dir, req_dump, resp_dump);
   }
 
   SSL_shutdown(server_ssl);
@@ -558,7 +599,7 @@ void MitmProxy::Impl::serve(int client_fd) {
     return;
   }
 
-  if (mitm_hosts.count(host) > 0) {
+  if (!dump_dir.empty() || mitm_hosts.count(host) > 0) {
     run_mitm(client_fd, host, port);
   } else {
     const int upstream_fd = open_upstream(parent_host, parent_port, host, port);
@@ -584,6 +625,10 @@ MitmProxy::~MitmProxy() { stop(); }
 
 void MitmProxy::set_handler(std::function<void(const Exchange &)> handler) {
   impl_->handler = std::move(handler);
+}
+
+void MitmProxy::set_dump_dir(const std::string &dump_dir) {
+  impl_->dump_dir = dump_dir;
 }
 
 const std::string &MitmProxy::ca_cert_path() const {

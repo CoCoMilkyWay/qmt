@@ -35,6 +35,11 @@ public:
   // 必须在 start 之前设置。handler 在连接线程上被调用，实现需自行保证线程安全。
   void set_handler(std::function<void(const Exchange &)> handler);
 
+  // 必须在 start 之前设置。dump_dir 非空时：对所有域名都做中间人（不再只限
+  // mitm_hosts），并把每次往返的请求头/请求体/响应头/响应体落盘到该目录，
+  // 一个文件一次往返。用于抓包分析微信客户端实际调用的接口。
+  void set_dump_dir(const std::string &dump_dir);
+
   void start();
   void stop();
 

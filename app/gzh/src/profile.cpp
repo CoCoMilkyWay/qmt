@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <random>
 #include <thread>
 #include <unordered_set>
 
@@ -19,9 +20,17 @@ namespace {
 constexpr const char *kEndpoint = "https://mp.weixin.qq.com/mp/profile_ext";
 
 // 每页条数与翻页间隔。没做成命令行开关：日常用不到，太大容易撞风控，
-// 改了要重编译，正好逼着想清楚再改。
+// 改了要重编译，正好逼着想清楚再改。2s 是实测能稳定过风控的翻页间隔。
 constexpr int kPageSize = 20;
-constexpr int kIntervalMs = 1000;
+constexpr int kIntervalMs = 2000;
+
+// profile_ext 的风控抖动：ret=-6 "unknown error" 是临时限流，不是凭证失效
+// （凭证失效会返回风控 HTML 页，非法 JSON，由上层断言兜住）。实测约一半概率
+// 命中，且退避快慢跟命中率无明显关系，所以不做指数退避，固定区间随机等待、
+// 不设重试上限：凭证本身有效就一直等得到，等不到说明凭证真过期了，
+// 会在别处（风控 HTML / errmsg）体现出来，不会在这里死循环卡死。
+constexpr int kRiskControlRetryMinMs = 1000;
+constexpr int kRiskControlRetryMaxMs = 3000;
 
 // 一页历史消息。翻页逻辑之外没人关心这些字段，所以不出这个文件。
 struct Page {
@@ -120,8 +129,24 @@ std::string request(const Account &account, int offset, int count) {
       {"scene", "124"},
   };
 
-  return fetch_raw(httplib::append_query_params(kEndpoint, params),
-                   account.cookie);
+  const std::string url = httplib::append_query_params(kEndpoint, params);
+
+  std::mt19937 rng(std::random_device{}());
+  std::uniform_int_distribution<int> jitter(kRiskControlRetryMinMs,
+                                            kRiskControlRetryMaxMs);
+
+  for (;;) {
+    const std::string body = fetch_raw(url, account.cookie);
+
+    // 仅对可解析且 ret=-6 的响应重试：这是风控抖动而非凭证问题。
+    // 非 JSON（风控页 / key 失效）或其它 ret 直接交回上层断言，不在这里吞掉。
+    const nlohmann::json parsed = nlohmann::json::parse(body, nullptr, false);
+    if (parsed.is_discarded() || parsed.value("ret", -1) != -6) {
+      return body;
+    }
+    warn("profile_ext 撞到风控 (ret=-6)，等一等重试");
+    std::this_thread::sleep_for(std::chrono::milliseconds(jitter(rng)));
+  }
 }
 
 Page fetch_page(const Account &account, int offset) {

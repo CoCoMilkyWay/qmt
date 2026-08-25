@@ -30,6 +30,10 @@ constexpr int kProxyPort = 0;
 constexpr const char *kTargetHost = "mp.weixin.qq.com";
 constexpr int kRefreshMs = 1000; // 捕获列表的刷新间隔
 
+// dump 开关：非空则对所有域名 MITM 并把每次往返落盘到该目录。
+// 改了要重编译——全量 MITM 风险大，正好逼着想清楚再开。
+constexpr const char *kDumpDir = ""; // 例: "/home/chuyin/.wxmd/dumps"
+
 // 默认缓存根目录，相对当前工作目录（run.py always cd 到项目根）。
 constexpr const char *kDefaultStore = "store";
 
@@ -322,6 +326,13 @@ std::vector<wxmd::Account> capture_session(wxmd::Credentials &creds) {
       creds.offer(account);
     }
   });
+
+  if (kDumpDir[0] != '\0') {
+    proxy.set_dump_dir(kDumpDir);
+    std::cerr << "[wxmd] dump 已开启，落盘到 " << kDumpDir
+              << "（对所有域名 MITM）\n";
+  }
+
   proxy.start();
 
   wxmd::install_ca_to_nssdb(proxy.ca_cert_path());
