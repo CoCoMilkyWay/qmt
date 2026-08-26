@@ -1,4 +1,5 @@
 store/
+cookies/
 .cache/
 tmp/
 __pycache__/
