@@ -6,15 +6,16 @@
 
 namespace wxmd {
 
-// 五级流水线的门面：原始 HTML 进，Markdown 出。标题、作者、公众号、发布时间与
-// 原文链接由第 4 级（renderer）直接渲进正文，不再另开一套结构对外重复一遍。
-
-// 规范化 HTML → Markdown。on_asset 非空时，正文图片的 src 先被换成它返回的本地
-// 相对路径（图片字节由钩子自己取走），Markdown 里的图片链接随之指向本地文件。
-std::string render_article_markdown(const std::string &raw_html,
-                                    const AssetHook &on_asset = {});
-
-// 只做到「规范化 HTML」这一步，不转 Markdown：调试渲染层用。
-std::string render_article_html(const std::string &raw_html);
+// 五级流水线的后三级：cgiDataNew 脚本进，Markdown 出（求值 → 渲染 → 转换）。
+// 前两级是 html.hpp 的 parse_article（解析 + 判状态 + 抠脚本），它必须先跑：
+// 不可用的文章要的是墓碑而不是正文。
+//
+// 标题、作者、公众号、发布时间与原文链接由渲染那一级直接渲进正文，不另开一套
+// 结构对外重复一遍。
+//
+// 正文图片的 src 先被 on_asset 换成它返回的本地相对路径（图片字节由钩子自己
+// 取走），Markdown 里的图片链接随之指向本地文件。
+std::string render_article_markdown(const std::string &cgi_script,
+                                    const AssetHook &on_asset);
 
 } // namespace wxmd

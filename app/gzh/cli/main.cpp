@@ -3,6 +3,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -12,14 +13,13 @@
 #include "wxmd/assert.hpp"
 #include "wxmd/capture.hpp"
 #include "wxmd/desktop.hpp"
-#include "wxmd/fetch.hpp"
+#include "wxmd/egress.hpp"
 #include "wxmd/profile.hpp"
 #include "wxmd/proxy.hpp"
 #include "wxmd/store.hpp"
 #include "wxmd/sync.hpp"
-#include "wxmd/wxmd.hpp"
 
-#include "fsutil.hpp"
+#include "config.hpp"
 #include "strutil.hpp"
 
 namespace {
@@ -27,32 +27,16 @@ namespace {
 // kProxyPort 传 0：监听端口交给内核分配，避开占用与多实例并发冲突；
 // 实际端口在 start() 后用 proxy.port() 取回，再写进系统代理设置。
 constexpr int kProxyPort = 0;
-constexpr const char *kTargetHost = "mp.weixin.qq.com";
 constexpr int kRefreshMs = 1000; // 捕获列表的刷新间隔
 
-// dump 开关：非空则对所有域名 MITM 并把每次往返落盘到该目录。
-// 改了要重编译——全量 MITM 风险大，正好逼着想清楚再开。
-constexpr const char *kDumpDir = ""; // 例: "/home/chuyin/.wxmd/dumps"
-
-// 默认缓存根目录，相对当前工作目录（run.py always cd 到项目根）。
-constexpr const char *kDefaultStore = "store";
-
+// 只有一条主路：增量同步。以前那些单篇 / 离线解析 / 只出 HTML 的独立入口都被
+// 这条路覆盖了，留着只是多几种自己会腐烂的用法。
 void print_usage() {
   std::cout
       << "用法:\n"
-         "  wxmd                       增量同步本地缓存；结束后可选加新公众号\n"
-         "  wxmd <文章链接>            抓取单篇并输出 Markdown\n"
-         "  wxmd -f <本地 html>        解析本地 HTML（离线）\n"
-         "\n"
-         "同步:\n"
-         "  --store <目录>             缓存根目录，默认 ./store\n"
-         "  --add                      跳过询问，直接进抓包环节加号/刷新凭证\n"
-         "\n"
-         "单篇:\n"
-         "  --html                     输出中间态 HTML，不转 Markdown\n"
-         "\n"
-         "维护:\n"
-         "  --uninstall                还原系统代理并移除本工具的 CA 与 "
+         "  wxmd                       增量同步 ./store：先补齐已有号的正文，\n"
+         "                             再问要不要起代理加新号 / 刷新凭证\n"
+         "  wxmd --uninstall           还原系统代理并移除本工具的 CA 与 "
          "~/.wxmd\n";
 }
 
@@ -64,7 +48,6 @@ std::string wxmd_dir() {
 
 // ------------------------------------------------------------------ 前置检查
 // 目标：换一台机器、换一个用户，只跟这个终端交互就能把流程走顺。
-// 每一步都先说清楚要做什么、为什么，再等确认。
 
 bool confirm(const std::string &question, bool default_yes) {
   std::cout << question << (default_yes ? " [Y/n] " : " [y/N] ") << std::flush;
@@ -135,11 +118,9 @@ void restore_now() {
   wxmd::clear_proxy_backup(g_backup_path);
 }
 
-// 断言失败走的是 abort()→SIGABRT，段错误是 SIGSEGV，关终端是 SIGHUP——
-// 本项目「尽早失败」下断言遍地，光挂 SIGINT/SIGTERM 兜不住。这里把这些致命
-// 信号全接住：先喊清楚是哪个信号（别再靠猜），还原环境，再恢复默认处理并重抛，
-// 保留正确的退出码与 core。（即便还原因状态损坏没跑成，下次启动的无条件自愈
-// 也兜底。）
+// 断言失败走 abort()→SIGABRT，段错误是 SIGSEGV，关终端是 SIGHUP——本项目
+// 「尽早失败」下断言遍地，光挂 SIGINT/SIGTERM 兜不住。这里把致命信号全接住：
+// 喊清是哪个信号、还原环境，再恢复默认处理并重抛，保留正确退出码与 core。
 extern "C" void on_signal(int sig) {
   // 信号处理器里只能用 async-signal-safe 调用，故用裸 write 直接喊。
   const char *note = nullptr;
@@ -317,19 +298,20 @@ std::vector<wxmd::Account> capture_session(wxmd::Credentials &creds) {
   const wxmd::SystemProxy saved = wxmd::read_system_proxy();
   const bool chain = saved.mode == "manual" && !saved.https.host.empty();
 
-  wxmd::MitmProxy proxy(kProxyPort, {kTargetHost}, base,
+  wxmd::MitmProxy proxy(kProxyPort, {wxmd::config::kTargetHost}, base,
                         chain ? saved.https.host : std::string(),
                         chain ? saved.https.port : 0);
   proxy.set_handler([&creds](const wxmd::Exchange &exchange) {
-    wxmd::Account account;
-    if (wxmd::parse_exchange(exchange, account)) {
-      creds.offer(account);
+    if (const std::optional<wxmd::Account> account =
+            wxmd::parse_exchange(exchange)) {
+      creds.offer(*account);
     }
   });
 
-  if (kDumpDir[0] != '\0') {
-    proxy.set_dump_dir(kDumpDir);
-    std::cerr << "[wxmd] dump 已开启，落盘到 " << kDumpDir
+  if (wxmd::config::kDump) {
+    const std::string dir = "store/dump";
+    proxy.set_dump_dir(dir);
+    std::cerr << "[wxmd] dump 已开启，落盘到 " << dir
               << "（对所有域名 MITM）\n";
   }
 
@@ -362,6 +344,9 @@ std::vector<wxmd::Account> capture_session(wxmd::Credentials &creds) {
   }
 
   restore_now();
+  // 先落盘再停代理：proxy.stop() 偶尔会卡在 inflight 不归零，若被 Ctrl-C 打断，
+  // 凭证至少已经写进 credentials.json，不会白抓一趟。
+  creds.save();
   proxy.stop();
   return picked;
 }
@@ -369,7 +354,7 @@ std::vector<wxmd::Account> capture_session(wxmd::Credentials &creds) {
 // ------------------------------------------------------------------ 两种模式
 
 // 主 flow：先维护已有的号，再问要不要加新的。
-int run_sync(const std::string &root, bool force_add) {
+void run_sync(const std::string &root) {
   wxmd::Credentials creds(wxmd_dir() + "/credentials.json");
 
   std::vector<wxmd::Account> known = wxmd::list_accounts(root);
@@ -380,29 +365,17 @@ int run_sync(const std::string &root, bool force_add) {
     wxmd::sync_account(root, account);
   }
 
-  if (!force_add) {
-    std::cout << "\n";
-    if (!confirm("要起代理加新公众号 / 刷新失效的凭证吗?", known.empty())) {
-      return 0;
-    }
-  }
+  std::cout << "\n";
 
-  const std::vector<wxmd::Account> fresh = capture_session(creds);
-  if (fresh.empty()) {
-    return 0;
-  }
-  // 新凭证覆盖同号的旧凭证，其余保留：同一个 25 分钟窗口内重跑还能用。
-  creds.save();
-
-  for (const wxmd::Account &account : fresh) {
+  // 收下的凭证已经在 capture_session 里落盘了（那一步必须发生在停代理之前）。
+  for (const wxmd::Account &account : capture_session(creds)) {
     wxmd::sync_account(root, account);
   }
-  return 0;
 }
 
 // 一键卸载：还原可能残留的系统代理，摘掉 NSS 里的 CA 信任，删掉 ~/.wxmd。
 // 走完之后机器回到用本工具之前的干净状态（不动 store/）。
-int run_uninstall() {
+void run_uninstall() {
   const std::string base = wxmd_dir();
 
   if (wxmd::restore_proxy_backup(base + "/proxy-backup.json")) {
@@ -414,7 +387,6 @@ int run_uninstall() {
   std::error_code ec;
   std::filesystem::remove_all(base, ec);
   std::cout << "已删除 " << base << "（CA 证书 / 私钥 / 凭证 / 备份）。\n";
-  return 0;
 }
 
 } // namespace
@@ -429,18 +401,9 @@ int main(int argc, char **argv) {
   // 无论这次跑哪种模式：上次若被强杀/崩溃，系统代理可能还指着我们的死端口。
   // 先无条件自愈——没有残留备份时这步只是打开一个不存在的文件后立即返回，
   // 代价可忽略，却保证了「不管上次怎么挂的，这次一开机就是干净环境」。
-  if (const char *home = std::getenv("HOME")) {
-    const std::string backup = std::string(home) + "/.wxmd/proxy-backup.json";
-    if (wxmd::restore_proxy_backup(backup)) {
-      std::cerr << "检测到上次异常退出，已自动还原系统代理。\n";
-    }
+  if (wxmd::restore_proxy_backup(wxmd_dir() + "/proxy-backup.json")) {
+    std::cerr << "检测到上次异常退出，已自动还原系统代理。\n";
   }
-
-  std::string source;
-  bool from_file = false;
-  bool html_only = false;
-  bool force_add = false;
-  std::string store_root = kDefaultStore;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -450,45 +413,23 @@ int main(int argc, char **argv) {
       return 0;
     }
     if (arg == "--uninstall") {
-      return run_uninstall();
+      run_uninstall();
+      return 0;
     }
-    if (arg == "-f") {
-      WXMD_ASSERT(i + 1 < argc, "-f 后缺少文件路径");
-      from_file = true;
-      source = argv[++i];
-      continue;
-    }
-    if (arg == "--store") {
-      WXMD_ASSERT(i + 1 < argc, "--store 后缺少目录");
-      store_root = argv[++i];
-      continue;
-    }
-    if (arg == "--add") {
-      force_add = true;
-      continue;
-    }
-    if (arg == "--html") {
-      html_only = true;
-      continue;
-    }
-    source = arg;
+    WXMD_ASSERT(false, "认不出的参数: " + arg + "（-h 看用法）");
   }
 
-  if (source.empty()) {
-    // 同步模式的产物就是缓存目录本身，--html 在这里没有落点。
-    if (html_only) {
-      wxmd::warn("--html 只对单篇有效，同步模式下已忽略");
-    }
-    return run_sync(store_root, force_add);
+  // 走隧道还是直连由 config::kUseTunnel 在编译期定死，开局打印一声让人有数。
+  const wxmd::EgressPolicy &policy = wxmd::egress();
+  std::cerr << "出网: ";
+  if (policy.tunneled()) {
+    std::cerr << "隧道 " << policy.host << ":" << policy.port;
+  } else {
+    std::cerr << "直连";
   }
+  std::cerr << "（" << policy.qps << " 次/s，" << policy.workers
+            << " 并发抓取）\n";
 
-  // 单篇：不入缓存，Markdown 直接打到标准输出（要落盘就重定向）。
-  const std::string raw =
-      from_file ? wxmd::fsu::read_file(source) : wxmd::fetch_raw(source);
-  WXMD_ASSERT(!raw.empty(), "读不到内容: " + source);
-
-  std::cout << (html_only ? wxmd::render_article_html(raw)
-                          : wxmd::render_article_markdown(raw))
-            << "\n";
+  run_sync(wxmd::config::kStoreDir);
   return 0;
 }

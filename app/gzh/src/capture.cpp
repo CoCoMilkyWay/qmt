@@ -53,7 +53,7 @@ Account parse_account(const nlohmann::json &item) {
 
 } // namespace
 
-bool parse_exchange(const Exchange &exchange, Account &out) {
+std::optional<Account> parse_exchange(const Exchange &exchange) {
   Account account;
   account.biz = str::query_param(exchange.url, "__biz");
   account.uin = str::query_param(exchange.url, "uin");
@@ -62,7 +62,7 @@ bool parse_exchange(const Exchange &exchange, Account &out) {
 
   // 微信自己的页内跳转经常不带 key，这类请求没有凭证价值。
   if (account.biz.empty() || !account.has_credential()) {
-    return false;
+    return std::nullopt;
   }
 
   // 请求里的 Cookie 比这一次响应的 Set-Cookie 更稳：会话 cookie 早就种下了，
@@ -83,8 +83,7 @@ bool parse_exchange(const Exchange &exchange, Account &out) {
 
   account.source_url = exchange.url;
   account.captured_ms = now_ms();
-  out = std::move(account);
-  return true;
+  return account;
 }
 
 Credentials::Credentials(std::string path) : path_(std::move(path)) {
@@ -110,7 +109,7 @@ std::vector<Account> Credentials::snapshot() const {
   return items_;
 }
 
-bool Credentials::offer(const Account &account) {
+void Credentials::offer(const Account &account) {
   const std::lock_guard<std::mutex> guard(mutex_);
 
   for (Account &existing : items_) {
@@ -120,11 +119,10 @@ bool Credentials::offer(const Account &account) {
       if (existing.nickname.empty()) {
         existing.nickname = kept; // 名字解析过就不必再解析
       }
-      return false;
+      return;
     }
   }
   items_.push_back(account);
-  return true;
 }
 
 void Credentials::set_nickname(const std::string &biz,
@@ -138,21 +136,20 @@ void Credentials::set_nickname(const std::string &biz,
   }
 }
 
-bool Credentials::fill(Account &account) const {
+void Credentials::fill(Account &account) const {
   const std::lock_guard<std::mutex> guard(mutex_);
 
   const auto found = std::find_if(
       items_.begin(), items_.end(),
       [&account](const Account &item) { return item.biz == account.biz; });
   if (found == items_.end()) {
-    return false;
+    return;
   }
 
   const std::string nickname =
       account.nickname.empty() ? found->nickname : account.nickname;
   account = *found;
   account.nickname = nickname;
-  return true;
 }
 
 void Credentials::save() const {

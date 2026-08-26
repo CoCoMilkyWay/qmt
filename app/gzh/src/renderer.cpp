@@ -222,7 +222,14 @@ std::string render_content(const nlohmann::json &cgi) {
   case kShowTypeNormal:
     return render_content_normal(cgi);
   default:
-    WXMD_ASSERT(false, "未知的 item_show_type: " + std::to_string(show_type));
+    // 未知类型降级为占位：微信会新增消息类型（如 item_show_type=5），
+    // 断言会把整条流水线卡死在某一篇，降级成占位让同步继续，标题与
+    // 原文链接仍由外层渲染进正文，至少能定位是哪篇。
+    warn("未知的 item_show_type: " + std::to_string(show_type) +
+         "，降级为占位");
+    return "<section class=\"item_show_type_" + std::to_string(show_type) +
+           "\"><p>（未支持的消息类型 item_show_type=" +
+           std::to_string(show_type) + "，见原文链接）</p></section>";
   }
 }
 
@@ -266,7 +273,8 @@ std::string extract_title(const nlohmann::json &cgi) {
     return title.empty() ? "(无标题)" : title;
   }
 
-  WXMD_ASSERT(false, "未知的 item_show_type: " + std::to_string(show_type));
+  // 未知类型：退回 title 字段，拿不到就空，由外层兜底。
+  return field(cgi, "title");
 }
 
 // cgi 里的 link 带 &amp; 实体，还原为 &。

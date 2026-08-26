@@ -11,19 +11,19 @@ enum class ArticleStatus {
   Error,     // 页面结构无法识别
 };
 
-struct ValidateResult {
+// 抓下来的一页文章。判状态与抠脚本是同一次解析的两个产物：正文 HTML 实测
+// 3.05MB，分成两个入口就要用 lexbor 解析两遍。
+struct ArticlePage {
   ArticleStatus status = ArticleStatus::Error;
-  std::string message; // Success 时为 comment_id，Exception 时为异常原因
+  std::string message;    // Exception 时的原因，其余状态为空
+  std::string cgi_script; // 定义 window.cgiDataNew 的脚本正文，仅 Success 时有
 };
 
 // 状态的名字，进断言消息与缓存索引。
 std::string status_text(ArticleStatus status);
 
-// 校验文章 html 是否抓取成功，并提取 comment_id。
-ValidateResult validate_html(const std::string &html);
-
-// 提取包含 `window.cgiDataNew` 的 script 脚本正文（不含 script 标签）。
-// 找不到时断言失败。
-std::string extract_cgi_script(const std::string &html);
+// 解析文章页：判定状态，Success 时顺带取出 cgiDataNew 脚本（取不到即页面结构
+// 变了，当场断言）。
+ArticlePage parse_article(const std::string &html);
 
 } // namespace wxmd

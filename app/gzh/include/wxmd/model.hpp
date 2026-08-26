@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <string>
 
 namespace wxmd {
@@ -16,6 +17,18 @@ inline int64_t now_ms() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
+}
+
+// 本地时区的 strftime。Entry.datetime 是 unix 秒，进目录名（"%Y-%m-%d"）和进度
+// 行（带时分秒）各要一种格式，格式串由调用方给。
+inline std::string format_time(int64_t unix_seconds, const char *format) {
+  const std::time_t raw = static_cast<std::time_t>(unix_seconds);
+  std::tm parts{};
+  localtime_r(&raw, &parts);
+
+  char buffer[32];
+  std::strftime(buffer, sizeof(buffer), format, &parts);
+  return buffer;
 }
 
 // 一个公众号：身份是 __biz，nickname 只用于展示，后半截是抓包得来的凭证。

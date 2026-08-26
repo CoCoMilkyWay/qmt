@@ -9,26 +9,31 @@
 #include <httplib.h>
 
 #include "wxmd/assert.hpp"
+#include "wxmd/egress.hpp"
 
+#include "config.hpp"
 #include "strutil.hpp"
 
 namespace wxmd {
 namespace {
 
-constexpr const char *kUserAgent =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) "
-    "Chrome/107.0.0.0 Safari/537.36 MicroMessenger/6.8.0(0x16080000) "
-    "NetType/WIFI "
-    "MiniProgramEnv/Mac MacWechat/WECHAT/WeChatBrowser XWEB/1191";
-
 constexpr int kTimeoutSeconds = 30;
 
-// 连接级失败（没拿到 HTTP 响应）的重试。微信图片 CDN 偶发抖动/限流，
-// 直接断言会把整轮 sync 拖死在一张图上，不值得。拿到响应之后的状态码
-// 仍是真实信号，不重试——404 就是图没了，重试也没用。
-constexpr int kMaxAttempts = 4;
-constexpr int kRetryBaseMs = 1000;
+// 重试按出网方式分两套，因为「重试」对两者含义不同：
+//   直连 —— 只在没拿到响应时重试（连接被拒/超时）；拿到响应后状态码是真实信号，
+//           404 再来也没用。指数退避。
+//   隧道 —— 每请求换出口 IP，重试就是换 IP 再来，连状态码一起重试：出口里混着
+//           被拉黑的（403）和隧道抖动的（517/超时），换几次就过。固定短间隔，
+//           403 是那个 IP 的问题，等久也不会变好。
+// 连接超时对隧道压到 5s：挂住的出口要么秒回 517/200、要么彻底不通，5s 足以区分
+// 「慢出口」与「死出口」；读超时仍 30s，大图慢慢传正常。
+struct Retry {
+  int attempts;
+  int backoff_ms; // 直连按指数增长，隧道固定
+};
+constexpr Retry kDirectRetry{4, 1000};
+constexpr Retry kTunnelRetry{5, 300};
+constexpr int kTunnelConnectSeconds = 5;
 
 struct SplitUrl {
   std::string origin; // scheme://host[:port]
@@ -64,13 +69,19 @@ struct Response {
   std::string content_type; // 定扩展名要用：微信 CDN 的 URL 未必带后缀
 };
 
-Response get(const std::string &url, const std::string &cookie) {
+// 重试耗尽仍拿不到 200 → 静默返回空。喊不喊由调用方决定：凭证/翻页那一路 fatal
+// （见 profile.cpp 的 assert，消息自带 URL），正文与图片失败都由 fetch_article
+// 用标题喊一行（整篇作空洞，下轮重来）。
+std::optional<Response> get(const std::string &url, const std::string &cookie,
+                            Route route) {
   const SplitUrl parts = split_url(url);
 
+  // 不设 Accept-Encoding：httplib 只在请求没带这个头时才自己填 gzip 并自动
+  // 解压，手写 identity 等于把压缩关掉。正文 HTML 占每篇下载字节的 86%，
+  // gzip 省 78%。
   httplib::Headers headers = {
-      {"User-Agent", kUserAgent},
-      {"Referer", "https://mp.weixin.qq.com/"},
-      {"Accept-Encoding", "identity"},
+      {"User-Agent", config::kUserAgent},
+      {"Referer", std::string("https://") + config::kTargetHost + "/"},
   };
   if (!cookie.empty()) {
     headers.emplace("Cookie", cookie);
@@ -82,25 +93,36 @@ Response get(const std::string &url, const std::string &cookie) {
   client.set_read_timeout(kTimeoutSeconds, 0);
   client.set_default_headers(headers);
 
+  const EgressPolicy &policy = egress();
+  const bool tunneled = route == Route::Tunneled && policy.tunneled();
+  const Retry retry = tunneled ? kTunnelRetry : kDirectRetry;
+  if (tunneled) {
+    client.set_proxy(policy.host, policy.port);
+    client.set_proxy_basic_auth(policy.user, policy.pass);
+    // 每请求新连接才能换出口 IP；复用连接会让重定向留在同一个 IP 上。
+    client.set_keep_alive(false);
+    client.set_connection_timeout(kTunnelConnectSeconds, 0);
+  }
+
   httplib::Result response;
   for (int attempt = 1;; ++attempt) {
+    throttle();
     response = client.Get(parts.target);
-    if (static_cast<bool>(response) || attempt >= kMaxAttempts) {
+
+    // 隧道重试连状态码一起算（下一次是另一个 IP）；直连只在没拿到响应时重试。
+    const bool ok =
+        static_cast<bool>(response) && (!tunneled || response->status == 200);
+    if (ok || attempt >= retry.attempts) {
       break;
     }
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(kRetryBaseMs << (attempt - 1)));
+    const int backoff =
+        tunneled ? retry.backoff_ms : retry.backoff_ms << (attempt - 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(backoff));
   }
-  WXMD_ASSERT(static_cast<bool>(response),
-              "请求失败 (重试 " + std::to_string(kMaxAttempts) +
-                  " 次后仍连不上): " + httplib::to_string(response.error()) +
-                  " (" + url + ")");
-  WXMD_ASSERT(response->status == 200,
-              "HTTP 状态异常: " + std::to_string(response->status) + " (" +
-                  url + ")");
-  WXMD_ASSERT(!response->body.empty(), "响应内容为空: " + url);
-
-  return {response->body, response->get_header_value("Content-Type")};
+  if (!response || response->status != 200 || response->body.empty()) {
+    return std::nullopt;
+  }
+  return Response{response->body, response->get_header_value("Content-Type")};
 }
 
 // 图片扩展名：先认 Content-Type，再退回 URL 上的 wx_fmt，两处都认不出就当场
@@ -141,13 +163,25 @@ std::string extension_of(const std::string &content_type,
 
 } // namespace
 
-std::string fetch_raw(const std::string &url, const std::string &cookie) {
-  WXMD_ASSERT(host_of(url) == "mp.weixin.qq.com",
-              "只支持 mp.weixin.qq.com 的链接: " + url);
-  return get(url, cookie).body;
+std::optional<std::string> fetch_raw(const std::string &url,
+                                     const std::string &cookie, Route route) {
+  WXMD_ASSERT(host_of(url) == config::kTargetHost,
+              std::string("只支持 ") + config::kTargetHost + " 的链接: " + url);
+  // 统一升 https：微信下发的 content_url 常是 http://，已落盘的
+  // pending.jsonl 里也存着旧的 http 链接。走隧道时 http→https 的 301
+  // 响应体不稳定，会卡到超时。
+  std::string safe = url;
+  if (safe.rfind("http://", 0) == 0) {
+    safe.replace(0, 4, "https");
+  }
+  auto response = get(safe, cookie, route);
+  if (!response) {
+    return std::nullopt;
+  }
+  return std::move(response->body);
 }
 
-AssetFile fetch_asset(const std::string &url, size_t seq) {
+std::optional<AssetFile> fetch_asset(const std::string &url, size_t seq) {
   // 正文里偶有协议相对地址（//mmbiz.qpic.cn/…），补齐后再走后面的检查。
   const std::string full = url.rfind("//", 0) == 0 ? "https:" + url : url;
 
@@ -166,12 +200,15 @@ AssetFile fetch_asset(const std::string &url, size_t seq) {
   }
   WXMD_ASSERT(allowed, "图片域名不在腾讯 CDN 范围内: " + full);
 
-  const Response response = get(full, "");
+  auto response = get(full, "", Route::Tunneled);
+  if (!response) {
+    return std::nullopt;
+  }
 
+  const std::string ext = extension_of(response->content_type, full);
   char name[32];
-  std::snprintf(name, sizeof(name), "%03zu.%s", seq,
-                extension_of(response.content_type, full).c_str());
-  return {name, response.body};
+  std::snprintf(name, sizeof(name), "%03zu.%s", seq, ext.c_str());
+  return AssetFile{name, std::move(response->body)};
 }
 
 } // namespace wxmd

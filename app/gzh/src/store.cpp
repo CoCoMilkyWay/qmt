@@ -1,7 +1,6 @@
 #include "wxmd/store.hpp"
 
 #include <algorithm>
-#include <ctime>
 #include <filesystem>
 #include <sstream>
 #include <string_view>
@@ -59,21 +58,11 @@ std::string truncate_utf8(const std::string &text, size_t budget) {
   return text.substr(0, end);
 }
 
-std::string date_prefix(int64_t datetime) {
-  const std::time_t raw = static_cast<std::time_t>(datetime);
-  std::tm parts{};
-  localtime_r(&raw, &parts);
-
-  char buffer[16];
-  std::strftime(buffer, sizeof(buffer), "%Y-%m-%d", &parts);
-  return buffer;
-}
-
 // 目录名 = 日期 + 标题 + 文章 id。日期让目录天然按时间排序，标题让人能直接
 // 翻，id 保证唯一（标题会重复，微信也允许改标题）。
 std::string article_dir_name(const Entry &entry) {
   const std::string title = truncate_utf8(sanitize(entry.title), kTitleBudget);
-  std::string name = date_prefix(entry.datetime);
+  std::string name = format_time(entry.datetime, "%Y-%m-%d");
   if (!title.empty()) {
     name += "_" + title;
   }
@@ -198,18 +187,27 @@ AccountStore::AccountStore(const std::string &root, const Account &account)
 }
 
 void AccountStore::set_pending(std::vector<Entry> entries) {
-  entries.erase(
-      std::remove_if(entries.begin(), entries.end(),
-                     [this](const Entry &entry) { return has(entry.id); }),
-      entries.end());
+  // 把新发现的并入既有队列：上一轮 drain 可能因单篇抓取失败留下空洞，那些篇
+  // 仍在 pending_ 里，这里只追加、去重、剔除已入库，再按发布时间排序。
+  pending_.insert(pending_.end(), std::make_move_iterator(entries.begin()),
+                  std::make_move_iterator(entries.end()));
 
-  // 从早到晚入库，水位线才能单调前进；一旦中断，本地始终是「到某个时间点为止
-  // 连续完整」的状态，下次接着往后走就行。
+  pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
+                                [this](const Entry &e) { return has(e.id); }),
+                 pending_.end());
+
+  // 同一篇可能既在空洞里、又被这轮重新发现，按 id 去重。
+  std::unordered_set<std::string> seen;
+  pending_.erase(std::remove_if(pending_.begin(), pending_.end(),
+                                [&seen](const Entry &e) {
+                                  return !seen.insert(e.id).second;
+                                }),
+                 pending_.end());
+
   std::stable_sort(
-      entries.begin(), entries.end(),
+      pending_.begin(), pending_.end(),
       [](const Entry &a, const Entry &b) { return a.datetime < b.datetime; });
 
-  pending_ = std::move(entries);
   flush_pending();
 }
 
@@ -217,10 +215,6 @@ void AccountStore::commit(Entry entry, const std::string &markdown,
                           const std::vector<AssetFile> &assets) {
   WXMD_ASSERT(!has(entry.id), "这篇已经入库了: " + entry.id);
   WXMD_ASSERT(!entry.status.empty(), "入库的文章必须带 status: " + entry.id);
-  WXMD_ASSERT(entry.datetime >= watermark(),
-              "入库顺序必须从早到晚（这篇 " + std::to_string(entry.datetime) +
-                  " 早于水位线 " + std::to_string(watermark()) +
-                  "）: " + entry.id);
 
   if (!markdown.empty()) {
     const std::string staging = path_ + "/" + kStagingDir;

@@ -40,6 +40,13 @@ find_package(OpenSSL REQUIRED)
 target_compile_definitions(wxmd_headers INTERFACE CPPHTTPLIB_OPENSSL_SUPPORT)
 target_link_libraries(wxmd_headers INTERFACE OpenSSL::SSL OpenSSL::Crypto)
 
+# gzip：实测一篇正文 HTML 有 3.05MB，压完 0.68MB（省 78%），而它占了每篇下载
+# 字节的 86% —— 图片本身已压缩，压不动。所以这一个开关就是三倍吞吐，值得多一个
+# 系统依赖。定义了这个宏之后 httplib 自己发 Accept-Encoding 并自动解压。
+find_package(ZLIB REQUIRED)
+target_compile_definitions(wxmd_headers INTERFACE CPPHTTPLIB_ZLIB_SUPPORT)
+target_link_libraries(wxmd_headers INTERFACE ZLIB::ZLIB)
+
 find_package(Threads REQUIRED)
 
 # ---------------------------------------------------------------------- wxmd
@@ -49,6 +56,7 @@ add_library(wxmd STATIC
     src/cgi.cpp
     src/renderer.cpp
     src/markdown.cpp
+    src/egress.cpp
     src/fetch.cpp
     src/profile.cpp
     src/tlsca.cpp
@@ -66,7 +74,7 @@ target_link_libraries(wxmd
     PRIVATE lexbor_static qjs Threads::Threads)
 
 # ----------------------------------------------------------------------- cli
-# CLI 也用 src/ 下那两个内部头（trim / read_file），不必再抄一遍。
+# CLI 也用 src/ 下的内部头（config 的参数、strutil 的 trim），不必再抄一遍。
 add_executable(wxmd_cli cli/main.cpp)
 target_include_directories(wxmd_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(wxmd_cli PRIVATE wxmd)

@@ -12,23 +12,19 @@
 #include "wxmd/assert.hpp"
 #include "wxmd/fetch.hpp"
 
+#include "config.hpp"
 #include "strutil.hpp"
 
 namespace wxmd {
 namespace {
 
-constexpr const char *kEndpoint = "https://mp.weixin.qq.com/mp/profile_ext";
-
-// 每页条数与翻页间隔。没做成命令行开关：日常用不到，太大容易撞风控，
-// 改了要重编译，正好逼着想清楚再改。2s 是实测能稳定过风控的翻页间隔。
-constexpr int kPageSize = 20;
-constexpr int kIntervalMs = 2000;
+const std::string kEndpoint =
+    std::string("https://") + config::kTargetHost + "/mp/profile_ext";
 
 // profile_ext 的风控抖动：ret=-6 "unknown error" 是临时限流，不是凭证失效
-// （凭证失效会返回风控 HTML 页，非法 JSON，由上层断言兜住）。实测约一半概率
-// 命中，且退避快慢跟命中率无明显关系，所以不做指数退避，固定区间随机等待、
-// 不设重试上限：凭证本身有效就一直等得到，等不到说明凭证真过期了，
-// 会在别处（风控 HTML / errmsg）体现出来，不会在这里死循环卡死。
+// （凭证失效会返回风控 HTML 页，非法 JSON，由上层断言兜住）。约一半概率命中，
+// 退避快慢与命中率无关，故固定区间随机等待、不设重试上限：凭证有效就一直等得到，
+// 等不到会在别处（风控 HTML / errmsg）体现，不会在这里死循环。
 constexpr int kRiskControlRetryMinMs = 1000;
 constexpr int kRiskControlRetryMaxMs = 3000;
 
@@ -39,17 +35,18 @@ struct Page {
   int next_offset = 0;
 };
 
-// 响应体不是 JSON 时（key 失效会返回风控页），截一段原文放进断言消息里。
+// profile_ext 的一次响应。json 与 body 一起带回来：判 ret 只要 json，但
+// 「响应根本不是 JSON」（凭证失效会返回风控 HTML 页）时得把原文喊出来才好查，
+// 而这件事在 probe 是返回值、在翻页是断言，两处都不该再解析一遍。
+struct Reply {
+  nlohmann::json json; // is_discarded() 即「不是 JSON」
+  std::string body;
+};
+
+// 响应体不是 JSON 时（key 失效会返回风控页），截一段原文放进消息里。
 std::string head_of(const std::string &text) {
   constexpr size_t kMax = 300;
   return text.size() <= kMax ? text : text.substr(0, kMax) + " …";
-}
-
-nlohmann::json parse_json(const std::string &body, const std::string &what) {
-  nlohmann::json parsed = nlohmann::json::parse(body, nullptr, false);
-  WXMD_ASSERT(!parsed.is_discarded(),
-              what + " 不是合法 JSON，原文开头：" + head_of(body));
-  return parsed;
 }
 
 // general_msg_list 本身是一段 JSON 字符串。上游 TS 把它标注成数组，但那处调用
@@ -65,13 +62,14 @@ const nlohmann::json &msg_list_of(const nlohmann::json &parsed) {
   return parsed["list"];
 }
 
-// 部分 content_url 是以 / 开头的站内路径，补全成绝对链接。
+// 部分 content_url 是以 / 开头的站内路径，补全成绝对链接。http→https 的升级
+// 不在这里做：fetch_raw 入口已经对所有链接统一兜底，这里再判一次是重复。
 std::string absolute_link(std::string link) {
   if (link.rfind("//", 0) == 0) {
     return "https:" + link;
   }
   if (link.rfind('/', 0) == 0) {
-    return "https://mp.weixin.qq.com" + link;
+    return std::string("https://") + config::kTargetHost + link;
   }
   return link;
 }
@@ -109,7 +107,7 @@ void collect_item(const nlohmann::json &item, int64_t datetime,
   out.push_back(std::move(entry));
 }
 
-std::string request(const Account &account, int offset, int count) {
+Reply request(const Account &account, int offset, int count) {
   WXMD_ASSERT(!account.biz.empty(), "凭证缺少 biz");
   WXMD_ASSERT(account.has_credential(),
               "凭证不全（uin / key / pass_ticket 缺一不可）: " + account.biz);
@@ -136,13 +134,18 @@ std::string request(const Account &account, int offset, int count) {
                                             kRiskControlRetryMaxMs);
 
   for (;;) {
-    const std::string body = fetch_raw(url, account.cookie);
+    // 固定走直连：key / pass_ticket 是微信客户端在本机这个 IP 上拿到的，
+    // 同一个 key 从一堆轮换出口 IP 发翻页请求比固定 IP 更像异常。这一路本来
+    // 也串行、量小（每页 20 篇、间隔 2s），换 IP 换不出任何吞吐。
+    auto body_opt = fetch_raw(url, account.cookie, Route::Direct);
+    WXMD_ASSERT(body_opt, "翻页请求失败（重试耗尽仍连不上）: " + url);
+    std::string body = *std::move(body_opt);
 
     // 仅对可解析且 ret=-6 的响应重试：这是风控抖动而非凭证问题。
-    // 非 JSON（风控页 / key 失效）或其它 ret 直接交回上层断言，不在这里吞掉。
-    const nlohmann::json parsed = nlohmann::json::parse(body, nullptr, false);
+    // 非 JSON（风控页 / key 失效）或其它 ret 直接交回调用方处理，不在这里吞掉。
+    nlohmann::json parsed = nlohmann::json::parse(body, nullptr, false);
     if (parsed.is_discarded() || parsed.value("ret", -1) != -6) {
-      return body;
+      return {std::move(parsed), std::move(body)};
     }
     warn("profile_ext 撞到风控 (ret=-6)，等一等重试");
     std::this_thread::sleep_for(std::chrono::milliseconds(jitter(rng)));
@@ -150,8 +153,11 @@ std::string request(const Account &account, int offset, int count) {
 }
 
 Page fetch_page(const Account &account, int offset) {
-  const std::string body = request(account, offset, kPageSize);
-  const nlohmann::json root = parse_json(body, "profile_ext 响应");
+  const Reply reply = request(account, offset, config::kPageSize);
+  WXMD_ASSERT(!reply.json.is_discarded(),
+              "profile_ext 响应不是合法 JSON，原文开头：" +
+                  head_of(reply.body));
+  const nlohmann::json &root = reply.json;
 
   const int ret = root.value("ret", -1);
   WXMD_ASSERT(ret == 0, "profile_ext 返回失败 ret=" + std::to_string(ret) +
@@ -165,7 +171,12 @@ Page fetch_page(const Account &account, int offset) {
   const std::string list_text = root.value("general_msg_list", std::string());
   WXMD_ASSERT(!list_text.empty(), "响应里没有 general_msg_list");
 
-  const nlohmann::json parsed = parse_json(list_text, "general_msg_list");
+  const nlohmann::json parsed =
+      nlohmann::json::parse(list_text, nullptr, false);
+  WXMD_ASSERT(!parsed.is_discarded(),
+              "general_msg_list 不是合法 JSON，原文开头：" +
+                  head_of(list_text));
+
   for (const nlohmann::json &msg : msg_list_of(parsed)) {
     if (!msg.contains("app_msg_ext_info")) {
       continue; // 非图文消息
@@ -193,12 +204,12 @@ Page fetch_page(const Account &account, int offset) {
 } // namespace
 
 bool probe_credential(const Account &account) {
-  const std::string body = request(account, 0, 1);
-  const nlohmann::json root = nlohmann::json::parse(body, nullptr, false);
-  const bool ok = !root.is_discarded() && root.value("ret", -1) == 0;
+  const Reply reply = request(account, 0, 1);
+  const bool ok =
+      !reply.json.is_discarded() && reply.json.value("ret", -1) == 0;
   if (!ok) {
     // 失败时把响应原文喊出来：ret/errmsg 或风控页都看得见，否则没法 debug。
-    warn("probe_credential 被拒，profile_ext 响应开头：" + head_of(body));
+    warn("probe_credential 被拒，profile_ext 响应开头：" + head_of(reply.body));
   }
   return ok;
 }
@@ -256,7 +267,8 @@ fetch_new_entries(const Account &account, int64_t since,
                 "next_offset 没有前进（" + std::to_string(cursor) + " → " +
                     std::to_string(page.next_offset) + "），翻页会死循环");
     cursor = page.next_offset;
-    std::this_thread::sleep_for(std::chrono::milliseconds(kIntervalMs));
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(config::kPageIntervalMs));
   }
 
   std::fprintf(stderr, "\r%40s\r", "");
@@ -264,7 +276,11 @@ fetch_new_entries(const Account &account, int64_t since,
 }
 
 std::string fetch_account_name(const std::string &article_url) {
-  const std::string html = fetch_raw(article_url);
+  // 抓包环节里紧跟着用户刚在微信里点开的那一篇，走直连和微信自己看到的一致；
+  // 一个请求，也没有走隧道的理由。
+  auto html_opt = fetch_raw(article_url, "", Route::Direct);
+  WXMD_ASSERT(html_opt, "抓不到文章页（重试耗尽仍连不上）: " + article_url);
+  const std::string html = *std::move(html_opt);
 
   // 从 from 起，取第一个引号（单/双）包起来的字符串并做 HTML
   // 反转义；没有返回空。
