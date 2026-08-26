@@ -43,7 +43,12 @@ class Fetcher:
         return f"出网: {self.qps} 次/s {self.workers} 并发"
 
     def _pace(self):
-        """唯一的限速点: 按 qps 均匀发牌, 不攒桶爆发 — 持续超频会被直接拒。"""
+        """每个请求 (含重试) 出网前的唯一限速点: 按 qps 均匀发牌, 不攒桶爆发。
+
+        额度属于「出口」而不是站点, 所以共用一条出口的站点要覆盖这里指向同一个闸
+        (走隧道的站点就指向 common/tunnel.acquire), 否则各站按自己的 qps 发牌会加
+        起来超频。
+        """
         with self._lock:
             slot = max(time.monotonic(), self._next)
             self._next = slot + self._interval

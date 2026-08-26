@@ -20,14 +20,16 @@ uniqueKey 也照吃, 所以全程只认 uniqueKey。userId / euid 同样是每�
 web/cookies/jquant.txt, 一行一条 Name=Value, # 开头是注释, 过期了改这个文件。
 拿法: 浏览器登录后 F12 → Application → Storage → Cookies → www.joinquant.com。
 
-出网直连本机 IP: 聚宽没像果仁那样封过我们, 不必动隧道那套。
+出网走隧道 (与果仁同一个订单): 页面请求每次换出口 IP, 图片直连。限速不在本文件,
+由 common/tunnel.acquire() 全局统一发牌 —— 额度是订单的, 两个站加起来才 10 次/s。
 """
 
 import os
+import time
 
 import requests
 
-from ..common import mdimg
+from ..common import mdimg, tunnel
 from ..common.assets import collector
 from ..common.net import MISSING, Fetcher
 
@@ -41,59 +43,139 @@ COOKIE_PATH = os.path.join(
 )
 PAGE_SIZE = 200
 
+# 走隧道换 IP, 与果仁同一个订单。直连本机 IP 在 10 次/s 下迟早被风控盯上 (果仁已被封
+# 过一次)。出网方式开局定死、全程不变。
+USE_TUNNEL = True
+
+# 图片直连不走隧道: 隧道传二进制大响应会截断 (IncompleteRead), 这是果仁踩过的坑,
+# 跟站点无关。聚宽图床在 cdn.joinquant.com, 直连没被封过也不值得为它占隧道额度。
+ASSET_TIMEOUT = 15
+ASSET_RETRIES = 2
+BACKOFF = 1.5
+
 
 class Client(Fetcher):
     timeout = 40
-    # 直连本机 IP: 天花板是「别被风控盯上」而不是吞吐, 慢一点无所谓。
+    # 只在直连时生效: 走隧道时限速由 tunnel.acquire() 全局管 (见 _pace)。直连的
+    # 天花板是「别被风控盯上」而不是吞吐。
     qps = 3
-    workers = 4
-    retries = 3
-    # 直连时 403 是稳定的拒绝 (图床防盗链), 与 404 一样当永久缺失。
-    missing_status = (403, 404)
+    # 隧道单请求实测 2~4s (换 IP + 转发), 聚宽一篇还要连发 detail + 多页评论。要把
+    # 10 次/s 发满, 同时在飞的请求得有 qps × 延迟 ≈ 30 个, 所以给 30。
+    # 直连时本机就一个出口 IP, 并发只会更显眼, 老老实实 1。
+    workers = 30 if USE_TUNNEL else 1
+    # 隧道下重试就是换一个 IP 再来, 多给几次; 直连换不掉 IP, 3 次够。
+    retries = 5 if USE_TUNNEL else 3
+    # 隧道下 403 多半是这个出口 IP 撞了风控, 换 IP 就好, 不能当永久缺失 (否则好帖子
+    # 被写成墓碑)。直连时 403 才是稳定的拒绝 (图床防盗链)。
+    missing_status = (404,) if USE_TUNNEL else (403, 404)
 
     def __init__(self):
         super().__init__()
-        self.s = requests.Session()
-        self.s.headers["User-Agent"] = UA
-        self.s.headers["X-Requested-With"] = "XMLHttpRequest"
-        self.s.headers["Accept"] = "application/json, text/plain, */*"
-        self.s.headers["Referer"] = BASE + "/view/community/list"
-        self.n_cookies = self._load_cookies()
+        self._cookies = self._load_cookies()
 
     def _load_cookies(self):
         assert os.path.exists(COOKIE_PATH), (
             f"缺 {COOKIE_PATH} — 聚宽匿名只能看到最新 2000 篇。浏览器登录后 F12 →"
             f" Application → Cookies → www.joinquant.com, 每条写成一行 Name=Value"
         )
-        n = 0
+        cookies = {}
         with open(COOKIE_PATH, encoding="utf-8") as f:
             for ln in f:
                 ln = ln.strip()
                 if not ln or ln.startswith("#") or "=" not in ln:
                     continue
                 name, value = ln.split("=", 1)
-                self.s.cookies.set(
-                    name.strip(), value.strip(), domain="www.joinquant.com"
-                )
-                n += 1
-        assert n, f"{COOKIE_PATH} 里没有有效 cookie 行"
-        return n
+                cookies[name.strip()] = value.strip()
+        assert cookies, f"{COOKIE_PATH} 里没有有效 cookie 行"
+        return cookies
+
+    def _set_headers(self, s):
+        s.headers["User-Agent"] = UA
+        s.headers["X-Requested-With"] = "XMLHttpRequest"
+        s.headers["Accept"] = "application/json, text/plain, */*"
+        s.headers["Referer"] = BASE + "/view/community/list"
+        for k, v in self._cookies.items():
+            s.cookies.set(k, v, domain="www.joinquant.com")
 
     def desc(self):
+        route = (
+            f"隧道 {tunnel.HOST}:{tunnel.PORT} (每请求换 IP) "
+            f"{tunnel.QPS} 次/s (订单额度, 全站共享)"
+            if USE_TUNNEL
+            else f"直连 (本机 IP) {self.qps} 次/s"
+        )
         return (
-            f"出网: 直连 (本机 IP) {self.qps} 次/s {self.workers} 并发; "
-            f"已载入 {self.n_cookies} 条 cookie"
+            f"出网: {route} {self.workers} 并发; "
+            f"已载入 {len(self._cookies)} 条 cookie"
         )
 
+    def _pace(self):
+        """走隧道时把限速交给 tunnel: 额度属于订单, 不属于本站。"""
+        if USE_TUNNEL:
+            tunnel.acquire()
+        else:
+            super()._pace()
+
+    def _direct_session(self):
+        """直连留着 keep-alive; 每个线程一条, requests 的 Session 不保证跨线程安全。"""
+        s = getattr(self._local, "s", None)
+        if s is None:
+            s = requests.Session()
+            self._set_headers(s)
+            self._local.s = s
+        return s
+
     def _fetch(self, url, params):
-        return self.s.get(url, params=params, timeout=self.timeout)
+        # 隧道下每请求一条新连接: 复用连接就换不出新的出口 IP, 重试也就白重试了;
+        # 顺便每请求独立 session, 30 个 worker 各发各的, 不碰同一个 Session 对象。
+        # cookie 在 _cookies 里, 每条新 session 都灌一遍, 跟连接无关。
+        if not USE_TUNNEL:
+            return self._direct_session().get(url, params=params, timeout=self.timeout)
+        with requests.Session() as s:
+            self._set_headers(s)
+            s.headers["Connection"] = "close"
+            s.proxies.update(tunnel.PROXIES)
+            return s.get(url, params=params, timeout=self.timeout)
+
+    def _check_status(self, r):
+        assert not (USE_TUNNEL and r.status_code in tunnel.FATAL), (
+            f"隧道拒绝服务: HTTP {r.status_code} — 账号或配置的问题, 查"
+            f" kuaidaili.com/doc/dev/tpshttpresponse"
+        )
+
+    def _retry_wait(self, attempt, status):
+        # 隧道下状态码也进重试且不必退避: 每请求换 IP ⇒ 重试就是换一个 IP 再来,
+        # 撞上被风控的出口 (403) 换几次就过。直连只对瞬时故障重试并指数退避。
+        if USE_TUNNEL:
+            return 0.0
+        return super()._retry_wait(attempt, status)
 
     def asset(self, url):
-        """→ (bytes, ctype) | (MISSING, "") 图没了 | (None, "") 这次没抓到。"""
-        r = self.get(url)
-        if r is MISSING or r is None:
-            return r, ""
-        return r.content, r.headers.get("Content-Type", "")
+        """→ (bytes, ctype) | (MISSING, "") 图没了 | (None, "") 这次没抓到。
+
+        图片直连不走隧道 (见上面的 ASSET 注释), 也不走 _pace 限速: 图床不是论坛,
+        不会因为并发盯上本机 IP。抓不到就保留原链, 不卡整篇。
+        """
+        last = None
+        for attempt in range(ASSET_RETRIES + 1):
+            try:
+                r = self._direct_session().get(url, timeout=ASSET_TIMEOUT)
+            except requests.RequestException as e:
+                last = e
+                if attempt < ASSET_RETRIES:
+                    time.sleep(BACKOFF**attempt)
+                continue
+            if r.status_code == 200:
+                return r.content, r.headers.get("Content-Type", "")
+            if r.status_code in self.missing_status:
+                return MISSING, ""
+            last = f"HTTP {r.status_code}"
+            if attempt < ASSET_RETRIES and r.status_code >= 500:
+                time.sleep(BACKOFF**attempt)
+                continue
+            break
+        print(f"  ! {url} 抓不到 ({last}), 试了 {ASSET_RETRIES + 1} 次", flush=True)
+        return None, ""
 
 
 def _entry(p, cate):

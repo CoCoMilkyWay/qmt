@@ -8,6 +8,8 @@
 
 出网两条路, 由请求类型决定, 全程不变:
     页面 (列表/正文/detail/评论) — 走隧道: 每请求换一个出口 IP, 防本机 IP 被封。
+                                  限速由 common/tunnel.acquire() 全局统一发牌 ——
+                                  额度是订单的, 果仁与聚宽加起来才 10 次/s。
     图片 — 一律直连: 隧道传二进制大响应会截断 (IncompleteRead), 直连又快
            (0.08s vs 1.65s) 又不占隧道额度。封我们的是果仁论坛, 不是图床。
 
@@ -21,7 +23,7 @@ from urllib.parse import urlsplit
 import requests
 from lxml import html as lxml_html
 
-from ..common import html2md
+from ..common import html2md, tunnel
 from ..common.assets import collector
 from ..common.net import MISSING, Fetcher
 
@@ -36,51 +38,19 @@ BASE = f"https://{HOST}"
 # 探测: 出网方式开局定死、全程不变, 比「先试直连再降级」好推理得多。
 USE_TUNNEL = True
 
-# 快代理隧道 (按量付费, 每次请求换 IP), 与 gzh/src/config.hpp 是同一个订单。
-# 主入口不通就换备用 i970.kdltps.com, 端口相同。
-TUNNEL_HOST = "i969.kdltps.com"
-TUNNEL_PORT = 15818
-TUNNEL_USER = "t18771545382113"
-TUNNEL_PASS = "tlh1s2tx"
-
-_TUNNEL_URL = f"http://{TUNNEL_USER}:{TUNNEL_PASS}@{TUNNEL_HOST}:{TUNNEL_PORT}"
-PROXIES = {"http": _TUNNEL_URL, "https": _TUNNEL_URL} if USE_TUNNEL else {}
-
 # 图片直连: 快, 也不值多重试 — 抓不到就保留原链, 不卡整篇。
 ASSET_TIMEOUT = 10
 ASSET_RETRIES = 2
 BACKOFF = 1.5
-
-# 快代理自己给的码 (官方表 kuaidaili.com/doc/dev/tpshttpresponse), 不是目标站的
-# 响应。既然只拿隧道访问 guorn.com 一个域名, 这些码全是死结 —— 账号密钥、实名、
-# 白名单、或者这个域名被隧道禁掉 —— 换 IP 重试也一样, 当场炸掉比默默重试强。
-# 剩下的 440/441 (带宽/超频) 与 515-517 (代理抖动) 才是瞬时的, 换个 IP 再来。
-TUNNEL_FATAL = {
-    407,
-    442,
-    443,
-    445,
-    446,
-    447,
-    448,
-    449,
-    450,
-    452,
-    453,
-    454,
-    455,
-    460,
-    466,
-}
 
 
 class Client(Fetcher):
     # 隧道偶尔撞上慢出口, 值得等一会儿; 但 30s × 重试 5 次 = 一个 worker 被一个请求
     # 占住 3 分钟, 换 IP 重来比死等划算。
     timeout = 15
-    # 隧道: 订单买的就是 10 次/s, 超了返回 441。
-    # 直连: 天花板是「别被风控盯上」而不是吞吐 — 本机 IP 已经被封过一次。
-    qps = 10 if USE_TUNNEL else 2
+    # 只在直连时生效: 走隧道时限速由 tunnel.acquire() 全局管 (见 _pace)。直连的
+    # 天花板是「别被风控盯上」而不是吞吐 — 本机 IP 已经被封过一次。
+    qps = 2
     # 实测隧道单请求 ~0.78s (直连 ~0.08s), 要把 10 次/s 发满至少得 8 个请求同时在飞。
     # 直连永远是 1: 本机就一个出口 IP, 并发只会让它更显眼。
     workers = 16 if USE_TUNNEL else 1
@@ -91,11 +61,19 @@ class Client(Fetcher):
 
     def desc(self):
         route = (
-            f"隧道 {TUNNEL_HOST}:{TUNNEL_PORT} (每请求换 IP)"
+            f"隧道 {tunnel.HOST}:{tunnel.PORT} (每请求换 IP) "
+            f"{tunnel.QPS} 次/s (订单额度, 全站共享)"
             if USE_TUNNEL
-            else "直连 (本机 IP)"
+            else f"直连 (本机 IP) {self.qps} 次/s"
         )
-        return f"出网: 页面走{route} {self.qps} 次/s {self.workers} 并发; 图片直连"
+        return f"出网: 页面走{route} {self.workers} 并发; 图片直连"
+
+    def _pace(self):
+        """走隧道时把限速交给 tunnel: 额度属于订单, 不属于本站。"""
+        if USE_TUNNEL:
+            tunnel.acquire()
+        else:
+            super()._pace()
 
     def _direct_session(self):
         """直连留着 keep-alive; 每个线程一条, requests 的 Session 不保证跨线程安全。"""
@@ -114,11 +92,11 @@ class Client(Fetcher):
         with requests.Session() as s:
             s.headers["User-Agent"] = UA
             s.headers["Connection"] = "close"
-            s.proxies.update(PROXIES)
+            s.proxies.update(tunnel.PROXIES)
             return s.get(url, params=params, timeout=self.timeout)
 
     def _check_status(self, r):
-        assert not (USE_TUNNEL and r.status_code in TUNNEL_FATAL), (
+        assert not (USE_TUNNEL and r.status_code in tunnel.FATAL), (
             f"隧道拒绝服务: HTTP {r.status_code} — 账号或配置的问题, 查"
             f" kuaidaili.com/doc/dev/tpshttpresponse"
         )
