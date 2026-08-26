@@ -6,13 +6,10 @@
     GET /forum/post/detail?pid=<pid>          元信息 (作者/时间/附件/标签)
     GET /forum/comment/list?pid=<pid>&page=n  评论, 每页 20
 
-只对 guorn.com 出网, 一条路 (参数写死在文件顶部, 与 gzh 同一个惯例: 改了就是改了,
-正好逼着想清楚再改), 由 USE_TUNNEL 选隧道还是直连, 全程不变:
-    隧道 — 快代理, 每请求换一个出口 IP, 可并发。本机 IP 被果仁封掉之后的走法。
-    直连 — 本机出口 IP, 串行。
-
-正文里外链的图 (微信 CDN、早就没了的老图床) 一概不抓: 见 asset() 的断言与
-sync.on_image。抓它们要花同一份隧道额度和 worker 时间, 换来的是超时和 302。
+出网两条路, 由请求类型决定, 全程不变:
+    页面 (列表/正文/detail/评论) — 走隧道: 每请求换一个出口 IP, 防本机 IP 被封。
+    图片 — 一律直连: 隧道传二进制大响应会截断 (IncompleteRead), 直连又快
+           (0.08s vs 1.65s) 又不占隧道额度。封我们的是果仁论坛, 不是图床。
 """
 
 import threading
@@ -62,6 +59,10 @@ PROXIES = {"http": _TUNNEL_URL, "https": _TUNNEL_URL} if USE_TUNNEL else {}
 RETRIES = 5 if USE_TUNNEL else 3
 BACKOFF = 1.5
 
+# 图片直连: 快, 也不值多重试 — 抓不到就保留原链, 不卡整篇。
+ASSET_TIMEOUT = 10
+ASSET_RETRIES = 2
+
 # 404 = 帖子/图片真的没了, 重抓也回不来。必须与「这次没抓到」分开: 403 在隧道下
 # 是这个出口 IP 撞了风控, 当成永久缺失会把好帖子写成墓碑, 而 index 里的是终态。
 MISSING = object()
@@ -104,7 +105,7 @@ class Client:
             if USE_TUNNEL
             else "直连 (本机 IP)"
         )
-        return f"出网: {route}, {self.qps} 次/s, {self.workers} 并发, 只抓 {HOST}"
+        return f"出网: 页面走{route} {self.qps} 次/s {self.workers} 并发; 图片直连"
 
     def _pace(self):
         """唯一的限速点: 按 qps 均匀发牌, 不攒桶爆发 — 隧道对持续超频直接拒 441。"""
@@ -199,12 +200,27 @@ class Client:
         return self._json(f"/forum/comment/list?pid={pid}&page={page}")
 
     def asset(self, url):
-        """抓一张果仁站内的图。外链的图不抓 (规则在 sync.on_image), 这里只兜住笔误。
+        """抓一张图, 直连不走隧道。任何 host 都行 — 封我们的是果仁论坛, 不是图床。
 
-        → (bytes, ctype) | (MISSING, "") 图没了, 保留原链 | (None, "") 这次没抓到。
+        → (bytes, ctype) | (MISSING, "") 图没了 (404), 保留原链 | (None, "") 这次没抓到。
         """
-        assert url.startswith(BASE), f"只抓 {HOST} 站内的图: {url}"
-        r = self._get(url)
-        if r is MISSING or r is None:
-            return r, ""
-        return r.content, r.headers.get("Content-Type", "")
+        last = None
+        for attempt in range(ASSET_RETRIES + 1):
+            try:
+                r = self._direct_session().get(url, timeout=ASSET_TIMEOUT)
+            except requests.RequestException as e:
+                last = e
+                if attempt < ASSET_RETRIES:
+                    time.sleep(BACKOFF**attempt)
+                continue
+            if r.status_code == 200:
+                return r.content, r.headers.get("Content-Type", "")
+            if r.status_code == 404:
+                return MISSING, ""
+            last = f"HTTP {r.status_code}"
+            if attempt < ASSET_RETRIES and r.status_code >= 500:
+                time.sleep(BACKOFF**attempt)
+                continue
+            break
+        print(f"  ! {url} 抓不到 ({last}), 试了 {ASSET_RETRIES + 1} 次", flush=True)
+        return None, ""

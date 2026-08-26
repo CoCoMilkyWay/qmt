@@ -297,13 +297,11 @@ def download_post(client, entry):
     hole = []  # 站内图这次没抓到 ⇒ 整篇作空洞: 入库要「连图完整」
 
     def on_image(src):
-        # 规则: 只抓果仁站内的图 (相对路径, 或 guorn.com 开头)。其余一概原样留链接,
-        # 不抓、不重试、不算空洞 —— 正文里外链的是微信 CDN、早没了的老图床
-        # (quanttech.cn / raquant.com), 还有从 Word 粘进来的 file:///C:\...。
-        # 这些图没了就是没了, 花的却是同一份隧道额度和 worker 时间。
-        full = BASE + src if src.startswith("/") else src
-        if not full.startswith(BASE):
+        # 相对路径拼到果仁, 绝对路径原样用; data: 和 file:/// 这种本地伪 URL 直接留着。
+        # 图片一律直连 (见 fetch.asset), 不走隧道, 所以不占隧道额度。
+        if not src or src.startswith("data:") or src.startswith("file:"):
             return src
+        full = BASE + src if src.startswith("/") else src
         if full in seen:
             return seen[full]
         data, ctype = client.asset(full)
