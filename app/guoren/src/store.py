@@ -32,7 +32,8 @@ _BAD_CHARS = re.compile(r'[/\\:*?"<>|\r\n\t]')
 
 
 def _safe_name(s):
-    s = _BAD_CHARS.sub("_", s).strip().strip(".")
+    # 列表接口偶尔给出 title 为 null 的占位帖 (队列里现有一条), 别让它炸掉整轮入库
+    s = _BAD_CHARS.sub("_", s or "").strip().strip(".")
     return s[:80] or "_"
 
 

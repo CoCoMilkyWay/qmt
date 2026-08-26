@@ -15,7 +15,7 @@ constexpr const char *kStoreDir = "store";
 
 // dump 开关：true 则对所有域名 MITM 并把每次往返落盘到 store/dump。
 // 改了要重编译——全量 MITM 风险大，正好逼着想清楚再开。
-constexpr bool kDump = false;
+constexpr bool kDump = true;
 
 // 出网走不走隧道。true = 快代理隧道（并发、每请求换 IP）；false = 本机直连
 // （串行）。改成 false 重编译即退回直连，不再开局探测——出网方式由这一个开关

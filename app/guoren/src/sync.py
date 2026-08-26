@@ -11,15 +11,20 @@
 
 翻页本身不稳定 (翻的过程中有人回帖会把条目往后挤, 可能漏掉一条), 所以每页发现即落盘,
 漏掉的下次 --deep 能对上账: seen_pids 与 total_count 的差值就是对账口径。
+
+drain 抓取并发、提交串行但乱序 (走隧道时单请求 ~0.78s, 串行等于把额度扔掉)。抓不到的
+那篇不入库、留作空洞, 仍在 pending 里等下一轮 drain 重试; 入库要「连图完整」, 缺图宁可
+整篇重抓, 也不在 index 里堆半成品 —— index 里的是终态, 不会再重抓。
 """
 
 import math
 import re
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from lxml import html as lxml_html
 
 from . import html2md
-from .fetch import Client
+from .fetch import BASE, MISSING, Client
 from .store import Store
 
 
@@ -27,10 +32,12 @@ def _entry_from_list(p):
     u = p.get("user") or {}
     return {
         "pid": p["pid"],
-        "title": p.get("title", ""),
-        "create_time": p.get("create_time", ""),
-        "tag": p.get("tag", ""),
-        "author": u.get("username", ""),
+        # 一律落成字符串: 接口给的 title/tag 可能是 null, 留着 None 会在落盘取名
+        # 或截断标题时才炸, 离发现处已经很远了
+        "title": p.get("title") or "",
+        "create_time": p.get("create_time") or "",
+        "tag": p.get("tag") or "",
+        "author": u.get("username") or "",
         "uid": u.get("uid"),
         "reply_count": p.get("reply_count", 0),
         "view_count": p.get("view_count", 0),
@@ -166,7 +173,9 @@ def _discover_shallow(client, store, tag, max_pages):
         if total_pages is None:
             total_count = data["total_count"]
             total_pages = _page_total(data)
-            print(f"[{tag}] 增量翻页: 共 {total_count} 帖 / {total_pages} 页", flush=True)
+            print(
+                f"[{tag}] 增量翻页: 共 {total_count} 帖 / {total_pages} 页", flush=True
+            )
         posts = data["post_list"]
         if not posts:
             break
@@ -175,7 +184,11 @@ def _discover_shallow(client, store, tag, max_pages):
         # 深翻发现但还没下载的帖子只在队列里, 用 has() 会让早停永远不成立。
         all_known = all(p.get("top") or store.seen(p["pid"]) for p in posts)
         added += _absorb(store, posts, oldest_first=False)
-        print(f"\r[{tag}] 翻页 {page}/{total_pages} (累计新增 {added})", end="", flush=True)
+        print(
+            f"\r[{tag}] 翻页 {page}/{total_pages} (累计新增 {added})",
+            end="",
+            flush=True,
+        )
 
         quiet_pages = quiet_pages + 1 if all_known else 0
         if page >= total_pages or quiet_pages >= STOP_PAGES:
@@ -230,10 +243,13 @@ def _attachments_md(atts):
 
 
 def _comments_md(client, pid, on_image):
+    """→ Markdown | None (评论没抓全, 整篇作空洞: 缺一页评论的半成品不入库)。"""
     page = 1
     cmts = []
     while True:
         data = client.comments(pid, page)
+        if data is None:
+            return None
         cmts.extend(data.get("comment_list", []))
         if len(cmts) >= data.get("total_count", 0) or not data.get("comment_list"):
             break
@@ -264,28 +280,38 @@ def _assemble(entry, body_md, attach_md, comments_md):
 
 
 def download_post(client, entry):
-    """返回 (markdown, assets, status)。帖子已删除时 status="deleted", 只留墓碑。"""
+    """→ (markdown, assets, status) | None (这次没抓到, 作空洞留在队列下轮补)。
+
+    帖子被删掉 (404) 是终态, 立墓碑 status="deleted"; 只有「这次没抓到」才作空洞。
+    抓完不落盘, 字节先攒在内存里, 由主线程串行提交 — 本函数可并发, 不碰 store。
+    """
     html = client.post_html(entry["pid"])
-    if html is None:
+    if html is MISSING:
         return _assemble(entry, "_(帖子已删除或不可见)_", "", ""), {}, "deleted"
+    if html is None:
+        return None
 
     assets = {}
     seen = {}  # 同一地址只抓一次
     counter = {"n": 0}
+    hole = []  # 站内图这次没抓到 ⇒ 整篇作空洞: 入库要「连图完整」
 
     def on_image(src):
-        if not src or src.startswith("data:"):
+        # 规则: 只抓果仁站内的图 (相对路径, 或 guorn.com 开头)。其余一概原样留链接,
+        # 不抓、不重试、不算空洞 —— 正文里外链的是微信 CDN、早没了的老图床
+        # (quanttech.cn / raquant.com), 还有从 Word 粘进来的 file:///C:\...。
+        # 这些图没了就是没了, 花的却是同一份隧道额度和 worker 时间。
+        full = BASE + src if src.startswith("/") else src
+        if not full.startswith(BASE):
             return src
-        full = (
-            src
-            if src.startswith("http")
-            else ("https://guorn.com" + src if src.startswith("/") else src)
-        )
         if full in seen:
             return seen[full]
         data, ctype = client.asset(full)
-        if data is None:
-            return src  # 死链: 保留原 URL, 不本地化
+        if data is MISSING or data is None:
+            # 图没了 (404) 就保留原链; 这次没抓到才把整篇作空洞, 下轮重来
+            if data is None:
+                hole.append(full)
+            return src
         counter["n"] += 1
         name = f"{counter['n']:03d}{_ext_from_ctype(ctype, full)}"
         assets[name] = data
@@ -293,7 +319,11 @@ def download_post(client, entry):
         return seen[full]
 
     body_md = html2md.to_markdown(_extract_post_content(html), on_image=on_image)
+    if hole:
+        return None  # 早退: 已经缺图了, 不必再花 detail 与评论那几个请求
     detail = client.post_detail(entry["pid"])
+    if detail is None:
+        return None
     attach_md = _attachments_md(detail.get("attachments") or [])
     # reply_count 为 0 就不必再问一趟评论接口
     comments_md = (
@@ -301,34 +331,79 @@ def download_post(client, entry):
         if (entry.get("reply_count") or 0) > 0
         else ""
     )
+    if comments_md is None or hole:
+        return None
     return _assemble(entry, body_md, attach_md, comments_md), assets, "done"
 
 
 def drain(client, store, limit=None):
-    """逐篇下载入库。每篇独立提交, 随时 kill 都只丢当前这一篇。"""
-    queue = store.pending()
+    """抓取并发、提交串行但乱序: 哪篇抓完哪篇先入库, 不死等队头。返回 (入库数, 空洞数)。
+
+    严格按序 + 队头一篇慢 = 后面抓完的全干等; 放开顺序后慢的那篇自己留作空洞
+    (仍在 pending, 下轮 drain 再抓), 其余照常前进。
+    派发窗口取 workers ⇒ 「在抓的 + 等提交的」合计不超过 workers 篇, 否则几十篇
+    的图片字节会一起挂在内存里。
+    """
+    # 队列是从 pending.jsonl 读回来的, 老行里可能留着 null (发现处如今一律落成
+    # 字符串了)。进流水线前规范化一次, 下游打印/取名/渲染就都能当字符串使。
+    queue = [
+        dict(e, title=e.get("title") or "", tag=e.get("tag") or "")
+        for e in store.pending()
+        if not store.has(e["pid"])
+    ]
     if limit:
         queue = queue[:limit]
     total = len(queue)
-    done = 0
-    for entry in queue:
-        if store.has(entry["pid"]):  # 上一趟已入库, 队列文件还没压缩
-            continue
-        done += 1
-        print(
-            f"[{done}/{total}] {entry['create_time'][:10]} {entry['title'][:40]}",
-            flush=True,
-        )
-        markdown, assets, status = download_post(client, entry)
-        store.commit(dict(entry, status=status), markdown, assets)
+    if not total:
+        return 0, 0
+
+    seq = 0
+    holes = 0
+    todo = iter(queue)
+    flying = {}
+    ex = ThreadPoolExecutor(max_workers=client.workers)
+    try:
+
+        def refill():
+            while len(flying) < client.workers:
+                entry = next(todo, None)
+                if entry is None:
+                    return
+                flying[ex.submit(download_post, client, entry)] = entry
+
+        refill()
+        while flying:
+            finished, _ = wait(list(flying), return_when=FIRST_COMPLETED)
+            for f in finished:
+                entry = flying.pop(f)
+                got = f.result()
+                seq += 1
+                if got is None:
+                    holes += 1
+                    print(
+                        f"[{seq}/{total}] 空洞 {entry['title'][:40]} (留在队列下轮补)",
+                        flush=True,
+                    )
+                    continue
+                markdown, assets, status = got
+                # commit 逼出串行: .staging 与 index 的追加都只有一处
+                store.commit(dict(entry, status=status), markdown, assets)
+                print(
+                    f"[{seq}/{total}] {entry['create_time'][:10]} {entry['title'][:40]}",
+                    flush=True,
+                )
+            refill()
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     store.compact_pending()
-    return done
+    return seq - holes, holes
 
 
-def run(store_root, tags=None, delay=0.3, max_pages=None, limit=None, deep=None):
+def run(store_root, tags=None, max_pages=None, limit=None, deep=None):
     if tags is None:
         tags = ["share", "elite"]
-    client = Client(delay=delay)
+    client = Client()
+    print(client.desc(), flush=True)
     store = Store(store_root)
     print(f"已入库 {len(store.index)} 篇, 队列剩 {len(store.pending())} 篇", flush=True)
 
@@ -339,5 +414,6 @@ def run(store_root, tags=None, delay=0.3, max_pages=None, limit=None, deep=None)
         print(f"[{tag}] 新发现 {added} 篇", flush=True)
     print(f"合计新发现 {total_added} 篇, 待下 {len(store.pending())} 篇", flush=True)
 
-    n = drain(client, store, limit=limit)
-    print(f"本轮入库 {n} 篇, 累计 {len(store.index)} 篇", flush=True)
+    n, holes = drain(client, store, limit=limit)
+    tail = f", 空洞 {holes} 篇 (下轮补)" if holes else ""
+    print(f"本轮入库 {n} 篇{tail}, 累计 {len(store.index)} 篇", flush=True)

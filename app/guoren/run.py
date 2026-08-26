@@ -7,11 +7,12 @@
     ./run.py --deep                     强制翻完整个列表对账 (补漏)
     ./run.py --max-pages 3              只翻前 3 页列表 (调试)
     ./run.py --limit 5                  只下 5 篇 (调试)
-    ./run.py --delay 0.5                加大请求间隔
     ./run.py --store ~/guoren-data      换缓存根目录
 
 随时 Ctrl-C / kill 都安全: 每篇文章独立原子提交, 下次运行从队列接着下。
-已入库的帖子视为终态, 不会重抓。
+已入库的帖子视为终态, 不会重抓; 这一轮没抓到的留作空洞, 下一轮接着重试。
+
+出网方式 (隧道/直连)、频率与并发写死在 src/fetch.py 顶部, 不做成命令行开关。
 """
 
 import argparse
@@ -33,7 +34,6 @@ def main():
         default=["share", "elite"],
         help="栏目 (share/usage/other/elite/all/...), 默认 知识共享+精华",
     )
-    ap.add_argument("--delay", type=float, default=0.3, help="请求间隔秒")
     ap.add_argument("--max-pages", type=int, default=None, help="只翻前 N 页 (调试)")
     ap.add_argument("--limit", type=int, default=None, help="只下 N 篇 (调试)")
     ap.add_argument("--deep", action="store_true", help="强制翻完整个列表对账")
@@ -42,7 +42,6 @@ def main():
         run(
             args.store,
             tags=args.tag,
-            delay=args.delay,
             max_pages=args.max_pages,
             limit=args.limit,
             deep=True if args.deep else None,

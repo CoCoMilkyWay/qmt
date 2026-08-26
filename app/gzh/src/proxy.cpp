@@ -423,10 +423,14 @@ struct MitmProxy::Impl {
   std::atomic<int> inflight{0};
   std::thread accept_thread;
 
-  // 在飞的客户端连接。stop() 靠它主动切断：微信会保持大量长连接经我们盲转发，
+  // 在飞的连接。stop() 靠它主动切断：微信会保持大量长连接经我们盲转发或 MITM，
   // 光等它们自己结束会无限期挂住，必须能把卡在读/转发里的线程踹醒。
+  // client_fds 覆盖盲转发与 MITM 两条路（serve 入口就登记）；
+  // upstream_fds 只在 MITM 路里登记——run_mitm 末尾会阻塞在 upstream.read
+  // 上读完整响应体，客户端侧 shutdown 踹不醒它，stop() 必须连上游一起切。
   std::mutex conn_mutex;
   std::set<int> client_fds;
+  std::set<int> upstream_fds;
 
   Impl(int listen_port, const std::vector<std::string> &hosts,
        const std::string &ca_dir, const std::string &up_host, int up_port)
@@ -463,6 +467,10 @@ void MitmProxy::Impl::run_mitm(int client_fd, const std::string &host,
     SSL_free(client_ssl);
     SSL_CTX_free(server_ctx);
     return;
+  }
+  {
+    const std::lock_guard<std::mutex> guard(conn_mutex);
+    upstream_fds.insert(upstream_fd);
   }
 
   SSL_CTX *client_ctx = make_client_context();
@@ -544,6 +552,10 @@ void MitmProxy::Impl::run_mitm(int client_fd, const std::string &host,
   SSL_shutdown(server_ssl);
   SSL_free(server_ssl);
   SSL_CTX_free(client_ctx);
+  {
+    const std::lock_guard<std::mutex> guard(conn_mutex);
+    upstream_fds.erase(upstream_fd);
+  }
   ::close(upstream_fd);
 
   SSL_shutdown(client_ssl);
@@ -712,9 +724,15 @@ void MitmProxy::stop() {
 
   // 主动切断所有在飞连接：微信保持的长连接不会自己结束，
   // shutdown 会把卡在 splice/读里的线程立刻踹醒，inflight 才能很快归零。
+  // 上游 fd 也要一起切：MITM 路末尾阻塞在 upstream.read 读完整响应体，
+  // 只切客户端侧踹不醒它（dump 末尾那些 video 长连接就是这么把 stop()
+  // 挂死的）。
   {
     const std::lock_guard<std::mutex> guard(impl_->conn_mutex);
     for (const int fd : impl_->client_fds) {
+      ::shutdown(fd, SHUT_RDWR);
+    }
+    for (const int fd : impl_->upstream_fds) {
       ::shutdown(fd, SHUT_RDWR);
     }
   }
