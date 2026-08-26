@@ -18,7 +18,7 @@ from web.common.sync import run
 from web.site import make
 
 # 这一趟爬哪些站, 按顺序跑。可选 guoren / jquant。
-SITES = ["guoren", "jquant"]
+SITES = ["jquant", "guoren"]
 
 # 栏目。None = 用各站 site/<name>.py 里的 default_tags
 #   果仁: share=知识共享 / usage / other / elite=精华 / all

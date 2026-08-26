@@ -198,21 +198,21 @@ class Site:
         return "\n".join(lines) + "\n"
 
     def download_post(self, entry):
-        """→ (markdown, assets, status) | None (这次没抓到, 作空洞留在队列下轮补)。
+        """→ (markdown, images, status) | None (这次没抓到, 作空洞留在队列下轮补)。
 
+        只管出网拿正文与评论, 图片一张都不抓: on_image 只登记, 由 drain 的第二级去抓
+        (见 assets.collector)。这样本函数一返回, 出网的那个槽就能去领下一篇。
         帖子被删掉 (404) 是终态, 立墓碑 status="deleted"; 只有「这次没抓到」才作空洞。
-        抓完不落盘, 字节先攒在内存里, 由主线程串行提交 — 本函数可并发, 不碰 store。
+        不落盘、不碰 store, 所以可并发。
         """
         r = self.fetcher.post_get(f"{BASE}/forum/post/{entry['pid']}")
         if r is MISSING:
-            return _assemble(entry, "_(帖子已删除或不可见)_", "", ""), {}, "deleted"
+            return _assemble(entry, "_(帖子已删除或不可见)_", "", ""), [], "deleted"
         if r is None:
             return None
 
-        on_image, assets, holes = collector(self.fetcher.asset, _absolutize)
+        on_image, images = collector(_absolutize)
         body_md = html2md.to_markdown(_extract_post_content(r.text), on_image=on_image)
-        if holes:
-            return None  # 早退: 已经缺图了, 不必再花 detail 与评论那几个请求
 
         detail = self._json("/forum/post/detail", {"pid": entry["pid"]})
         if detail is None:
@@ -228,6 +228,6 @@ class Site:
             if (entry.get("reply_count") or 0) > 0
             else ""
         )
-        if comments_md is None or holes:
+        if comments_md is None:
             return None
-        return _assemble(entry, body_md, attach_md, comments_md), assets, "done"
+        return _assemble(entry, body_md, attach_md, comments_md), images, "done"

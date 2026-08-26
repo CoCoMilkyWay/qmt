@@ -6,7 +6,9 @@
     site.fetcher                    出网器 (给 workers / desc)
     site.list_page(page, tag)       → {"entries": [...], "total_count", "page_size"}
                                       entries 已归一化成本模块认识的键 (见下)
-    site.download_post(entry)       → (markdown, assets, status) | None (这次没抓到)
+    site.download_post(entry)       → (markdown, images, status) | None (这次没抓到)
+                                      images 是 assets.collector 登记下来的待抓图片,
+                                      站点自己不抓图 — 抓图是 drain 第二级的事
 
 归一化 entry 的键: pid / title / create_time / tag / is_top / reply_count / status,
 站点特有的字段照样可以塞进去 (原样落进 index.jsonl), 本模块只认上面这几个。
@@ -22,21 +24,40 @@
 翻页本身不稳定 (翻的过程中有新帖会把条目往后挤, 可能漏掉一条), 所以每页发现即落盘,
 漏掉的下次 --deep 能对上账: seen_pids 与 total_count 的差值就是对账口径。
 
-drain 抓取并发、提交串行但乱序: 队列本身是老→新的, 但哪篇先抓完就哪篇先入库 —
-严格按序 + 队头一篇慢 = 后面抓完的全干等, 不划算。抓不到的那篇不入库、留作空洞,
-仍在 pending 里等下一轮; 入库要「连图完整」, 缺图宁可整篇重抓, 也不在 index 里堆
-半成品 —— index 里的是终态, 不会再重抓。
+drain 分两级流水线, 提交串行但乱序:
+    一级 出网 (正文 + 评论) — workers 篇并发, 走隧道的那部分额度由 tunnel 全局发牌。
+    二级 图片 (直连)        — 一级一抓完就把这篇交给二级, 一级立刻去领下一篇。图片是
+         慢活, 让它占着一级的槽 = 隧道额度发不满, 而那些槽正是为发满额度才开的。
+提交仍是「连图完整」才落盘: 二级把图片补齐才 commit, 缺一张就整篇作空洞、下轮重抓,
+绝不在 index 里堆半成品 —— index 里的是终态, 不会再重抓。
+
+队列本身是老→新的, 但哪篇先抓完就哪篇先入库 — 严格按序 + 队头一篇慢 = 后面抓完的
+全干等, 不划算。抓不到的那篇不入库、留作空洞, 仍在 pending 里等下一轮。
 """
 
 import math
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
+from .assets import resolve
 from .store import Store
 
 # 浅翻时连续多少页「非置顶全已知」才收手。留 2 页余量, 挡住翻页过程中的条目挪位。
 STOP_PAGES = 2
 # 重定位锚点时最多往后找几页。足够容纳两次运行之间的新增量即可。
 ANCHOR_WINDOW = 30
+# 二级最多积压几倍 workers 篇。积压的每篇都把正文和已抓到的图片字节挂在内存里, 所以
+# 得有上限, 满了就让一级停下来等 —— 真到了图片是瓶颈那一步, 再往前抓也只是把内存堆高。
+# 取 workers 的倍数而不是写死一个数: 这个窗口要宽于一级的派发窗口, 否则图片稍一积压
+# 就把一级憋停, 隧道额度就又发不满了。同时挂在内存里的上限是 (本值 + 1) × workers 篇
+# —— 一级那一窗抓完时可以整窗压进来。
+# 正常情况下这个窗口几乎是空的: 图片直连一张几十毫秒, 而一篇文章的隧道请求要几秒,
+# 二级永远追得上一级。它只在图床变慢或卡住时才起作用。
+ASSET_BACKLOG = 2
+# 连续多少倍 workers 篇全是空洞就当场停。个别文章抓不到是常态 (下轮补上), 但连着一整个
+# 派发窗口的量全空, 说明坏的是出网本身 (隧道被拒 / 站点在封), 不是这几篇。继续跑只会把
+# 几万篇全走成空洞: 白烧隧道额度, 还把真正的原因埋进几千行日志里。队列一条不丢, 查清了
+# 重跑就接着下。
+HOLE_STREAK = 2
 
 
 def _page_total(data):
@@ -195,10 +216,10 @@ def _discover_shallow(site, store, tag, max_pages):
 
 
 def drain(site, store, limit=None):
-    """抓取并发、提交串行但乱序。返回 (入库数, 空洞数)。
+    """两级流水线 (出网 → 图片), 提交串行但乱序。返回 (入库数, 空洞数)。
 
-    派发窗口取 workers ⇒ 「在抓的 + 等提交的」合计不超过 workers 篇, 否则几十篇
-    的图片字节会一起挂在内存里。
+    一级派发窗口取 workers, 二级积压上限取 ASSET_BACKLOG × workers: 两个窗口一起限住
+    「同时挂在内存里的文章数」。二级满了就不再派新活给一级, 这是唯一的反压点。
     """
     # 队列是从 pending.jsonl 读回来的, 老行里可能留着 null (发现处如今一律落成
     # 字符串了)。进流水线前规范化一次, 下游打印/取名/渲染就都能当字符串使。
@@ -214,35 +235,65 @@ def drain(site, store, limit=None):
         return 0, 0
 
     workers = site.fetcher.workers
+    backlog = ASSET_BACKLOG * workers
+    streak_limit = HOLE_STREAK * workers
     seq = 0
     holes = 0
+    streak = 0
     todo = iter(queue)
-    flying = {}
-    ex = ThreadPoolExecutor(max_workers=workers)
+    net_flying = {}  # future -> entry            一级: 正文 + 评论
+    img_flying = {}  # future -> (entry, status)  二级: 图片
+    net = ThreadPoolExecutor(max_workers=workers)
+    img = ThreadPoolExecutor(max_workers=site.fetcher.asset_workers)
     try:
 
         def refill():
-            while len(flying) < workers:
+            while len(net_flying) < workers and len(img_flying) < backlog:
                 entry = next(todo, None)
                 if entry is None:
                     return
-                flying[ex.submit(site.download_post, entry)] = entry
+                net_flying[net.submit(site.download_post, entry)] = entry
+
+        def hole(entry, why):
+            nonlocal seq, holes, streak
+            seq += 1
+            holes += 1
+            streak += 1
+            print(
+                f"[{seq}/{total}] 空洞 ({why}) {entry['title'][:40]} (留在队列下轮补)",
+                flush=True,
+            )
+            assert streak < streak_limit, (
+                f"连续 {streak} 篇全是空洞 — 坏的不是这几篇, 是出网本身 (隧道被拒/超频,"
+                f" 或站点在封)。队列一条没丢, 查清原因重跑就接着下"
+            )
 
         refill()
-        while flying:
-            finished, _ = wait(list(flying), return_when=FIRST_COMPLETED)
+        while net_flying or img_flying:
+            finished, _ = wait(
+                list(net_flying) + list(img_flying), return_when=FIRST_COMPLETED
+            )
             for f in finished:
-                entry = flying.pop(f)
-                got = f.result()
-                seq += 1
-                if got is None:
-                    holes += 1
-                    print(
-                        f"[{seq}/{total}] 空洞 {entry['title'][:40]} (留在队列下轮补)",
-                        flush=True,
-                    )
+                if f in net_flying:
+                    entry = net_flying.pop(f)
+                    got = f.result()
+                    if got is None:
+                        hole(entry, "正文")
+                        continue
+                    markdown, images, status = got
+                    # 转二级。这里立刻返回, 一级那个槽当场就空出来给下一篇
+                    img_flying[
+                        img.submit(resolve, site.fetcher.asset, markdown, images)
+                    ] = (entry, status)
                     continue
-                markdown, assets, status = got
+                entry, status = img_flying.pop(f)
+                out = f.result()
+                if out is None:
+                    hole(entry, "图片")
+                    continue
+                markdown, assets = out
+                seq += 1
+                streak = 0
                 # commit 逼出串行: .staging 与 index 的追加都只有一处
                 store.commit(dict(entry, status=status), markdown, assets)
                 print(
@@ -251,7 +302,8 @@ def drain(site, store, limit=None):
                 )
             refill()
     finally:
-        ex.shutdown(wait=False, cancel_futures=True)
+        net.shutdown(wait=False, cancel_futures=True)
+        img.shutdown(wait=False, cancel_futures=True)
     store.compact_pending()
     return seq - holes, holes
 

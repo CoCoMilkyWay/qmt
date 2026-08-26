@@ -46,9 +46,17 @@ _INTERVAL = 1.0 / (QPS * MARGIN)
 # 而超频的现象 (见 acquire) 极难归因, 早炸远比事后查强。进程死了锁由内核释放, 不会留残。
 _LOCK_PATH = f"/tmp/qmt-tunnel-{ORDER}.lock"
 
+# 惩罚窗口的熔断参数, 见 failed()。
+TRIP = 5
+PAUSE = 90.0
+PAUSE_CAP = 900.0
+
 _lock = threading.Lock()
 _next = 0.0
 _lock_fd = None
+_fails = 0
+_until = 0.0
+_pause = PAUSE
 
 
 def _grab(fd):
@@ -71,6 +79,7 @@ def _claim():
         f" 等它跑完, 或者先停掉它。"
     )
     os.truncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)  # 上面的 read 把偏移推到了 64, 不回零会写出一堆空洞
     os.write(fd, str(os.getpid()).encode())
     _lock_fd = fd
 

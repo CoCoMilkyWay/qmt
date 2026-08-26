@@ -17,12 +17,16 @@ MISSING 与 None 必须分开, 这是硬要求: index 里的是终态不会重�
         下轮重试, 不会停掉整个 run。
     图片 — 直连, 见各站 asset(): 隧道传二进制大响应同样会截断, 而封我们的是论坛不是图床。
 
+登录态只装在直连这条路上, 走隧道的请求一律匿名 (见 _auth)。登录是为了翻过列表的深页墙
+(聚宽匿名只能看 10 页), 读单篇文章不需要它 —— 实测匿名与带 cookie 拿到的正文和评论完全
+一致。而带着同一套 cookie 满天换出口 IP, 在风控眼里比固定 IP 更像盗号: 隧道换 IP 换来的
+匿名性, 会被一个固定的会话身份全部抵消。所以这条是规矩, 不是某个站的特例。
+
 限速跟着出口走, 不跟着站点走: 走隧道的请求由 tunnel.acquire() 按订单额度全局发牌
 (果仁和聚宽同一个订单, 各站按自己的 qps 发牌会加起来超频); 只有直连才用本站的 qps。
 
-子类只需给出 _headers (往 session 上装站点特有的头与 cookie) 与站点常量 (host / qps /
-workers / retries)。出网方式不做成运行时开关 — 开局定死、全程不变, 比「先试直连再降级」
-好推理得多。
+子类只需给出 _headers (公共头) 与 _auth (登录态), 外加站点常量 (host / qps / workers /
+retries)。出网方式不做成运行时开关 — 开局定死、全程不变, 比「先试直连再降级」好推理。
 """
 
 import threading
@@ -46,6 +50,9 @@ class Fetcher:
     # workers 卡「能藏住多少单请求延迟」, 与 qps 是两回事: 要把额度发满, 同时在飞的
     # 请求得有 qps × 单请求延迟 个。全直连的站点一律 1 — 本机就一个出口 IP。
     workers = 1
+    # 图片阶段的并发, 与 workers 分开 (见 sync.drain 的两级流水线): 图片直连、不限速,
+    # 慢的是对方图床, 多开几条同时抓就好, 但绝不能占 workers 的槽。
+    asset_workers = 16
     timeout = 20
     retries = 3
     backoff = 1.5
@@ -88,7 +95,14 @@ class Fetcher:
     # ---- 以下是两条路的实现, 站点不必也不该覆盖 ----
 
     def _headers(self, s):
-        """子类钩子: 往这条 session 上装站点特有的头与 cookie。"""
+        """子类钩子: 往这条 session 上装站点公共头 (UA 之类), 两条路都装。"""
+
+    def _auth(self, s):
+        """子类钩子: 往这条 session 上装登录态 (cookie), 只有直连那条路装。
+
+        走隧道的请求一律匿名 —— 理由见模块头: 登录只为翻列表深页, 读文章不需要, 而
+        固定会话 + 轮换 IP 比固定 IP 更招风控。
+        """
 
     def _direct_session(self):
         """直连留着 keep-alive; 每个线程一条, requests 的 Session 不保证跨线程安全。"""
@@ -96,6 +110,7 @@ class Fetcher:
         if s is None:
             s = requests.Session()
             self._headers(s)
+            self._auth(s)
             self._local.s = s
         return s
 
@@ -119,13 +134,14 @@ class Fetcher:
             time.sleep(wait)
 
     def _fetch(self, url, params, tunneled):
-        assert self.host is None or urlsplit(url).hostname == self.host, (
-            f"只对 {self.host} 出网: {url}"
-        )
+        assert (
+            self.host is None or urlsplit(url).hostname == self.host
+        ), f"只对 {self.host} 出网: {url}"
         if not self._tunneled(tunneled):
             return self._direct_session().get(url, params=params, timeout=self.timeout)
         # 隧道下每请求一条新连接: 复用连接就换不出新的出口 IP, 重试也就白重试了;
         # 顺便每请求一条独立 session, 几十个 worker 各发各的, 不碰同一个 Session。
+        # 这里刻意不调 _auth: 走隧道就得是干干净净的匿名请求。
         with requests.Session() as s:
             self._headers(s)
             s.headers["Connection"] = "close"
@@ -160,9 +176,7 @@ class Fetcher:
                 return r
             if r.status_code in self.missing_status:
                 return MISSING
-            assert not (
-                self._tunneled(tunneled) and r.status_code in tunnel.FATAL
-            ), (
+            assert not (self._tunneled(tunneled) and r.status_code in tunnel.FATAL), (
                 f"隧道拒绝服务: HTTP {r.status_code} — 账号或配置的问题, 查"
                 f" kuaidaili.com/doc/dev/tpshttpresponse"
             )
