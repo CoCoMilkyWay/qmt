@@ -13,9 +13,12 @@
 (代理抖动) 才是瞬时的, 换个 IP 再来。
 """
 
+import fcntl
+import os
 import threading
 import time
 
+ORDER = "928771545382112"
 HOST = "i969.kdltps.com"
 PORT = 15818
 USER = "t18771545382113"
@@ -23,6 +26,10 @@ PASS = "tlh1s2tx"
 
 URL = f"http://{USER}:{PASS}@{HOST}:{PORT}"
 PROXIES = {"http": URL, "https": URL}
+
+# 总开关, 所有站点共用一个 (走不走隧道是出口的属性, 不是站点的)。False = 全部直连,
+# 只在调试时用: 拿本机 IP 抓几万篇文章迟早被风控盯上, 果仁已经被封过一次。
+ENABLED = True
 
 # 订单额度就是 10 次/s。均匀发牌到这个速率时任意 60 秒窗口内最多 600 次, 官方那条
 # 「1 分钟不超过 600 次」自动满足, 不必再叠一个分钟窗口计数器。
@@ -34,8 +41,38 @@ QPS = 10
 MARGIN = 0.95
 _INTERVAL = 1.0 / (QPS * MARGIN)
 
+# 进程级的闸只管得住本进程, 而额度是整台机器共享的一份。所以再加一道跨进程独占:
+# 第一次出网时抢这把文件锁, 抢不到就当场炸 —— 两个进程各自守着 10 次/s 就是 20 次/s,
+# 而超频的现象 (见 acquire) 极难归因, 早炸远比事后查强。进程死了锁由内核释放, 不会留残。
+_LOCK_PATH = f"/tmp/qmt-tunnel-{ORDER}.lock"
+
 _lock = threading.Lock()
 _next = 0.0
+_lock_fd = None
+
+
+def _grab(fd):
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+
+
+def _claim():
+    global _lock_fd
+    if _lock_fd is not None:
+        return
+    fd = os.open(_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
+    holder = os.read(fd, 64).decode(errors="replace").strip() or "?"
+    assert _grab(fd), (
+        f"隧道订单 {ORDER} 已被 pid {holder} 占着 (锁 {_LOCK_PATH})。额度是整个订单的"
+        f" {QPS} 次/s, 两个进程一起跑就是两倍, 超频会招来约 80 秒全量 RST。"
+        f" 等它跑完, 或者先停掉它。"
+    )
+    os.truncate(fd, 0)
+    os.write(fd, str(os.getpid()).encode())
+    _lock_fd = fd
 
 
 def acquire():
@@ -46,13 +83,12 @@ def acquire():
     隧道最不能忍的。
 
     超频的代价远不止被拒这一次: 实测瞬时打出 40 个并发请求后, 隧道会连续约 80 秒对
-    所有请求 (哪怕之后是单发) 直接 RST, 期间在抓的文章成批变空洞, 而且现象看起来像
-    「目标站封了隧道出口 IP」, 极难归因。宁可发慢点。
-
-    注意这个闸只管得住本进程。同时开两个 run.py 就是 2 × 10 次/s, 照样超频。
+    所有请求 (哪怕之后是单发) 直接 RST 或截断响应 (IncompleteRead), 期间在抓的文章
+    成批变空洞, 而且现象看起来像「目标站封了隧道出口 IP」, 极难归因。宁可发慢点。
     """
     global _next
     with _lock:
+        _claim()
         slot = max(time.monotonic(), _next)
         _next = slot + _INTERVAL
     wait = slot - time.monotonic()

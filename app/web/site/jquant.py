@@ -20,8 +20,9 @@ uniqueKey 也照吃, 所以全程只认 uniqueKey。userId / euid 同样是每�
 web/cookies/jquant.txt, 一行一条 Name=Value, # 开头是注释, 过期了改这个文件。
 拿法: 浏览器登录后 F12 → Application → Storage → Cookies → www.joinquant.com。
 
-出网走隧道 (与果仁同一个订单): 页面请求每次换出口 IP, 图片直连。限速不在本文件,
-由 common/tunnel.acquire() 全局统一发牌 —— 额度是订单的, 两个站加起来才 10 次/s。
+出网选路与限速一律照 common/net.py 的规矩 (列表直连、文章走隧道、图片直连), 本文件
+只挑对方法: 列表用 list_json, 正文与评论用 post_json。聚宽这边尤其不能让列表走隧道 ——
+limit=200 一页约 8KB (gzip), 实测会被隧道截成 IncompleteRead。
 """
 
 import os
@@ -29,9 +30,10 @@ import time
 
 import requests
 
-from ..common import mdimg, tunnel
+from ..common import mdimg
 from ..common.assets import collector
 from ..common.net import MISSING, Fetcher
+from ..common.tunnel import ENABLED as TUNNEL
 
 UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -43,31 +45,24 @@ COOKIE_PATH = os.path.join(
 )
 PAGE_SIZE = 200
 
-# 走隧道换 IP, 与果仁同一个订单。直连本机 IP 在 10 次/s 下迟早被风控盯上 (果仁已被封
-# 过一次)。出网方式开局定死、全程不变。
-USE_TUNNEL = True
-
-# 图片直连不走隧道: 隧道传二进制大响应会截断 (IncompleteRead), 这是果仁踩过的坑,
-# 跟站点无关。聚宽图床在 cdn.joinquant.com, 直连没被封过也不值得为它占隧道额度。
+# 图片直连 (与 common/net.py 的规矩一致), 也不走 _pace 限速: 图床不是论坛, 不会因为
+# 并发盯上本机 IP。聚宽图床在 cdn.joinquant.com。
 ASSET_TIMEOUT = 15
 ASSET_RETRIES = 2
 BACKOFF = 1.5
 
 
 class Client(Fetcher):
+    host = "www.joinquant.com"
     timeout = 40
-    # 只在直连时生效: 走隧道时限速由 tunnel.acquire() 全局管 (见 _pace)。直连的
-    # 天花板是「别被风控盯上」而不是吞吐。
+    # 列表是串行翻页, 3 次/s 足够 205 页, 也不至于让本机 IP 显眼。
     qps = 3
     # 隧道单请求实测 2~4s (换 IP + 转发), 聚宽一篇还要连发 detail + 多页评论。要把
     # 10 次/s 发满, 同时在飞的请求得有 qps × 延迟 ≈ 30 个, 所以给 30。
-    # 直连时本机就一个出口 IP, 并发只会更显眼, 老老实实 1。
-    workers = 30 if USE_TUNNEL else 1
-    # 隧道下重试就是换一个 IP 再来, 多给几次; 直连换不掉 IP, 3 次够。
-    retries = 5 if USE_TUNNEL else 3
-    # 隧道下 403 多半是这个出口 IP 撞了风控, 换 IP 就好, 不能当永久缺失 (否则好帖子
-    # 被写成墓碑)。直连时 403 才是稳定的拒绝 (图床防盗链)。
-    missing_status = (404,) if USE_TUNNEL else (403, 404)
+    # 全直连时本机就一个出口 IP, 并发只会更显眼, 老老实实 1。
+    workers = 30 if TUNNEL else 1
+    # 隧道下重试就是换一个 IP 再来, 多给几次; 全直连换不掉 IP, 3 次够。
+    retries = 5 if TUNNEL else 3
 
     def __init__(self):
         super().__init__()
@@ -89,72 +84,22 @@ class Client(Fetcher):
         assert cookies, f"{COOKIE_PATH} 里没有有效 cookie 行"
         return cookies
 
-    def _set_headers(self, s):
+    def _headers(self, s):
+        # cookie 每条新 session 都得灌一遍 (隧道下每请求一条新 session), 跟连接无关。
         s.headers["User-Agent"] = UA
         s.headers["X-Requested-With"] = "XMLHttpRequest"
         s.headers["Accept"] = "application/json, text/plain, */*"
         s.headers["Referer"] = BASE + "/view/community/list"
         for k, v in self._cookies.items():
-            s.cookies.set(k, v, domain="www.joinquant.com")
+            s.cookies.set(k, v, domain=self.host)
 
     def desc(self):
-        route = (
-            f"隧道 {tunnel.HOST}:{tunnel.PORT} (每请求换 IP) "
-            f"{tunnel.QPS} 次/s (订单额度, 全站共享)"
-            if USE_TUNNEL
-            else f"直连 (本机 IP) {self.qps} 次/s"
-        )
-        return (
-            f"出网: {route} {self.workers} 并发; "
-            f"已载入 {len(self._cookies)} 条 cookie"
-        )
-
-    def _pace(self):
-        """走隧道时把限速交给 tunnel: 额度属于订单, 不属于本站。"""
-        if USE_TUNNEL:
-            tunnel.acquire()
-        else:
-            super()._pace()
-
-    def _direct_session(self):
-        """直连留着 keep-alive; 每个线程一条, requests 的 Session 不保证跨线程安全。"""
-        s = getattr(self._local, "s", None)
-        if s is None:
-            s = requests.Session()
-            self._set_headers(s)
-            self._local.s = s
-        return s
-
-    def _fetch(self, url, params):
-        # 隧道下每请求一条新连接: 复用连接就换不出新的出口 IP, 重试也就白重试了;
-        # 顺便每请求独立 session, 30 个 worker 各发各的, 不碰同一个 Session 对象。
-        # cookie 在 _cookies 里, 每条新 session 都灌一遍, 跟连接无关。
-        if not USE_TUNNEL:
-            return self._direct_session().get(url, params=params, timeout=self.timeout)
-        with requests.Session() as s:
-            self._set_headers(s)
-            s.headers["Connection"] = "close"
-            s.proxies.update(tunnel.PROXIES)
-            return s.get(url, params=params, timeout=self.timeout)
-
-    def _check_status(self, r):
-        assert not (USE_TUNNEL and r.status_code in tunnel.FATAL), (
-            f"隧道拒绝服务: HTTP {r.status_code} — 账号或配置的问题, 查"
-            f" kuaidaili.com/doc/dev/tpshttpresponse"
-        )
-
-    def _retry_wait(self, attempt, status):
-        # 隧道下状态码也进重试且不必退避: 每请求换 IP ⇒ 重试就是换一个 IP 再来,
-        # 撞上被风控的出口 (403) 换几次就过。直连只对瞬时故障重试并指数退避。
-        if USE_TUNNEL:
-            return 0.0
-        return super()._retry_wait(attempt, status)
+        return f"{super().desc()}; 已载入 {len(self._cookies)} 条 cookie"
 
     def asset(self, url):
         """→ (bytes, ctype) | (MISSING, "") 图没了 | (None, "") 这次没抓到。
 
-        图片直连不走隧道 (见上面的 ASSET 注释), 也不走 _pace 限速: 图床不是论坛,
-        不会因为并发盯上本机 IP。抓不到就保留原链, 不卡整篇。
+        图片直连、不限速 (见上面的 ASSET 注释)。抓不到就保留原链, 不卡整篇。
         """
         last = None
         for attempt in range(ASSET_RETRIES + 1):
@@ -227,7 +172,7 @@ class Site:
 
     def list_page(self, page, tag):
         """翻页是主流程的地基, 抓不到就当场炸: 拿半张列表比不拿更糟。"""
-        j = self.fetcher.json(
+        j = self.fetcher.list_json(
             f"{BASE}/community/post/listV2",
             {"limit": PAGE_SIZE, "page": page, "cate": tag, "type": "isNewPublish"},
         )
@@ -255,7 +200,7 @@ class Site:
         聚宽对已删除的帖子返回 HTTP 200 + 业务错误码, 所以业务码不对 = 永久缺失,
         只有传输层失败才是「这次没抓到」。这条映射是墓碑与空洞的分界, 别弄反。
         """
-        j = self.fetcher.json(BASE + path, params)
+        j = self.fetcher.post_json(BASE + path, params)
         if j is MISSING or j is None:
             return j
         if j.get("code") != "00000":

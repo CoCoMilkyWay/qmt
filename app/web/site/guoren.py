@@ -6,26 +6,23 @@
     GET /forum/post/detail?pid=<pid>          元信息 (作者/时间/附件/标签)
     GET /forum/comment/list?pid=<pid>&page=n  评论, 每页 20
 
-出网两条路, 由请求类型决定, 全程不变:
-    页面 (列表/正文/detail/评论) — 走隧道: 每请求换一个出口 IP, 防本机 IP 被封。
-                                  限速由 common/tunnel.acquire() 全局统一发牌 ——
-                                  额度是订单的, 果仁与聚宽加起来才 10 次/s。
-    图片 — 一律直连: 隧道传二进制大响应会截断 (IncompleteRead), 直连又快
-           (0.08s vs 1.65s) 又不占隧道额度。封我们的是果仁论坛, 不是图床。
+出网选路与限速一律照 common/net.py 的规矩 (列表直连、文章走隧道、图片直连), 本文件
+只挑对方法: 列表用 list_json, 正文/detail/评论用 post_get 与 post_json。图片直连还
+额外快得多 (0.08s vs 隧道 1.65s) —— 封我们的是果仁论坛, 不是图床。
 
 列表排序键是 max(create_time, last_reply_time) 倒序: 新帖必然在最前面, 老帖被新回复
 顶上来也只会往前挪。已入库的帖子视为终态 (不因新回复重抓), 所以增量只需按 pid 去重。
 """
 
 import time
-from urllib.parse import urlsplit
 
 import requests
 from lxml import html as lxml_html
 
-from ..common import html2md, tunnel
+from ..common import html2md
 from ..common.assets import collector
 from ..common.net import MISSING, Fetcher
+from ..common.tunnel import ENABLED as TUNNEL
 
 UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -34,10 +31,6 @@ UA = (
 HOST = "guorn.com"
 BASE = f"https://{HOST}"
 
-# 走不走隧道。True = 快代理隧道; False = 本机直连。没做成命令行开关也不做运行时
-# 探测: 出网方式开局定死、全程不变, 比「先试直连再降级」好推理得多。
-USE_TUNNEL = True
-
 # 图片直连: 快, 也不值多重试 — 抓不到就保留原链, 不卡整篇。
 ASSET_TIMEOUT = 10
 ASSET_RETRIES = 2
@@ -45,69 +38,21 @@ BACKOFF = 1.5
 
 
 class Client(Fetcher):
+    host = HOST
     # 隧道偶尔撞上慢出口, 值得等一会儿; 但 30s × 重试 5 次 = 一个 worker 被一个请求
     # 占住 3 分钟, 换 IP 重来比死等划算。
     timeout = 15
-    # 只在直连时生效: 走隧道时限速由 tunnel.acquire() 全局管 (见 _pace)。直连的
-    # 天花板是「别被风控盯上」而不是吞吐 — 本机 IP 已经被封过一次。
+    # 只卡直连的列表翻页: 果仁列表一页 20 条、全站 65 页, 2 次/s 够了, 也不至于让本机
+    # IP 显眼 — 它已经被封过一次。
     qps = 2
     # 实测隧道单请求 ~0.78s (直连 ~0.08s), 要把 10 次/s 发满至少得 8 个请求同时在飞。
-    # 直连永远是 1: 本机就一个出口 IP, 并发只会让它更显眼。
-    workers = 16 if USE_TUNNEL else 1
-    # 隧道下重试就是「换一个 IP 再来」, 多给几次; 直连重试换不掉出口 IP, 3 次够了。
-    retries = 5 if USE_TUNNEL else 3
-    # 403 在隧道下是这个出口 IP 撞了风控, 不是永久缺失: 当成缺失会把好帖子写成墓碑。
-    missing_status = (404,)
+    # 全直连时永远是 1: 本机就一个出口 IP, 并发只会让它更显眼。
+    workers = 16 if TUNNEL else 1
+    # 隧道下重试就是「换一个 IP 再来」, 多给几次; 全直连换不掉出口 IP, 3 次够了。
+    retries = 5 if TUNNEL else 3
 
-    def desc(self):
-        route = (
-            f"隧道 {tunnel.HOST}:{tunnel.PORT} (每请求换 IP) "
-            f"{tunnel.QPS} 次/s (订单额度, 全站共享)"
-            if USE_TUNNEL
-            else f"直连 (本机 IP) {self.qps} 次/s"
-        )
-        return f"出网: 页面走{route} {self.workers} 并发; 图片直连"
-
-    def _pace(self):
-        """走隧道时把限速交给 tunnel: 额度属于订单, 不属于本站。"""
-        if USE_TUNNEL:
-            tunnel.acquire()
-        else:
-            super()._pace()
-
-    def _direct_session(self):
-        """直连留着 keep-alive; 每个线程一条, requests 的 Session 不保证跨线程安全。"""
-        s = getattr(self._local, "s", None)
-        if s is None:
-            s = requests.Session()
-            s.headers["User-Agent"] = UA
-            self._local.s = s
-        return s
-
-    def _fetch(self, url, params):
-        """隧道下每请求一条新连接: 复用连接就换不出新的出口 IP, 重试也就白重试了。"""
-        assert urlsplit(url).hostname == HOST, f"只对 {HOST} 出网: {url}"
-        if not USE_TUNNEL:
-            return self._direct_session().get(url, params=params, timeout=self.timeout)
-        with requests.Session() as s:
-            s.headers["User-Agent"] = UA
-            s.headers["Connection"] = "close"
-            s.proxies.update(tunnel.PROXIES)
-            return s.get(url, params=params, timeout=self.timeout)
-
-    def _check_status(self, r):
-        assert not (USE_TUNNEL and r.status_code in tunnel.FATAL), (
-            f"隧道拒绝服务: HTTP {r.status_code} — 账号或配置的问题, 查"
-            f" kuaidaili.com/doc/dev/tpshttpresponse"
-        )
-
-    def _retry_wait(self, attempt, status):
-        # 隧道下状态码也进重试且不必退避: 每请求换 IP ⇒ 重试就是换一个 IP 再来,
-        # 撞上被果仁拉黑的出口 (403) 换几次就过。直连只对瞬时故障重试并指数退避:
-        # 同一个 IP 上状态码是真实信号。
-        if USE_TUNNEL:
-            return 0.0
-        return super()._retry_wait(attempt, status)
+    def _headers(self, s):
+        s.headers["User-Agent"] = UA
 
     def asset(self, url):
         """抓一张图, 直连不走隧道。任何 host 都行 — 封我们的是果仁论坛, 不是图床。
@@ -204,7 +149,9 @@ class Site:
 
     def list_page(self, page, tag):
         """翻页是串行主流程的地基, 抓不到就当场炸: 拿半张列表比不拿更糟。"""
-        j = self.fetcher.json(f"{BASE}/forum/post/list", {"page": page, "tag": tag})
+        j = self.fetcher.list_json(
+            f"{BASE}/forum/post/list", {"page": page, "tag": tag}
+        )
         assert (
             j is not MISSING and j is not None
         ), f"列表第 {page} 页 (tag={tag}) 抓不到"
@@ -218,7 +165,7 @@ class Site:
 
     def _json(self, path, params=None):
         """→ data | MISSING (没了) | None (这次没抓到)。status 不是 ok 就是接口变了。"""
-        j = self.fetcher.json(BASE + path, params)
+        j = self.fetcher.post_json(BASE + path, params)
         if j is MISSING or j is None:
             return j
         assert j.get("status") == "ok", f"{path} -> {j.get('status')}"
@@ -256,7 +203,7 @@ class Site:
         帖子被删掉 (404) 是终态, 立墓碑 status="deleted"; 只有「这次没抓到」才作空洞。
         抓完不落盘, 字节先攒在内存里, 由主线程串行提交 — 本函数可并发, 不碰 store。
         """
-        r = self.fetcher.get(f"{BASE}/forum/post/{entry['pid']}")
+        r = self.fetcher.post_get(f"{BASE}/forum/post/{entry['pid']}")
         if r is MISSING:
             return _assemble(entry, "_(帖子已删除或不可见)_", "", ""), {}, "deleted"
         if r is None:
